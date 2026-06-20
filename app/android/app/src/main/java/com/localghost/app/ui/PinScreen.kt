@@ -10,6 +10,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.localghost.app.ui.theme.*
 
 @Composable
 fun PinScreen(
@@ -19,18 +20,19 @@ fun PinScreen(
 ) {
     var pin by remember { mutableStateOf("") }
 
-    Scaffold { pad ->
+    GhostScaffold { pad ->
         Column(
-            Modifier.fillMaxSize().padding(pad).padding(24.dp),
+            Modifier.fillMaxSize().padding(pad).padding(32.dp),
             verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Text("Enter code")
-            Spacer(Modifier.height(16.dp))
+            SectionLabel("AUTH_REQUIRED", Modifier.align(Alignment.Start))
+            Spacer(Modifier.height(8.dp))
+            Text("ENTER CODE", color = GhostText, style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(24.dp))
 
-            // Masked, single field. We deliberately do NOT show a digit count —
-            // length must not leak to a shoulder-surfer, and prefixes like 1223
-            // vs 122338 only work because nothing auto-submits.
+            // Masked, variable length. No digit count rendered — length must not leak,
+            // and prefixes (1223 vs 122338) only work because nothing auto-submits.
             OutlinedTextField(
                 value = pin,
                 onValueChange = { next -> if (next.all(Char::isDigit)) pin = next },
@@ -38,30 +40,34 @@ fun PinScreen(
                 enabled = !busy,
                 visualTransformation = PasswordVisualTransformation(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
-                modifier = Modifier.fillMaxWidth()
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = TerminalGreen,
+                    unfocusedTextColor = TerminalGreen,
+                    cursorColor = TerminalGreen,
+                    focusedBorderColor = TerminalGreen,
+                    unfocusedBorderColor = GhostBorder,
+                    focusedContainerColor = VoidLighter,
+                    unfocusedContainerColor = VoidLighter,
+                ),
+                modifier = Modifier.fillMaxWidth(),
             )
 
             Spacer(Modifier.height(24.dp))
-
-            Button(
-                onClick = { onSubmit(pin); pin = "" },
-                enabled = pin.isNotEmpty() && !busy,
-                modifier = Modifier.fillMaxWidth()
-            ) { Text("OK") }
+            GhostButton("OK", { onSubmit(pin); pin = "" },
+                enabled = pin.isNotEmpty() && !busy, modifier = Modifier.fillMaxWidth())
 
             if (busy) {
-                Spacer(Modifier.height(24.dp))
-                // The uniform wait. Every code — real, decoy, wipe, garbage — shows
-                // this identical screen for the box's fixed-deadline window, so mount
-                // time leaks nothing. The text is deliberately generic.
-                CircularProgressIndicator()
-                Spacer(Modifier.height(8.dp))
-                Text("Loading…")
+                Spacer(Modifier.height(32.dp))
+                // Uniform wait — identical for real / decoy / wipe / garbage.
+                CircularProgressIndicator(color = TerminalGreen, strokeWidth = 2.dp)
+                Spacer(Modifier.height(12.dp))
+                Text("> LOADING", color = TerminalGreen, style = MaterialTheme.typography.bodyMedium)
             }
 
             error?.let {
-                Spacer(Modifier.height(16.dp))
-                Text(it, textAlign = TextAlign.Center)
+                Spacer(Modifier.height(24.dp))
+                Text("! $it", color = Warning,
+                    style = MaterialTheme.typography.bodyMedium, textAlign = TextAlign.Center)
             }
         }
     }

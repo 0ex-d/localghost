@@ -1,5 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-
-    <style name="Theme.LocalGhost" parent="android:Theme.Material.Light.NoActionBar" />
+    <!-- Window/launch theme only. In-app styling is the Compose LocalGhostTheme.
+         Dark parent + void window background = no white flash on cold start. -->
+    <style name="Theme.LocalGhost" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/lg_void</item>
+        <item name="android:statusBarColor">@color/lg_void</item>
+        <item name="android:navigationBarColor">@color/lg_void</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
 </resources>
