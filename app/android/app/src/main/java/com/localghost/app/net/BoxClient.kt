@@ -15,6 +15,10 @@ import java.io.InputStream
 
 data class PendingNotification(val daemonId: String, val title: String, val body: String)
 
+/** A saved conversation. Lives on the box (synthd); the phone lists + loads, holds the active
+ *  one in memory only. */
+data class Conversation(val id: String, val title: String, val updatedLabel: String, val messageCount: Int)
+
 /** A PIN's behaviour when entered at the lock screen. */
 enum class PinBehaviour { MOUNT_REAL, MOUNT_DECOY, WIPE }
 
@@ -110,6 +114,7 @@ object BoxClient {
     fun chat(
         @Suppress("UNUSED_PARAMETER") history: List<Message>,
         prompt: String,
+        @Suppress("UNUSED_PARAMETER") convId: String?,
         @Suppress("UNUSED_PARAMETER") attachments: List<Attachment> = emptyList(),
         @Suppress("UNUSED_PARAMETER") caps: ChatCapabilities = ChatCapabilities(),
     ): Flow<ChatChunk> = flow {
@@ -126,6 +131,35 @@ object BoxClient {
         for (word in reply.split(" ")) { emit(ChatChunk.Token("$word ")); delay(35) }
         emit(ChatChunk.Done)
     }
+
+    // --- conversations (history, stored on the box) ---
+
+    suspend fun conversations(@Suppress("UNUSED_PARAMETER") ctx: Context): List<Conversation> {
+        delay(150)
+        return listOf(
+            Conversation("c1", "Rome trip recap", "2h ago", 8),
+            Conversation("c2", "boat refit budget", "yesterday", 14),
+            Conversation("c3", "diving log questions", "3 days ago", 5),
+        )
+    }
+
+    /** Load a conversation's messages. STUB returns a tiny transcript. */
+    suspend fun loadConversation(@Suppress("UNUSED_PARAMETER") id: String): List<Message> {
+        delay(120)
+        return listOf(
+            Message(Message.Role.USER, "what did I do in Rome?"),
+            Message(Message.Role.GHOST,
+                "You spent an evening near the river in Trastevere, then a long dinner.",
+                memoriesUsed = listOf("Rome, with Cristina, April")),
+        )
+    }
+
+    /** Create a new (empty) conversation, returns its id. */
+    suspend fun createConversation(@Suppress("UNUSED_PARAMETER") ctx: Context): String {
+        delay(80); return "c" + System.currentTimeMillis()
+    }
+
+    suspend fun deleteConversation(@Suppress("UNUSED_PARAMETER") id: String) { delay(80) }
 
     // --- harness status ---
     suspend fun lifeContext(@Suppress("UNUSED_PARAMETER") ctx: Context): LifeContext {
@@ -244,11 +278,19 @@ object BoxClient {
     /** Models the box offers for the phone to run. STUB. Real: mTLS GET to the box registry. */
     suspend fun availableModels(@Suppress("UNUSED_PARAMETER") ctx: Context): List<PhoneModel> {
         delay(150)
+        // The box (ghost.secd / ghost.synthd) advertises the full set it can serve to the
+        // phone — small enough to run locally. Real impl: mTLS GET to the box model registry.
         return listOf(
             PhoneModel("gemma4-e2b-q4", "Gemma 4 E2B (Q4_K_M)",
-                "small, on-phone · generic questions only", 2_600_000_000L, null),
+                "small · generic questions only", 2_600_000_000L, null),
             PhoneModel("qwen25-1_5b-q4", "Qwen2.5 1.5B (Q4_K_M)",
-                "tiny, fast on phone", 1_100_000_000L, null),
+                "tiny · fast on phone", 1_100_000_000L, null),
+            PhoneModel("qwen25-3b-q4", "Qwen2.5 3B (Q4_K_M)",
+                "small · better reasoning", 2_100_000_000L, null),
+            PhoneModel("phi4-mini-q4", "Phi-4 mini (Q4_K_M)",
+                "small · strong for size", 2_400_000_000L, null),
+            PhoneModel("llama32-3b-q4", "Llama 3.2 3B (Q4_K_M)",
+                "small · general purpose", 2_000_000_000L, null),
         )
     }
 

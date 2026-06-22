@@ -409,3 +409,127 @@ mistake. DrawerPanel never used them and its call didn't pass them → 8 "no val
 already has + uses them). Also dropped a redundant fully-qualified ModelRowState qualifier in
 MainShell and a redundant FQ RectangleShape in GlossaryScreen. ("Typo: LOCALGHOST" is just the
 IDE spellchecker flagging the brand wordmark — intentional, add to dictionary to silence.)
+
+## Update — real-device fixes (from S26 screenshots)
+It compiles and runs. Fixed the on-device issues:
+1. RE-LOGIN ON PICKER (critical): pressing + / picking an image backgrounded the app, onStop
+   fired tearDownCache()+lock, so returning landed on the lock screen. Added an expectingResult
+   guard set before any in-app picker/camera launch (launchForResult helper) and cleared in
+   onResume; onStop skips the lock when expectingResult is true.
+2. SYSTEM INSETS: content drew under the status/nav bars. The content Box now applies
+   pad.calculateBottomPadding() so list screens and the chat input clear the nav bar; top inset
+   already on the Column. Chat input no longer clipped.
+3. LOCALGHOST wordmark wrapped to two lines on the lock screen (displayLarge too wide). Now an
+   auto-fitting single line: BoxWithConstraints computes font size (28–56sp) from width,
+   maxLines=1, softWrap=false.
+4. PIN keypad too big: key size capped at 84dp, keypad width cap 300dp (was 340), OK 52dp.
+5. CHAT COMPOSER redesign: one rounded 24dp pill (BasicTextField, no Material box) with a
+   circular + on the left and a circular send/stop on the right — filled terminal-green when
+   actionable (↑), stop (■) while streaming, grey when empty. Empty state top-aligned instead of
+   floating mid-screen.
+
+## Update — model pill in the composer (the model switcher)
+A pill above the chat input shows the active brain and switches it on tap (replacing the buried
+"use on-phone model" toggle as the primary control).
+- States: "▪ the box" (green) = box engine, synthd, full life-index; "◈ phone · <name>" (amber)
+  = on-phone model, generic answers. Label auto-reflects box-unreachable fallback.
+- Tap → dropdown: "the box · synthd (full context)" + each installed on-phone model
+  ("phone · <name>"); if none installed, "> get an on-phone model" routes to MODELS.
+- Picking the box clears force-local; picking a phone model activates it + sets force-local.
+- Wiring: ChatScreen gains brainLabel/brainIsBox/phoneModels/onPickBox/onPickPhoneModel + a
+  local nav to MODELS. MainActivity derives brainIsBox = !forceLocalMode && boxReachable,
+  brainLabel from the active model name; boxReachable refreshed on unlock.
+
+## Update — permanent escape-hatch pins + layout polish
+PIN logic:
+- WIPE and MOUNT_DECOY codes are now permanent: the Codes screen hides REMOVE for them and
+  shows "permanent — change only". Only MOUNT_REAL codes are removable. A persona can never be
+  stripped of its panic options under coercion.
+- Copy + glossary updated: "Decoy and wipe codes can be changed but never deleted. A wipe code
+  entered from a decoy erases only that decoy."
+- secd MUST ENFORCE (box-side, not just UI): reject removePin for any WIPE/MOUNT_DECOY code;
+  a WIPE code is scoped to the mounted persona — entered from a decoy it crypto-erases only that
+  decoy's volume, never the real persona (no cross-persona key access).
+
+Layout:
+- enableEdgeToEdge now uses explicit transparent SystemBarStyle.dark for both bars, so the
+  Android 3-button/gesture nav bar no longer renders a washed-out scrim over the black app;
+  light icons over the dark UI.
+- More breathing room: TopBar vertical padding 14→18dp, horizontal 16→20dp, +4dp above the
+  bar beyond the status-bar inset; chat empty-state top 32→40dp.
+
+## Correction — WIPE is GLOBAL (supersedes earlier per-decoy note)
+WIPE is a single global panic action: entered from ANY persona (real or decoy) it erases
+EVERYTHING — every persona at once. No per-decoy wipe. Rationale: under duress there's no time
+to open and wipe each persona individually; one burn code burns it all.
+- secd implementation: WIPE destroys the master key-encrypting key (the root KEK that every
+  persona key is wrapped under), so all volumes become noise simultaneously WITHOUT the session
+  needing to hold the individual persona keys. This preserves read-time cross-persona isolation
+  (a mounted session still can't read another persona) while allowing one-shot total destruction.
+- Still permanent: WIPE/DECOY codes can be changed, never deleted.
+- UI/copy updated everywhere: Codes labels + add-pin dialog ("WIPE — erases EVERYTHING, all
+  personas"), Codes header ("the wipe code is global — erases every persona at once"), Settings
+  WIPE EVERYTHING + its confirm dialog ("global … every persona becomes noise at once"),
+  glossary Code-behaviours term (both registers).
+
+## Update — chat polish (multi-select, pill-in-composer, readable responses, full-access banner)
+1. MULTI-SELECT: image/file/voice pickers now use GetMultipleContents — pick several at once;
+   each is attached + ingested (deduped) as before.
+2. PILL INSIDE COMPOSER: the model pill moved from a separate row above the input into the
+   rounded composer container, as a top row above the + / field / send row.
+3. RESPONSE READABILITY: model response body is now soft grey (GhostText #E0E0E0) instead of
+   bright terminal-green — easy on the eyes on the dark ground. Injected memories collapse
+   behind a green "+ N memories" toggle; expanding shows the list in white. (Was an always-on
+   green "◇ retrieved: …" line.)
+4. HOME BANNER: PermissionBanner reworded to grant FULL read access — "Allow full read access
+   so the daemons can index your photos, videos and files", action "ALLOW ALL"; blocked variant
+   points to settings. Shows across the app including the chat home.
+
+## Fix — settings cutoff + rotation relock
+1. SETTINGS (and ABOUT) cut off at the bottom under the nav bar: both were plain non-scrolling
+   Columns. Added verticalScroll(rememberScrollState()) + bottom padding so content scrolls and
+   clears the nav bar. (Other screens already use LazyColumn/scroll.)
+2. ROTATION RELOCK: a portrait<->landscape change recreated the Activity → onStop fired →
+   tearDownCache()+lock, forcing re-auth. Declared android:configChanges=
+   "orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|density" on
+   MainActivity so the Activity handles rotation itself (Compose recomposes for the new size);
+   no recreation, no relock. Genuine backgrounding/低-memory kills still relock, which is correct.
+
+## Update — chat history + Harness→BOX STATUS rename
+RENAME: "Harness" is now "BOX STATUS" in the UI (drawer label + screen header). Enum value
+Dest.HARNESS kept internal to avoid a wide rename.
+
+CHAT HISTORY (conversations live on the box / synthd; phone lists + loads, holds active in memory):
+- BoxClient: new Conversation(id,title,updatedLabel,messageCount) type +
+  conversations()/loadConversation(id)/createConversation()/deleteConversation(id); chat() now
+  takes a convId so the box threads the message into the right conversation.
+- MainActivity: conversations + activeConvId state, loaded on unlock; selectConversation (loads
+  messages), newConversation (clears + creates), deleteConversation; tearDownCache clears them;
+  chat() passes activeConvId.
+- MainShell/Drawer: "RECENT CHATS" section in the drawer (title, updatedLabel·msgs, active in
+  green, ✕ to delete, "＋ new"); drawer column made scrollable. TopBar shows a ＋ new-chat action
+  on the Chat screen. Tapping a chat loads it and routes to Chat.
+
+## Update — chats search/scroll + settings fixes
+1. WI-FI TOGGLE HANG: setMobileSync ran SyncWorker.schedule() synchronously on the main thread,
+   and allowMobileSync was read fresh each recompose (non-reactive) so the toggle stalled. Now
+   allowMobileSyncState is mutableStateOf (instant UI update) and the WorkManager reschedule +
+   box write run on Dispatchers.IO. No hang.
+2. CONFUSING NOTIFICATION TOGGLE: "mute daemons / active" was ambiguous. Relabelled to
+   "daemon notifications" with switch ON = active (intuitive), sublabel "active — daemons can
+   notify you" / "muted — daemons stay silent". checked=!muted, onChange inverts. Default ON
+   (isMuted defaults false). Sync sublabel also clarified ("off — Wi-Fi only (recommended)").
+   Defaults confirmed correct already: Wi-Fi-only on (allowMobileSync default false),
+   notifications on (isMuted default false).
+3. FULL CHATS SCREEN: new Dest.CHATS + ChatsScreen.kt — a search box (live filter by title) over
+   a scrolling LazyColumn of ALL conversations; active chat highlighted green; ✕ to delete; ＋ new.
+   Drawer RECENT CHATS now caps at 5 with a "see all chats →" link to the CHATS screen.
+
+## Fix — chat() arg order (compile error) + minor cleanups
+- COMPILE ERROR: after adding convId to BoxClient.chat(history, prompt, convId, attachments,
+  caps), the call still passed (…, atts, activeConvId, …) so List<Attachment> went into the
+  convId:String? slot and vice-versa. Reordered to (messages, text, activeConvId, atts, chatCaps).
+- permTick: mutableStateOf(0) -> mutableIntStateOf(0) (avoids Int autoboxing; IDE hint).
+- BoxSettings: imported and the two inline fully-qualified uses shortened (redundant-qualifier).
+- The "Typo" warnings (msgs, atts, mems, dedups, fileprovider) are IDE spellchecker noise on
+  intentional identifiers — not errors; add to dictionary to silence.

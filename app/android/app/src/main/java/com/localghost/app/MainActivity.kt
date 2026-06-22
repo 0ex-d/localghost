@@ -11,16 +11,19 @@ import android.net.NetworkCapabilities
 import android.net.Uri
 import android.provider.Settings
 import android.content.Intent
+import android.graphics.Color as AndroidColor
 import android.os.Bundle
 import android.os.VibrationEffect
 import android.os.VibratorManager
 import android.os.CancellationSignal
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.setValue
@@ -55,6 +58,8 @@ import com.localghost.app.ui.Loadable
 import com.localghost.app.ui.PermState
 import com.localghost.app.net.ChatCapabilities
 import com.localghost.app.net.Connector
+import com.localghost.app.net.BoxSettings
+import com.localghost.app.net.Conversation
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import com.localghost.app.local.LocalModel
@@ -68,6 +73,7 @@ import com.localghost.app.ui.PinScreen
 import com.localghost.app.ui.SyncUiState
 import com.localghost.app.ui.theme.LocalGhostTheme
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 private sealed interface Screen {
@@ -88,11 +94,16 @@ class MainActivity : ComponentActivity() {
     private var streaming by mutableStateOf(false)
     private var chatJob: Job? = null
     private var pendingAttachments by mutableStateOf<List<Attachment>>(emptyList())
-    private var permTick by mutableStateOf(0)   // bump to recompute PermState on resume
+    private var permTick by mutableIntStateOf(0)   // bump to recompute PermState on resume
+    private var expectingResult = false   // true while an in-app picker/camera is foregrounded
     private var chatCaps by mutableStateOf(ChatCapabilities())
     private var forceLocalMode by mutableStateOf(false)   // manual override
     private var localModeActive by mutableStateOf(false)  // box-down or forced, shown in chat
     private var localModelPresent by mutableStateOf(false)
+    private var boxReachable by mutableStateOf(true)
+    private var conversations by mutableStateOf<List<Conversation>>(emptyList())
+    private var activeConvId by mutableStateOf<String?>(null)
+    private var allowMobileSyncState by mutableStateOf(false)
     private val downloadProgress = mutableStateMapOf<String, Pair<Long, Long>>()
     private var installedModels by mutableStateOf<List<String>>(emptyList())
     private var activeModel by mutableStateOf<String?>(null)
@@ -132,16 +143,16 @@ class MainActivity : ComponentActivity() {
     ) { ok -> if (ok) cameraUri?.let { attach(it, Attachment.Kind.IMAGE) } }
 
     private val filePicker = registerForActivityResult(
-        ActivityResultContracts.GetContent()
-    ) { uri -> uri?.let { attach(it, Attachment.Kind.IMAGE) } }   // files ingest same path
+        ActivityResultContracts.GetMultipleContents()
+    ) { uris -> uris.forEach { attach(it, Attachment.Kind.IMAGE) } }   // files ingest same path
 
     private val imagePicker = registerForActivityResult(
-        ActivityResultContracts.GetContent()
-    ) { uri -> uri?.let { attach(it, Attachment.Kind.IMAGE) } }
+        ActivityResultContracts.GetMultipleContents()
+    ) { uris -> uris.forEach { attach(it, Attachment.Kind.IMAGE) } }
 
     private val voicePicker = registerForActivityResult(
-        ActivityResultContracts.GetContent()
-    ) { uri -> uri?.let { attach(it, Attachment.Kind.VOICE) } }
+        ActivityResultContracts.GetMultipleContents()
+    ) { uris -> uris.forEach { attach(it, Attachment.Kind.VOICE) } }
 
     private val notifLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -160,7 +171,10 @@ class MainActivity : ComponentActivity() {
             repeatOnLifecycle(Lifecycle.State.STARTED) { ForegroundPoller.run(this@MainActivity) }
         }
 
-        enableEdgeToEdge()
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
+        )
         setContent {
             LocalGhostTheme {
                 when (val s = screen) {
@@ -177,6 +191,11 @@ class MainActivity : ComponentActivity() {
                         forceLocal = forceLocalMode,
                         onForceLocal = { forceLocalMode = it },
                         localModelPresent = localModelPresent,
+                        brainLabel = brainLabel(),
+                        brainIsBox = brainIsBox(),
+                        phoneModels = phoneModelChoices(),
+                        onPickBox = { forceLocalMode = false },
+                        onPickPhoneModel = { id -> activateModel(id); forceLocalMode = true },
                         catalogModels = offeredModels,
                         modelRowState = ::modelRowState,
                         onDownloadModel = ::downloadModel,
@@ -185,9 +204,9 @@ class MainActivity : ComponentActivity() {
                         onDeleteModel = ::deleteModel,
                         availableDaemons = availableDaemons,
                         onCamera = ::startCamera,
-                        onPhotos = { imagePicker.launch("image/*") },
-                        onFiles = { filePicker.launch("*/*") },
-                        onVoice = { voicePicker.launch("audio/*") },
+                        onPhotos = { launchForResult(imagePicker, "image/*") },
+                        onFiles = { launchForResult(filePicker, "*/*") },
+                        onVoice = { launchForResult(voicePicker, "audio/*") },
                         connectors = connectors,
                         onConnect = ::connectConnector,
                         onDisconnect = ::disconnectConnector,
@@ -196,9 +215,9 @@ class MainActivity : ComponentActivity() {
                         pending = pending,
                         lifeContext = lifeContext, memories = memories, daemons = daemons,
                         sync = sync, onSync = ::startSync,
-                        onRequestFullAccess = { AppSettings.setEverAskedMedia(this, true); mediaLauncher.launch(imagePerms) },
+                        onRequestFullAccess = { AppSettings.setEverAskedMedia(this, true); launchForResult(mediaLauncher, imagePerms) },
                         onTestNotification = ::testNotification,
-                        allowMobileSync = AppSettings.allowMobileSync(this),
+                        allowMobileSync = allowMobileSyncState,
                         onToggleMobileSync = ::setMobileSync,
                         onToggleMute = ::setMute,
                         boxConnected = true,
@@ -211,6 +230,11 @@ class MainActivity : ComponentActivity() {
                         devices = devices,
                         onAddPin = ::addPin,
                         onRemovePin = ::removePin,
+                        conversations = conversations,
+                        activeConvId = activeConvId,
+                        onSelectConversation = ::selectConversation,
+                        onNewConversation = ::newConversation,
+                        onDeleteConversation = ::deleteConversation,
                     )
                 }
             }
@@ -224,6 +248,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         super.onStop()
+        if (expectingResult) return            // picker/camera in foreground — keep session
         if (screen !is Screen.Crash) {
             screen = Screen.Gate; busy = false; error = null; autoSyncTried = false
             tearDownCache()
@@ -247,7 +272,7 @@ class MainActivity : ComponentActivity() {
     private suspend fun generateFromBox(text: String, atts: List<Attachment>) {
         var reply = ""
         var mems: List<String> = emptyList()
-        BoxClient.chat(messages.toList(), text, atts, chatCaps).collect { chunk ->
+        BoxClient.chat(messages.toList(), text, activeConvId, atts, chatCaps).collect { chunk ->
             when (chunk) {
                 is BoxClient.ChatChunk.Memories -> mems = chunk.ids
                 is BoxClient.ChatChunk.Token -> {
@@ -331,9 +356,15 @@ class MainActivity : ComponentActivity() {
             }
             else -> {
                 AppSettings.setEverAskedMedia(this, true)
-                mediaLauncher.launch(imagePerms)
+                launchForResult(mediaLauncher, imagePerms)
             }
         }
+    }
+
+    /** Launch something that backgrounds us briefly without triggering the lock. */
+    private fun <I> launchForResult(launcher: androidx.activity.result.ActivityResultLauncher<I>, input: I) {
+        expectingResult = true
+        launcher.launch(input)
     }
 
     private fun startCamera() {
@@ -341,7 +372,7 @@ class MainActivity : ComponentActivity() {
         val uri = androidx.core.content.FileProvider.getUriForFile(
             this, "$packageName.fileprovider", file)
         cameraUri = uri
-        cameraLauncher.launch(uri)
+        launchForResult(cameraLauncher, uri)
     }
 
     private fun connectConnector(id: String) {
@@ -369,6 +400,21 @@ class MainActivity : ComponentActivity() {
                     observeDownload(id)
                 }
             }
+    }
+
+    // Full list the box offers, each tagged with whether it's already downloaded here.
+    private fun phoneModelChoices(): List<Triple<String, String, Boolean>> =
+        offeredModels.map { m -> Triple(m.id, m.name, installedModels.contains(m.id)) }
+
+    private fun brainIsBox(): Boolean = !forceLocalMode && boxReachable
+
+    private fun brainLabel(): String = when {
+        brainIsBox() -> "the box"
+        else -> {
+            val id = activeModel
+            val name = offeredModels.firstOrNull { it.id == id }?.name ?: "on-phone"
+            "phone · $name"
+        }
     }
 
     private fun refreshModels() {
@@ -431,6 +477,32 @@ class MainActivity : ComponentActivity() {
         refreshModels()
     }
 
+    private fun selectConversation(id: String) {
+        activeConvId = id
+        streaming = false; chatJob?.cancel()
+        lifecycleScope.launch {
+            val msgs = BoxClient.loadConversation(id)
+            messages.clear(); messages.addAll(msgs)
+        }
+    }
+
+    private fun newConversation() {
+        streaming = false; chatJob?.cancel()
+        messages.clear()
+        lifecycleScope.launch {
+            activeConvId = BoxClient.createConversation(this@MainActivity)
+            conversations = BoxClient.conversations(this@MainActivity)
+        }
+    }
+
+    private fun deleteConversation(id: String) {
+        lifecycleScope.launch {
+            BoxClient.deleteConversation(id)
+            conversations = BoxClient.conversations(this@MainActivity)
+            if (activeConvId == id) { activeConvId = null; messages.clear() }
+        }
+    }
+
     private fun tearDownCache() {
         messages.clear()
         pendingAttachments = emptyList()
@@ -442,6 +514,9 @@ class MainActivity : ComponentActivity() {
         devices = Loadable.Loading
         connectors = Loadable.Loading
         availableDaemons = emptyList()
+        conversations = emptyList()
+        activeConvId = null
+        allowMobileSyncState = false
         localModeActive = false
         streaming = false
         chatJob?.cancel()
@@ -481,7 +556,7 @@ class MainActivity : ComponentActivity() {
         sync = sync.copy(notificationsMuted = muted)
         lifecycleScope.launch {
             BoxClient.setSettings(this@MainActivity,
-                com.localghost.app.net.BoxSettings(AppSettings.allowMobileSync(this@MainActivity), muted))
+                BoxSettings(AppSettings.allowMobileSync(this@MainActivity), muted))
         }
     }
 
@@ -535,12 +610,12 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun setMobileSync(allow: Boolean) {
+        allowMobileSyncState = allow                  // reactive UI update, instant
         AppSettings.setAllowMobileSync(this, allow)   // local cache
-        SyncWorker.schedule(this)                     // reschedule with new constraint
-        sync = sync.copy()
-        lifecycleScope.launch {
+        lifecycleScope.launch(Dispatchers.IO) {       // off the main thread — no UI hang
+            SyncWorker.schedule(this@MainActivity)    // reschedule with new constraint
             BoxClient.setSettings(this@MainActivity,
-                com.localghost.app.net.BoxSettings(allow, NotifyState.isMuted(this@MainActivity)))
+                BoxSettings(allow, NotifyState.isMuted(this@MainActivity)))
         }
     }
 
@@ -581,6 +656,9 @@ class MainActivity : ComponentActivity() {
                 availableDaemons = BoxClient.availableChatDaemons(this@MainActivity)
                 localModelPresent = LocalModel.isModelPresent(this@MainActivity)
                 offeredModels = BoxClient.availableModels(this@MainActivity)
+                boxReachable = BoxClient.reachable()
+                conversations = BoxClient.conversations(this@MainActivity)
+                allowMobileSyncState = AppSettings.allowMobileSync(this@MainActivity)
                 refreshModels()
                 offeredModels.forEach { m -> reattachIfDownloading(m.id) }
                 val bs = BoxClient.settings(this@MainActivity)
@@ -594,7 +672,7 @@ class MainActivity : ComponentActivity() {
     // --- grants ---
     private fun granted(p: String) =
         ContextCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED
-    override fun onResume() { super.onResume(); permTick++ }
+    override fun onResume() { super.onResume(); permTick++; expectingResult = false }
 
     private fun hasImages() = granted(Manifest.permission.READ_MEDIA_IMAGES)
     private fun hasVideo() = granted(Manifest.permission.READ_MEDIA_VIDEO)

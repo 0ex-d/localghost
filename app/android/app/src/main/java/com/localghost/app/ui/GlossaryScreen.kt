@@ -129,10 +129,13 @@ private val GLOSSARY = listOf(
             "Different codes can open different things."),
         Term("Code behaviours",
             "Each code carries a behaviour: MOUNT REAL opens the persona it belongs to, MOUNT " +
-            "DECOY opens a fallback persona, WIPE crypto-erases on entry while presenting a " +
-            "decoy. \"Real\" is relative to the persona you are in — there is no absolute flag.",
-            "Each code does something: open your space, open a fake space, or quietly erase " +
-            "while showing a fake. What counts as \"yours\" depends on which code you used."),
+            "DECOY opens a fallback persona, WIPE is a GLOBAL panic erase that destroys the " +
+            "master key-encrypting key so every persona's volume becomes noise at once, from " +
+            "any persona. \"Real\" is relative to the persona you are in — there is no absolute flag.",
+            "Each code does something: open your space, open a fake space, or wipe everything. " +
+            "What counts as \"yours\" depends on which code you used. Decoy and wipe codes can be " +
+            "changed but never deleted. A wipe code is global: entered from any persona it " +
+            "erases everything, every persona at once."),
         Term("Codes are persona-scoped",
             "The code list you can see and manage belongs only to the mounted persona. The box " +
             "cannot enumerate another persona's codes while this one is open — it lacks the " +

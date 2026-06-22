@@ -2,6 +2,8 @@ package com.localghost.app.ui
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -26,8 +28,9 @@ fun PinScreen(busy: Boolean, error: String?, onSubmit: (String) -> Unit) {
 
     GhostScaffold { pad ->
         Column(
-            Modifier.fillMaxSize().padding(pad).padding(horizontal = 24.dp),
-            verticalArrangement = Arrangement.Center,
+            Modifier.fillMaxSize().padding(pad)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 24.dp).padding(top = 24.dp, bottom = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             SectionLabel("AUTH_REQUIRED", Modifier.align(Alignment.Start))
@@ -35,7 +38,7 @@ fun PinScreen(busy: Boolean, error: String?, onSubmit: (String) -> Unit) {
             Text("ENTER CODE", color = GhostText, style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(20.dp))
 
-            Box(Modifier.fillMaxWidth().widthIn(max = 340.dp)) {
+            Box(Modifier.fillMaxWidth().widthIn(max = 300.dp)) {
                 MaskRow(pin, reveal) { reveal = !reveal }
             }
 
@@ -48,13 +51,13 @@ fun PinScreen(busy: Boolean, error: String?, onSubmit: (String) -> Unit) {
                     onDigit = { if (!busy) { pin += it; haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove) } },
                     onClear = { if (pin.isNotEmpty()) pin = "" },
                     onDelete = { if (pin.isNotEmpty()) pin = pin.dropLast(1) },
-                    modifier = Modifier.widthIn(max = 340.dp),
+                    modifier = Modifier.widthIn(max = 300.dp),
                 )
             }
 
             Spacer(Modifier.height(20.dp))
             GhostButton("OK", { submit() }, enabled = pin.isNotEmpty() && !busy,
-                modifier = Modifier.fillMaxWidth().widthIn(max = 340.dp).height(56.dp))
+                modifier = Modifier.fillMaxWidth().widthIn(max = 300.dp).height(52.dp))
 
             if (busy) {
                 Spacer(Modifier.height(24.dp))
@@ -109,7 +112,7 @@ private fun Keypad(
     val gap = 12.dp
     BoxWithConstraints(modifier) {
         // 3 columns; key height tracks width so keys stay square at any screen size.
-        val keyW = (maxWidth - gap * 2) / 3
+        val keyW = ((maxWidth - gap * 2) / 3).coerceAtMost(84.dp)
         Column(verticalArrangement = Arrangement.spacedBy(gap),
             horizontalAlignment = Alignment.CenterHorizontally) {
             listOf(listOf('1','2','3'), listOf('4','5','6'), listOf('7','8','9')).forEach { row ->

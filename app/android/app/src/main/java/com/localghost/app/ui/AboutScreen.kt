@@ -1,6 +1,8 @@
 package com.localghost.app.ui
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -12,7 +14,7 @@ import com.localghost.app.ui.theme.TerminalGreen
 
 @Composable
 fun AboutScreen() {
-    Column(Modifier.fillMaxSize().padding(20.dp)) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp).padding(bottom = 24.dp)) {
         SectionLabel("ABOUT")
         Spacer(Modifier.height(16.dp))
         Text("LOCALGHOST", color = TerminalGreen, style = MaterialTheme.typography.titleLarge)

@@ -10,7 +10,10 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.foundation.Image
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.ui.text.font.FontWeight
 import com.localghost.app.ui.theme.GhostTextDim
 import com.localghost.app.ui.theme.TerminalGreen
 import com.localghost.app.ui.theme.Warning
@@ -31,7 +34,14 @@ fun LockScreen(error: String?, onUnlock: () -> Unit) {
                 modifier = Modifier.size(72.dp),
             )
             Spacer(Modifier.height(16.dp))
-            Text("LOCALGHOST", color = TerminalGreen, style = MaterialTheme.typography.displayLarge)
+            // Wordmark fits on one line: size scales to the available width.
+            BoxWithConstraints(Modifier.fillMaxWidth()) {
+                // ~0.165 * width keeps the 10-char wordmark on one line comfortably.
+                val fs = (maxWidth.value * 0.165f).coerceIn(28f, 56f)
+                Text("LOCALGHOST", color = TerminalGreen,
+                    fontSize = fs.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false,
+                    textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+            }
             Spacer(Modifier.height(8.dp))
             Text("> the only cloud is you", color = GhostTextDim,
                 style = MaterialTheme.typography.bodyMedium)

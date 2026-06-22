@@ -1,6 +1,8 @@
 package com.localghost.app.ui
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -22,15 +24,17 @@ fun SettingsScreen(
     onChangeCode: () -> Unit,
     onWipe: () -> Unit,
 ) {
-    Column(Modifier.fillMaxSize().padding(20.dp)) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())
+        .padding(20.dp).padding(bottom = 24.dp)) {
         SectionLabel("SETTINGS")
         Spacer(Modifier.height(20.dp))
 
         SectionLabel("SYNC")
         Spacer(Modifier.height(8.dp))
         toggleRow(
-            label = "sync on mobile data",
-            sub = if (allowMobileSync) "Wi-Fi and mobile (4G/5G)" else "Wi-Fi only",
+            label = "sync over mobile data",
+            sub = if (allowMobileSync) "on — uses Wi-Fi and mobile (4G/5G)"
+                  else "off — Wi-Fi only (recommended)",
             checked = allowMobileSync, onChange = onToggleMobileSync,
         )
 
@@ -38,9 +42,10 @@ fun SettingsScreen(
         SectionLabel("NOTIFICATIONS")
         Spacer(Modifier.height(8.dp))
         toggleRow(
-            label = "mute daemons",
-            sub = if (notificationsMuted) "muted" else "active",
-            checked = notificationsMuted, onChange = onToggleMute,
+            label = "daemon notifications",
+            sub = if (notificationsMuted) "muted — daemons stay silent"
+                  else "active — daemons can notify you",
+            checked = !notificationsMuted, onChange = { on -> onToggleMute(!on) },
         )
 
         Spacer(Modifier.height(24.dp))
@@ -68,8 +73,8 @@ fun SettingsScreen(
         Spacer(Modifier.height(8.dp))
         WipeButton(onWipe)
         Spacer(Modifier.height(4.dp))
-        Text("Crypto-erase. The wrapping key is destroyed on the box. The data does not get " +
-             "deleted — it becomes noise. Nobody reverses this, including you.",
+        Text("Crypto-erase, global. The master key is destroyed on the box and every " +
+             "persona's data becomes noise at once. Nobody reverses this, including you.",
              color = Warning, style = MaterialTheme.typography.labelMedium)
 
         Spacer(Modifier.height(28.dp))

@@ -24,12 +24,12 @@ fun PermissionBanner(state: PermState, onAct: () -> Unit) {
     val action: String
     when (state) {
         PermState.BLOCKED -> {
-            msg = "ghost.framed can't read your camera roll — access is blocked in system settings."
+            msg = "Full read access is blocked in system settings. The daemons can't see your photos, videos or files to build your index."
             action = "OPEN SETTINGS"
         }
         else -> {
-            msg = "ghost.framed can't read your camera roll. Nothing syncs until you grant access."
-            action = "GRANT"
+            msg = "Allow full read access so the daemons can index your photos, videos and files. Nothing syncs until you do."
+            action = "ALLOW ALL"
         }
     }
     Row(

@@ -3,9 +3,12 @@ package com.localghost.app.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.activity.compose.BackHandler
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -27,15 +30,17 @@ import com.localghost.app.net.PinEntry
 import com.localghost.app.net.ChatCapabilities
 import com.localghost.app.net.PhoneModel
 import com.localghost.app.net.Connector
+import com.localghost.app.net.Conversation
 import com.localghost.app.net.PendingNotification
 import com.localghost.app.ui.theme.*
 import kotlinx.coroutines.launch
 
 enum class Dest(val label: String, val glyph: String) {
     CHAT("CHAT", "›_"),
+    CHATS("CHATS", "≡_"),
     MEMORIES("MEMORIES", "◇"),
     NOTIFICATIONS("NOTIFICATIONS", "△"),
-    HARNESS("HARNESS", "◉"),
+    HARNESS("BOX STATUS", "◉"),
     SYNC("SYNC", "⇅"),
     CODES("CODES", "⚿"),
     SETTINGS("SETTINGS", "⚙"),
@@ -59,6 +64,11 @@ fun MainShell(
     forceLocal: Boolean,
     onForceLocal: (Boolean) -> Unit,
     localModelPresent: Boolean,
+    brainLabel: String,
+    brainIsBox: Boolean,
+    phoneModels: List<Triple<String,String,Boolean>>,
+    onPickBox: () -> Unit,
+    onPickPhoneModel: (String) -> Unit,
     catalogModels: List<PhoneModel>,
     modelRowState: (String) -> ModelRowState,
     onDownloadModel: (String) -> Unit,
@@ -96,6 +106,11 @@ fun MainShell(
     devices: Loadable<List<DeviceInfo>>,
     onAddPin: (String, PinBehaviour, String) -> Unit,
     onRemovePin: (String) -> Unit,
+    conversations: List<Conversation>,
+    activeConvId: String?,
+    onSelectConversation: (String) -> Unit,
+    onNewConversation: () -> Unit,
+    onDeleteConversation: (String) -> Unit,
 ) {
     var dest by rememberSaveable { mutableStateOf(Dest.CHAT) }
     var showWipe by remember { mutableStateOf(false) }
@@ -105,6 +120,10 @@ fun MainShell(
     val scope = rememberCoroutineScope()
     fun close() = scope.launch { drawerState.close() }
     fun open() = scope.launch { drawerState.open() }
+
+    // On rotation / size change, the drawer can re-settle open — force it closed.
+    val orientation = LocalConfiguration.current.orientation
+    LaunchedEffect(orientation) { drawerState.close() }
 
     BackHandler(enabled = drawerState.isOpen || dest != Dest.CHAT) {
         if (drawerState.isOpen) close() else dest = Dest.CHAT
@@ -116,21 +135,36 @@ fun MainShell(
             DrawerPanel(
                 current = dest,
                 boxConnected = boxConnected,
+                conversations = conversations,
+                activeConvId = activeConvId,
                 onSelect = { dest = it; close() },
+                onSelectConversation = { onSelectConversation(it); close() },
+                onNewConversation = { onNewConversation(); close() },
+                onDeleteConversation = onDeleteConversation,
                 onLock = { close(); onLock() },
             )
         },
     ) {
         GhostScaffold { pad ->
-            Column(Modifier.fillMaxSize().padding(top = pad.calculateTopPadding())) {
-                TopBar(title = dest.label, onMenu = { open() })
+            Column(Modifier.fillMaxSize()
+                .padding(top = pad.calculateTopPadding())
+                .padding(top = 4.dp)) {
+                TopBar(title = dest.label, onMenu = { open() },
+                    onNewChat = if (dest == Dest.CHAT) onNewConversation else null)
 
                 PermissionBanner(permState, onPermAction)
 
-                Box(Modifier.weight(1f).fillMaxWidth()) {
+                Box(Modifier.weight(1f).fillMaxWidth()
+                    .padding(bottom = pad.calculateBottomPadding())) {
                     when (dest) {
                         Dest.CHAT -> ChatScreen(messages, streaming, localModeActive, pendingAttachments,
-                            onSend, onStopChat, { showAddSheet = true }, onClearAttachment)
+                            onSend, onStopChat, { showAddSheet = true }, onClearAttachment,
+                            brainLabel, brainIsBox, phoneModels, onPickBox, onPickPhoneModel,
+                            { dest = Dest.MODELS })
+                        Dest.CHATS -> ChatsScreen(conversations, activeConvId,
+                            onSelect = { onSelectConversation(it); dest = Dest.CHAT },
+                            onNew = { onNewConversation(); dest = Dest.CHAT },
+                            onDelete = onDeleteConversation)
                         Dest.MEMORIES -> MemoriesScreen(lifeContext, memories)
                         Dest.NOTIFICATIONS -> NotificationsScreen(pending)
                         Dest.HARNESS -> HarnessScreen(daemons)
@@ -173,8 +207,8 @@ fun MainShell(
                 if (showWipe) {
                     ConfirmDialog(
                         title = "WIPE EVERYTHING",
-                        body = "Crypto-erase on the box. The wrapping key is destroyed; the " +
-                            "data becomes noise. Nobody reverses this, including you.",
+                        body = "Global crypto-erase on the box. The master key is destroyed " +
+                            "and every persona becomes noise at once. Nobody reverses this.",
                         requireWord = "WIPE",
                         confirmLabel = "WIPE EVERYTHING",
                         onConfirm = { showWipe = false; onWipe() },
@@ -210,9 +244,9 @@ fun MainShell(
 }
 
 @Composable
-private fun TopBar(title: String, onMenu: () -> Unit) {
+private fun TopBar(title: String, onMenu: () -> Unit, onNewChat: (() -> Unit)? = null) {
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
+        Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 18.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text("≡", color = TerminalGreen, style = MaterialTheme.typography.titleLarge,
@@ -224,6 +258,11 @@ private fun TopBar(title: String, onMenu: () -> Unit) {
             modifier = Modifier.size(22.dp).padding(end = 8.dp),
         )
         Text(title, color = GhostText, style = MaterialTheme.typography.titleMedium)
+        if (onNewChat != null) {
+            Spacer(Modifier.weight(1f))
+            Text("＋", color = TerminalGreen, style = MaterialTheme.typography.titleLarge,
+                modifier = Modifier.clickable { onNewChat() })
+        }
     }
 }
 
@@ -231,15 +270,20 @@ private fun TopBar(title: String, onMenu: () -> Unit) {
 private fun DrawerPanel(
     current: Dest,
     boxConnected: Boolean,
+    conversations: List<Conversation>,
+    activeConvId: String?,
     onSelect: (Dest) -> Unit,
+    onSelectConversation: (String) -> Unit,
+    onNewConversation: () -> Unit,
+    onDeleteConversation: (String) -> Unit,
     onLock: () -> Unit,
 ) {
     ModalDrawerSheet(
         drawerContainerColor = Void,
         drawerContentColor = GhostText,
-        modifier = Modifier.fillMaxWidth(0.82f),
+        modifier = Modifier.fillMaxWidth(0.82f).widthIn(max = 360.dp),
     ) {
-        Column(Modifier.fillMaxSize().padding(20.dp)) {
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Image(
                     painter = painterResource(R.drawable.ic_ghost),
@@ -261,8 +305,40 @@ private fun DrawerPanel(
             }
 
             Spacer(Modifier.height(28.dp))
-            listOf(Dest.CHAT, Dest.MEMORIES, Dest.HARNESS, Dest.NOTIFICATIONS, Dest.SYNC, Dest.CODES).forEach {
+            listOf(Dest.CHAT, Dest.CHATS, Dest.MEMORIES, Dest.HARNESS, Dest.NOTIFICATIONS, Dest.SYNC, Dest.CODES).forEach {
                 DrawerRow(it, it == current) { onSelect(it) }
+            }
+
+            if (conversations.isNotEmpty()) {
+                Spacer(Modifier.height(20.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("RECENT CHATS", color = TerminalDim,
+                        style = MaterialTheme.typography.labelMedium)
+                    Spacer(Modifier.weight(1f))
+                    Text("＋ new", color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.clickable { onNewConversation() })
+                }
+                Spacer(Modifier.height(8.dp))
+                conversations.take(5).forEach { c ->
+                    Row(Modifier.fillMaxWidth()
+                        .clickable { onSelectConversation(c.id); onSelect(Dest.CHAT) }
+                        .padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(c.title,
+                                color = if (c.id == activeConvId) TerminalGreen else GhostText,
+                                style = MaterialTheme.typography.bodyMedium, maxLines = 1)
+                            Text("${c.updatedLabel} · ${c.messageCount} msgs", color = GhostTextDim,
+                                style = MaterialTheme.typography.labelMedium)
+                        }
+                        Text("✕", color = GhostTextDim, style = MaterialTheme.typography.labelMedium,
+                            modifier = Modifier.clickable { onDeleteConversation(c.id) }.padding(start = 8.dp))
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
+                Text("see all chats →", color = TerminalDim,
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.clickable { onSelect(Dest.CHATS) }.padding(vertical = 4.dp))
             }
 
             Spacer(Modifier.height(16.dp))
