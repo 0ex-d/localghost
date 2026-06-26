@@ -1,50 +1,42 @@
-# LocalGhost server build. One module (github.com/LocalGhostDao/localghost/server), many binaries under cmd/, all sharing
-# the packages at the module root (auth, profile, pair, models, hw, server, ...). Binaries land in
-# bin/ with the names systemd expects.
+# LocalGhost server build. One module (github.com/LocalGhostDao/localghost/server), many binaries
+# under cmd/, all sharing the library packages under internal/ (internal/auth, internal/profile,
+# internal/pair, internal/hw, internal/secd, ...). internal/ means they cannot be imported outside
+# this module , compiler-enforced privacy.
 #
-# The front door is ghost.secd (cmd/secd). The other daemons (cmd/voiced, cmd/framed, ...) are added
-# as cmd/ entries and picked up automatically by `make daemons`.
+# Each cmd/<name> dir is named EXACTLY for the binary it produces (cmd/ghost.secd -> ghost.secd),
+# so `go build -o bin/ ./cmd/...` and `go install ./...` produce correctly-named binaries with no
+# remapping. The front door is ghost.secd; ghost-setup and ghost-ctl are the operator tools; the
+# backing daemons are cmd/ghost.<x> (ghost.voiced, ghost.framed, ...). Binary names match the
+# systemd unit ExecStart and the GhostDaemons list.
 
 GO      ?= go
 BINDIR  := bin
 TAGS    ?=
 
-# The front-door daemon and the operator tools. cmd/<x> -> bin/ghost.<x> for daemons, plain names
-# for the tools, matching the systemd unit ExecStart (execDir/ghost.secd) and the GhostDaemons list.
+# all builds every binary under cmd/ into bin/, each named for its dir. The TPM-tagged build (box)
+# is separate because the daemons need -tags tpm to link the real hardware backend.
 .PHONY: all
-all: secd setup ctl
+all:
+	$(GO) build -o $(BINDIR)/ ./cmd/...
 
-# secd is built with the binary name the service unit references.
+# box: the real hardware build , links the TPM/dm-crypt/datastore backend (needs go-tpm in the
+# module). -tags tpm applies to everything; the tools ignore it harmlessly.
+.PHONY: box
+box:
+	$(GO) build -tags tpm -o $(BINDIR)/ ./cmd/...
+
+# Individual targets, handy during development. `go build -o bin/` drops the binary named for the dir.
 .PHONY: secd
 secd:
-	$(GO) build -tags '$(TAGS)' -o $(BINDIR)/ghost.secd ./cmd/secd
+	$(GO) build -tags '$(TAGS)' -o $(BINDIR)/ ./cmd/ghost.secd
 
 .PHONY: setup
 setup:
-	$(GO) build -o $(BINDIR)/ghost-setup ./cmd/setup
+	$(GO) build -o $(BINDIR)/ ./cmd/ghost-setup
 
 .PHONY: ctl
 ctl:
-	$(GO) build -o $(BINDIR)/ghost-ctl ./cmd/ctl
-
-# daemons builds every backing daemon that exists under cmd/ (voiced, framed, ...) into
-# bin/ghost.<name>, skipping secd/setup/ctl which have explicit targets above. As you add cmd/voiced
-# etc. this picks them up with no Makefile change.
-.PHONY: daemons
-daemons:
-	@for d in cmd/*/; do \
-		name=$$(basename $$d); \
-		case $$name in secd|setup|ctl) continue;; esac; \
-		echo "building ghost.$$name"; \
-		$(GO) build -tags '$(TAGS)' -o $(BINDIR)/ghost.$$name ./cmd/$$name; \
-	done
-
-# The real box build links the TPM/dm-crypt/datastore backend. Needs go-tpm in the module.
-.PHONY: box
-box: TAGS=tpm
-box: secd daemons
-	$(GO) build -o $(BINDIR)/ghost-setup ./cmd/setup
-	$(GO) build -o $(BINDIR)/ghost-ctl ./cmd/ctl
+	$(GO) build -o $(BINDIR)/ ./cmd/ghost-ctl
 
 .PHONY: test
 test:

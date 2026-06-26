@@ -6,10 +6,10 @@ import (
 	"errors"
 	"path/filepath"
 
-	"github.com/LocalGhostDao/localghost/server/auth"
-	"github.com/LocalGhostDao/localghost/server/hw"
-	"github.com/LocalGhostDao/localghost/server/profile"
-	"github.com/LocalGhostDao/localghost/server/wipe"
+	"github.com/LocalGhostDao/localghost/server/internal/auth"
+	"github.com/LocalGhostDao/localghost/server/internal/hw"
+	"github.com/LocalGhostDao/localghost/server/internal/profile"
+	"github.com/LocalGhostDao/localghost/server/internal/wipe"
 )
 
 // This is the REAL unlock backend, compiled with `-tags tpm` on the box. It wires:

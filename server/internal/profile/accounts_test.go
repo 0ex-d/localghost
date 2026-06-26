@@ -3,8 +3,8 @@ package profile
 import (
 	"testing"
 
-	"github.com/LocalGhostDao/localghost/server/auth"
-	"github.com/LocalGhostDao/localghost/server/wipe"
+	"github.com/LocalGhostDao/localghost/server/internal/auth"
+	"github.com/LocalGhostDao/localghost/server/internal/wipe"
 )
 
 func buildAccounts(t *testing.T) *Accounts {

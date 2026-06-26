@@ -1,6 +1,6 @@
 package secd
 
-import "github.com/LocalGhostDao/localghost/server/profile"
+import "github.com/LocalGhostDao/localghost/server/internal/profile"
 
 // UnlockBackend is what the unlock flow needs from the box to turn a PIN into a mounted, running
 // account. It is the single seam between the HTTP server and the hardware: the default build wires a

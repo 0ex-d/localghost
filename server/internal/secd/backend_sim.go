@@ -6,7 +6,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/LocalGhostDao/localghost/server/profile"
+	"github.com/LocalGhostDao/localghost/server/internal/profile"
 )
 
 // This is the DEFAULT (no-TPM) unlock backend. It lets ghost.secd compile and run, and the app's

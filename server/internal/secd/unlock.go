@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/LocalGhostDao/localghost/server/profile"
+	"github.com/LocalGhostDao/localghost/server/internal/profile"
 )
 
 // unlockService runs a PIN unlock and exposes its progress for polling, mirroring the app's

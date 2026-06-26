@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/LocalGhostDao/localghost/server/models"
-	"github.com/LocalGhostDao/localghost/server/profile"
+	"github.com/LocalGhostDao/localghost/server/internal/models"
+	"github.com/LocalGhostDao/localghost/server/internal/profile"
 )
 
 // Server is the ghost.secd HTTP surface the phone talks to. It wires the library packages into the

@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/LocalGhostDao/localghost/server/auth"
+	"github.com/LocalGhostDao/localghost/server/internal/auth"
 )
 
 // DeviceIssuer mints a device client cert during enrolment. The daemon wires this to the box PKI

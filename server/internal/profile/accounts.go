@@ -1,8 +1,8 @@
 package profile
 
 import (
-	"github.com/LocalGhostDao/localghost/server/auth"
-	"github.com/LocalGhostDao/localghost/server/wipe"
+	"github.com/LocalGhostDao/localghost/server/internal/auth"
+	"github.com/LocalGhostDao/localghost/server/internal/wipe"
 )
 
 // Outcome is what an unlock attempt resulted in. Open looks identical to the user whether it is the

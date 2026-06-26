@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/LocalGhostDao/localghost/server/setup"
+	"github.com/LocalGhostDao/localghost/server/internal/setup"
 )
 
 // System implements setup.System for bare-metal Debian 13. The PKI is done natively in Go (pki.go);
