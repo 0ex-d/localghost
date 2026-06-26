@@ -1,30 +1,57 @@
 #!/usr/bin/env bash
 # One-time setup on Debian 13 to build the LocalGhost APK headlessly (no Android Studio).
-# Installs JDK 17, the Android command-line tools, and the exact SDK packages this project uses.
+# Installs the EXACT JDK this project's releases are built with, the Android command-line tools, and
+# the exact SDK packages this project uses. Matching the JDK matters: the JDK major version is
+# build-determining, so a reproducer on a different JDK will not get matching bytes.
 set -euo pipefail
 
 ANDROID_HOME="${ANDROID_HOME:-$HOME/android-sdk}"
 CMDLINE_VER="latest"
 
-# The Android Gradle Plugin needs JDK 17+ (Gradle runs on any JVM 17..26). Debian 13 (Trixie)
-# dropped openjdk-17 from its main repos and ships JDK 21 (default) and 25. JDK 21 is the right
-# choice here: it is in the default repo and AGP 9.x runs on it. (If you specifically need 17,
-# use the Adoptium Temurin repo and temurin-17-jdk instead.)
-echo "> JDK 21 (Trixie default, runs the Android Gradle Plugin)..."
-if ! command -v javac >/dev/null || ! javac -version 2>&1 | grep -qE 'javac (1[7-9]|2[0-6])'; then
-    sudo apt-get update
-    sudo apt-get install -y openjdk-21-jdk-headless unzip wget
+# The required JDK major version is the single source of truth in ghost/build-env.txt (jdk.version).
+# Read it from there so this script, the manifest, and the release cannot drift to different JDKs.
+# Falls back to 21 (the version LocalGhost releases are built with on Trixie) if build-env is absent.
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
+BUILD_ENV="$REPO_ROOT/app/android/ghost/build-env.txt"
+[ -f "$BUILD_ENV" ] || BUILD_ENV="$REPO_ROOT/ghost/build-env.txt"
+JDK_MAJOR="21"
+if [ -f "$BUILD_ENV" ]; then
+    v="$(grep -E '^jdk\.version' "$BUILD_ENV" 2>/dev/null | awk '{print $2}' | cut -d. -f1)"
+    [ -n "$v" ] && JDK_MAJOR="$v"
 fi
+
+# Debian 13 (Trixie) dropped openjdk-17 from main and ships JDK 21 (default) and 25. We install and
+# REQUIRE exactly $JDK_MAJOR, not a range, so a verifier ends up on the same JDK the release used.
+# (If you need a JDK not in Debian's repos, use the Adoptium Temurin repo for that major instead.)
+echo "> JDK ${JDK_MAJOR} (the version this project's releases are built with)..."
+need_install=1
+if command -v javac >/dev/null && javac -version 2>&1 | grep -qE "javac ${JDK_MAJOR}\."; then
+    need_install=0
+fi
+if [ "$need_install" = 1 ]; then
+    sudo apt-get update
+    sudo apt-get install -y "openjdk-${JDK_MAJOR}-jdk-headless" unzip wget
+fi
+
 # Resolve JAVA_HOME from javac so it points at the real JDK (not a /usr/bin symlink dir).
 export JAVA_HOME="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
 echo "  JAVA_HOME=$JAVA_HOME"
 javac -version
+# Hard-fail if, after install, javac is still not the required major. Better to stop here than to
+# build on the wrong JDK and ship/verify a non-matching APK.
+if ! javac -version 2>&1 | grep -qE "javac ${JDK_MAJOR}\."; then
+    echo "  ERROR: javac is not JDK ${JDK_MAJOR}. Releases are built with ${JDK_MAJOR}; a different"
+    echo "         JDK will not reproduce the APK. Fix JAVA_HOME / your default java before building."
+    exit 1
+fi
 
 echo "> Android command-line tools..."
 mkdir -p "$ANDROID_HOME/cmdline-tools"
 if [ ! -d "$ANDROID_HOME/cmdline-tools/$CMDLINE_VER" ]; then
     # Latest cmdline-tools zip. If this URL 404s, get the current one from
     # https://developer.android.com/studio#command-line-tools-only and replace it.
+    # NOTE: the cmdline-tools VERSION is NOT build-determining — it only drives sdkmanager. A verifier
+    # who gets a newer cmdline-tools still reproduces the APK as long as the SDK PACKAGES below match.
     TOOLS_ZIP="commandlinetools-linux-13114758_latest.zip"
     wget -q "https://dl.google.com/android/repository/$TOOLS_ZIP" -O /tmp/cmdtools.zip
     unzip -q /tmp/cmdtools.zip -d /tmp/cmdtools
@@ -35,6 +62,7 @@ export PATH="$ANDROID_HOME/cmdline-tools/$CMDLINE_VER/bin:$ANDROID_HOME/platform
 
 echo "> Accepting licenses + installing SDK packages this project needs..."
 yes | sdkmanager --sdk_root="$ANDROID_HOME" --licenses >/dev/null
+# These ARE build-determining and are pinned exactly (see ghost/build-env.txt: buildTools/compileSdk).
 # Note: API 37 installs as "platforms;android-37.0" (not android-37). compileSdk = release(37)
 # resolves against it. If a build ever fails "looking for android-37", that .0 naming is why.
 sdkmanager --sdk_root="$ANDROID_HOME" \
@@ -59,7 +87,6 @@ echo
 # CMakeLists.txt (LLAMA_CPP_TAG + LLAMA_CPP_COMMIT). This step pre-clones at that commit so the
 # native build runs offline and the exact source is part of the deploy, verifies it, resolves the
 # full SHA for the tag if the pin still has the placeholder, and checks GitHub for a newer release.
-REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
 CMAKE="$REPO_ROOT/app/src/main/cpp/CMakeLists.txt"
 LLAMA_REPO="https://github.com/ggml-org/llama.cpp"
 LLAMA_DIR="$REPO_ROOT/.cache/llama.cpp"
