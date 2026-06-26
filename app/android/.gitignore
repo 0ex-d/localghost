@@ -1,1 +1,18 @@
-.cache/
+# Gradle
+.gradle/
+build/
+*/build/
+
+# Android / IDE local config
+local.properties
+.idea/
+*.iml
+
+
+# Keystores and signing — never commit these
+*.jks
+*.keystore
+keystore.properties
+
+# OS noise
+.DS_Store
