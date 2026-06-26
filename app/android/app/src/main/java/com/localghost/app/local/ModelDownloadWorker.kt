@@ -40,7 +40,7 @@ class ModelDownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWor
         val existing = if (part.exists()) part.length() else 0L
 
         return try {
-            val input = BoxClient.downloadModel(id, existing)
+            val input = BoxClient.downloadModel(applicationContext, id, existing)
             input.use { ins ->
                 java.io.RandomAccessFile(part, "rw").use { raf ->
                     raf.seek(existing)

@@ -17,10 +17,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.localghost.app.net.UnlockSnapshot
 import com.localghost.app.ui.theme.*
 
 @Composable
-fun PinScreen(busy: Boolean, error: String?, onSubmit: (String) -> Unit) {
+fun PinScreen(busy: Boolean, error: String?, progress: UnlockSnapshot?, onSubmit: (String) -> Unit) {
     var pin by remember { mutableStateOf("") }
     var reveal by remember { mutableStateOf(false) }
     val haptic = LocalHapticFeedback.current
@@ -59,7 +60,13 @@ fun PinScreen(busy: Boolean, error: String?, onSubmit: (String) -> Unit) {
             GhostButton("OK", { submit() }, enabled = pin.isNotEmpty() && !busy,
                 modifier = Modifier.fillMaxWidth().widthIn(max = 300.dp).height(52.dp))
 
-            if (busy) {
+            if (busy && progress != null) {
+                // Streamed unlock: the stage list (checking, unsealing, mounting, starting...) ticks
+                // through as the box reports progress. Hot fills instantly, cold ticks once a second.
+                // Identical view for any account.
+                Spacer(Modifier.height(24.dp))
+                UnlockProgress(progress, modifier = Modifier.widthIn(max = 300.dp))
+            } else if (busy) {
                 Spacer(Modifier.height(24.dp))
                 CircularProgressIndicator(color = TerminalGreen, strokeWidth = 2.dp)
             }

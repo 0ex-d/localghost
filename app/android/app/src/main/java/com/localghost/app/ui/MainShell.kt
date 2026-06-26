@@ -25,8 +25,6 @@ import com.localghost.app.net.DaemonStatus
 import com.localghost.app.net.LifeContext
 import com.localghost.app.net.MemoryEntry
 import com.localghost.app.net.DeviceInfo
-import com.localghost.app.net.PinBehaviour
-import com.localghost.app.net.PinEntry
 import com.localghost.app.net.ChatCapabilities
 import com.localghost.app.net.PhoneModel
 import com.localghost.app.net.Connector
@@ -101,12 +99,8 @@ fun MainShell(
     onLock: () -> Unit,
     onExport: () -> Unit,
     exportState: String?,
-    onChangeCode: (old: String, new: String) -> Unit,
     onWipe: () -> Unit,
-    pins: Loadable<List<PinEntry>>,
     devices: Loadable<List<DeviceInfo>>,
-    onAddPin: (String, PinBehaviour, String) -> Unit,
-    onRemovePin: (String) -> Unit,
     conversations: List<Conversation>,
     activeConvId: String?,
     onSelectConversation: (String) -> Unit,
@@ -115,7 +109,6 @@ fun MainShell(
 ) {
     var dest by rememberSaveable { mutableStateOf(Dest.CHAT) }
     var showWipe by remember { mutableStateOf(false) }
-    var showChangeCode by remember { mutableStateOf(false) }
     var showAddSheet by remember { mutableStateOf(false) }
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -170,7 +163,7 @@ fun MainShell(
                         Dest.NOTIFICATIONS -> NotificationsScreen(pending)
                         Dest.HARNESS -> HarnessScreen(daemons)
                         Dest.SYNC -> SyncScreen(sync, onSync, onRequestFullAccess, onTestNotification)
-                        Dest.CODES -> PinManagementScreen(pins, devices, onAddPin, onRemovePin)
+                        Dest.CODES -> PinManagementScreen(devices)
                         Dest.SETTINGS -> SettingsScreen(
                             allowMobileSync = allowMobileSync,
                             onToggleMobileSync = onToggleMobileSync,
@@ -178,7 +171,6 @@ fun MainShell(
                             onToggleMute = onToggleMute,
                             onExport = onExport,
                             exportState = exportState,
-                            onChangeCode = { showChangeCode = true },
                             onWipe = { showWipe = true },
                         )
                         Dest.GLOSSARY -> GlossaryScreen()
@@ -232,12 +224,6 @@ fun MainShell(
                         onVoice = { showAddSheet = false; onVoice() },
                         onOpenConnectors = { showAddSheet = false; dest = Dest.CONNECTORS },
                         onDismiss = { showAddSheet = false },
-                    )
-                }
-                if (showChangeCode) {
-                    ChangeCodeDialog(
-                        onConfirm = { o, n -> showChangeCode = false; onChangeCode(o, n) },
-                        onDismiss = { showChangeCode = false },
                     )
                 }
             }

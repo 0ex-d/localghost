@@ -22,6 +22,22 @@ https://www.localghost.ai/.well-known/pgp-key.asc
    a detached GPG signature over the APK by **info@localghost.ai**, the same key that signs the
    website and the source manifest. → proves "we, one identity, signed this exact binary."
 
+## External dependency pin
+The app's only external native dependency is llama.cpp. It is pinned by IMMUTABLE COMMIT (not a
+tag, which can be re-pointed) in `app/src/main/cpp/CMakeLists.txt` (LLAMA_CPP_COMMIT, with
+LLAMA_CPP_TAG alongside for humans). The build fetches that exact commit and the CMake fails if
+what it checked out doesn't match. Both values are tracked source, so they're covered by the
+signed manifest, and the resolved commit is also recorded in ghost/build-env.txt. A verifier
+rebuilds against the identical llama.cpp source and gets the same native libraries inside the APK.
+
+## Build environment
+The exact toolchain the release was built with lives in `ghost/build-env.txt` (committed and
+covered by the signed source manifest): JDK version + vendor, OS name/version, Gradle, AGP, Kotlin,
+and the SDK levels. To reproduce the build byte-for-byte, install the same major JDK and the
+pinned toolchain shown there. The app's VERIFY BUILD screen shows the stable subset (major JVM, OS
+name, Gradle/AGP/Kotlin); the exact patch versions are in the file, kept out of the APK so the
+binary stays reproducible across machines.
+
 ## What the app shows
 - **built (UTC)** and **version**
 - **source commit** (full SHA) + **working tree at build** (clean / DIRTY)

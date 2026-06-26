@@ -39,15 +39,15 @@ import com.localghost.app.net.DaemonStatus
 import com.localghost.app.net.LifeContext
 import com.localghost.app.net.MemoryEntry
 import com.localghost.app.net.DeviceInfo
-import com.localghost.app.net.PinBehaviour
-import com.localghost.app.net.PinEntry
 import com.localghost.app.net.PendingNotification
+import com.localghost.app.net.UnlockSnapshot
 import com.localghost.app.notify.ForegroundPoller
 import com.localghost.app.notify.NotifyState
 import com.localghost.app.notify.Notifications
 import com.localghost.app.notify.PollWorker
 import com.localghost.app.security.AppLock
 import com.localghost.app.security.AuthGate
+import com.localghost.app.security.BoxConfig
 import com.localghost.app.security.DeviceIdentity
 import com.localghost.app.settings.AppSettings
 import com.localghost.app.sync.CommandResult
@@ -55,6 +55,7 @@ import com.localghost.app.sync.MediaKind
 import com.localghost.app.sync.SyncEngine
 import com.localghost.app.sync.SyncWorker
 import com.localghost.app.ui.CrashScreen
+import com.localghost.app.ui.QrScanScreen
 import com.localghost.app.ui.Loadable
 import com.localghost.app.ui.PermState
 import com.localghost.app.net.ChatCapabilities
@@ -79,6 +80,8 @@ import kotlinx.coroutines.launch
 
 private sealed interface Screen {
     data class Crash(val report: String) : Screen
+    data object Setup : Screen
+    data object Scan : Screen
     data object Gate : Screen
     data object Pin : Screen
     data object Shell : Screen
@@ -88,6 +91,7 @@ class MainActivity : ComponentActivity() {
 
     private var screen by mutableStateOf<Screen>(Screen.Gate)
     private var busy by mutableStateOf(false)
+    private var unlockProgress by mutableStateOf<UnlockSnapshot?>(null)
     private var error by mutableStateOf<String?>(null)
     private var sync by mutableStateOf(SyncUiState())
 
@@ -117,7 +121,6 @@ class MainActivity : ComponentActivity() {
     private var memories by mutableStateOf<Loadable<List<MemoryEntry>>>(Loadable.Loading)
     private var daemons by mutableStateOf<Loadable<List<DaemonStatus>>>(Loadable.Loading)
     private var exportState by mutableStateOf<String?>(null)
-    private var pins by mutableStateOf<Loadable<List<PinEntry>>>(Loadable.Loading)
     private var devices by mutableStateOf<Loadable<List<DeviceInfo>>>(Loadable.Loading)
 
     private val engine by lazy { SyncEngine(this) }
@@ -168,6 +171,12 @@ class MainActivity : ComponentActivity() {
         SyncWorker.schedule(this)          // 15-min background sync, Wi-Fi only
         CrashHandler.pending(this)?.let { screen = Screen.Crash(it) }
 
+        // Setup vs use: if the box connection hasn't been enrolled, start at the setup screen.
+        // (A pending crash still takes precedence.)
+        if (screen !is Screen.Crash && !BoxConfig.isConfigured(this)) {
+            screen = Screen.Setup
+        }
+
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) { ForegroundPoller.run(this@MainActivity) }
         }
@@ -180,8 +189,23 @@ class MainActivity : ComponentActivity() {
             LocalGhostTheme {
                 when (val s = screen) {
                     is Screen.Crash -> CrashScreen(s.report) { CrashHandler.clear(this); screen = Screen.Gate }
-                    Screen.Gate -> LockScreen(error) { passBiometric() }
-                    Screen.Pin -> PinScreen(busy, error) { submit(it) }
+                    Screen.Setup -> SetupScreen(
+                        busy = busy,
+                        error = error,
+                        onScanQr = { screen = Screen.Scan },
+                        onEnroll = { url, code, name, fp -> enroll(url, code, name, fp) },
+                    )
+                    Screen.Scan -> QrScanScreen(
+                        onLink = { link ->
+                            // A scanned enrol link gives us the box address, one-time code and the
+                            // pinned fingerprint. Enrol straight away, exactly like the typed path.
+                            screen = Screen.Setup
+                            enroll(link.baseUrl(), link.code, link.boxName.ifBlank { "phone" }, link.certFingerprint)
+                        },
+                        onCancel = { screen = Screen.Setup },
+                    )
+                    Screen.Gate -> LockScreen(error, unlocking = false, progress = null) { passBiometric() }
+                    Screen.Pin -> PinScreen(busy, error, unlockProgress) { submit(it) }
                     Screen.Shell -> MainShell(
                         messages = messages, streaming = streaming, onSend = ::sendChat, onStopChat = ::stopChat,
                         pendingAttachments = pendingAttachments,
@@ -225,12 +249,8 @@ class MainActivity : ComponentActivity() {
                         onLock = { tearDownCache(); screen = Screen.Gate },
                         onExport = ::exportJson,
                         exportState = exportState,
-                        onChangeCode = ::changeCode,
                         onWipe = ::wipeEverything,
-                        pins = pins,
                         devices = devices,
-                        onAddPin = ::addPin,
-                        onRemovePin = ::removePin,
                         conversations = conversations,
                         activeConvId = activeConvId,
                         onSelectConversation = ::selectConversation,
@@ -250,7 +270,8 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         super.onStop()
         // authGate decides: lock + tear down unless we launched a picker, or a crash is showing.
-        val mustTearDown = authGate.onStop(crashShowing = screen is Screen.Crash)
+        // Setup also survives backgrounding (the user isn't enrolled yet, so the gate is wrong).
+        val mustTearDown = authGate.onStop(keepCurrentScreen = screen is Screen.Crash || screen is Screen.Setup)
         if (mustTearDown) {
             screen = Screen.Gate; busy = false; error = null; autoSyncTried = false
             tearDownCache()
@@ -265,7 +286,7 @@ class MainActivity : ComponentActivity() {
         streaming = true
         chatJob = lifecycleScope.launch {
             // Route: forced local, or box unreachable -> on-phone model. Else the box.
-            val useLocal = forceLocalMode || !BoxClient.reachable()
+            val useLocal = forceLocalMode || !BoxClient.reachable(this@MainActivity)
             localModeActive = useLocal
             if (useLocal) generateLocal(text) else generateFromBox(text, atts)
         }
@@ -512,7 +533,6 @@ class MainActivity : ComponentActivity() {
         memories = Loadable.Loading
         daemons = Loadable.Loading
         pending = Loadable.Loading
-        pins = Loadable.Loading
         devices = Loadable.Loading
         connectors = Loadable.Loading
         availableDaemons = emptyList()
@@ -588,29 +608,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun changeCode(old: String, new: String) {
-        lifecycleScope.launch {
-            BoxClient.changePin(old, new)
-            // re-key wipes: same teardown as wipe, back to lock to re-enter
-            tearDownCache()
-            screen = Screen.Gate
-        }
-    }
-
-    private fun addPin(pin: String, behaviour: PinBehaviour, label: String) {
-        lifecycleScope.launch {
-            BoxClient.addPin(pin, behaviour, label)
-            pins = Loadable.Loaded(BoxClient.personaPins(this@MainActivity))
-        }
-    }
-
-    private fun removePin(id: String) {
-        lifecycleScope.launch {
-            BoxClient.removePin(id)
-            pins = Loadable.Loaded(BoxClient.personaPins(this@MainActivity))
-        }
-    }
-
     private fun setMobileSync(allow: Boolean) {
         allowMobileSyncState = allow                  // reactive UI update, instant
         AppSettings.setAllowMobileSync(this, allow)   // local cache
@@ -635,12 +632,47 @@ class MainActivity : ComponentActivity() {
                 })
     }
 
-    private fun submit(pin: String) {
+    private fun enroll(url: String, code: String, name: String, fingerprint: String) {
         busy = true; error = null
         lifecycleScope.launch {
-            val session = BoxClient.submitPin(pin)
+            val result = BoxClient.enroll(url, code, name, fingerprint)
             busy = false
-            if (session.ok) {
+            if (result.ok) {
+                // The box issued this device its client cert + key during enrolment. Store them so
+                // every later call presents the device cert for mTLS (nginx checks it at the
+                // handshake). Without this the phone could reach the box but be rejected at the TLS
+                // layer on every authenticated route.
+                val certPem = result.deviceCertPem
+                val keyPem = result.deviceKeyPem
+                if (certPem.isNullOrBlank() || keyPem.isNullOrBlank()) {
+                    error = "the box did not return a device certificate; enrolment incomplete"
+                    return@launch
+                }
+                DeviceCert.store(this@MainActivity, certPem, keyPem)
+                BoxConfig.write(this@MainActivity, BoxConfig.Config(
+                    baseUrl = url, deviceToken = result.deviceToken,
+                    deviceName = name, certFingerprint = fingerprint))
+                error = null
+                screen = Screen.Gate          // enrolled; now authenticate to enter
+            } else {
+                error = result.error ?: "enrolment failed"
+            }
+        }
+    }
+
+    private fun submit(pin: String) {
+        busy = true; error = null; unlockProgress = UnlockSnapshot.initial()
+        lifecycleScope.launch {
+            // Stream unlock progress: a hot account fills the stages in instantly, a cold one ticks
+            // through them once a second. The view is identical for any account.
+            var ok = false
+            BoxClient.submitPinStreaming(this@MainActivity, pin).collect { snap ->
+                unlockProgress = snap
+                if (snap.done) ok = true
+                if (snap.failed != null) error = snap.failed
+            }
+            busy = false; unlockProgress = null
+            if (ok) {
                 refreshGrants()
                 sync = sync.copy(notificationsMuted = NotifyState.isMuted(this@MainActivity))
                 if (!Notifications.hasPermission(this@MainActivity))
@@ -652,13 +684,12 @@ class MainActivity : ComponentActivity() {
                 lifeContext = BoxClient.lifeContext(this@MainActivity)
                 memories = Loadable.Loaded(BoxClient.memories(this@MainActivity))
                 daemons = Loadable.Loaded(BoxClient.daemonStatuses(this@MainActivity))
-                pins = Loadable.Loaded(BoxClient.personaPins(this@MainActivity))
                 devices = Loadable.Loaded(BoxClient.devices(this@MainActivity))
                 connectors = Loadable.Loaded(BoxClient.connectors(this@MainActivity))
                 availableDaemons = BoxClient.availableChatDaemons(this@MainActivity)
                 localModelPresent = LocalModel.isModelPresent(this@MainActivity)
                 offeredModels = BoxClient.availableModels(this@MainActivity)
-                boxReachable = BoxClient.reachable()
+                boxReachable = BoxClient.reachable(this@MainActivity)
                 conversations = BoxClient.conversations(this@MainActivity)
                 allowMobileSyncState = AppSettings.allowMobileSync(this@MainActivity)
                 refreshModels()

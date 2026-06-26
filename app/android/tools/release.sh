@@ -21,11 +21,13 @@ fi
 COMMIT="$(git rev-parse HEAD)"
 echo "  commit: $COMMIT"
 
-echo "> 2/6  Signing the source manifest (info@localghost.ai)..."
+echo "> 2/6  Writing build environment + signing the source manifest..."
+./gradlew --no-daemon writeBuildEnv
+git add ghost/build-env.txt                 # track it first so the manifest hashes it
 tools/sign_source.sh
 # The manifest + root are new files → commit them so the released build's tree stays clean and
 # the commit the APK is stamped with actually contains the manifest it claims.
-git add ghost/source-manifest.txt ghost/source-manifest.txt.asc MANIFEST.root
+git add ghost/build-env.txt ghost/source-manifest.txt ghost/source-manifest.txt.asc MANIFEST.root
 git commit -m "build: source manifest for release" >/dev/null
 COMMIT="$(git rev-parse HEAD)"
 echo "  manifest committed, release commit: $COMMIT"

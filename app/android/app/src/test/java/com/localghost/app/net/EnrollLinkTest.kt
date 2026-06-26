@@ -1,0 +1,58 @@
+package com.localghost.app.net
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertNotNull
+import org.junit.Test
+
+/**
+ * Guards the enrollment-link parser. This is the QR trust anchor, so the tests pin that it refuses
+ * anything without a host, code, AND fingerprint rather than enrolling insecurely.
+ */
+class EnrollLinkTest {
+
+    @Test fun parsesFullLink() {
+        val link = EnrollLink.parse(
+            "localghost://enroll?host=192.168.1.20&port=8443&code=ABCD-1234&fp=ab:cd:ef&name=xyntai")
+        assertNotNull(link)
+        link!!
+        assertEquals("192.168.1.20", link.host)
+        assertEquals(8443, link.port)
+        assertEquals("ABCD-1234", link.code)
+        assertEquals("xyntai", link.boxName)
+        assertEquals("https://192.168.1.20:8443", link.baseUrl())
+    }
+
+    @Test fun defaultsPortWhenAbsent() {
+        val link = EnrollLink.parse("localghost://enroll?host=box.local&code=X1&fp=aa:bb")
+        assertNotNull(link)
+        assertEquals(8443, link!!.port)
+    }
+
+    @Test fun normalisesFingerprint() {
+        val link = EnrollLink.parse("localghost://enroll?host=h&code=c&fp=abcdef")
+        assertEquals("AB:CD:EF", link!!.certFingerprint)
+    }
+
+    @Test fun rejectsMissingFingerprint() {
+        assertNull(EnrollLink.parse("localghost://enroll?host=h&code=c"))
+    }
+
+    @Test fun rejectsMissingCode() {
+        assertNull(EnrollLink.parse("localghost://enroll?host=h&fp=aa:bb"))
+    }
+
+    @Test fun rejectsMissingHost() {
+        assertNull(EnrollLink.parse("localghost://enroll?code=c&fp=aa:bb"))
+    }
+
+    @Test fun rejectsWrongScheme() {
+        assertNull(EnrollLink.parse("https://enroll?host=h&code=c&fp=aa"))
+        assertNull(EnrollLink.parse("random text"))
+        assertNull(EnrollLink.parse(""))
+    }
+
+    @Test fun rejectsBadPort() {
+        assertNull(EnrollLink.parse("localghost://enroll?host=h&code=c&fp=aa&port=99999"))
+    }
+}

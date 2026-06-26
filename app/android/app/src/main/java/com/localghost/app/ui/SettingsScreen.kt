@@ -21,7 +21,6 @@ fun SettingsScreen(
     onToggleMute: (Boolean) -> Unit,
     onExport: () -> Unit,
     exportState: String?,
-    onChangeCode: () -> Unit,
     onWipe: () -> Unit,
 ) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())
@@ -62,11 +61,10 @@ fun SettingsScreen(
         }
 
         Spacer(Modifier.height(12.dp))
-        GhostButton("CHANGE CODE", onChangeCode, modifier = Modifier.fillMaxWidth())
-        Spacer(Modifier.height(4.dp))
-        Text("Changing the code re-keys the box. The old key is destroyed. The data goes " +
-             "with it. There is no recovery. That is the design.",
-             color = Warning, style = MaterialTheme.typography.labelMedium)
+        Text("PIN changes happen at the box, not in the app. Run `ghost.secd changepin-<slot>` " +
+             "(keeps your data) or `ghost.secd resetup-<slot>` (wipes and starts fresh) over a " +
+             "local-network SSH session. A coerced phone cannot change or reset a PIN.",
+             color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
 
         Spacer(Modifier.height(20.dp))
         SectionLabel("DESTRUCTIVE")

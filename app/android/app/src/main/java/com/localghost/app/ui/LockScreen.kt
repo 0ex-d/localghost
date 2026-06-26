@@ -17,10 +17,23 @@ import androidx.compose.ui.text.font.FontWeight
 import com.localghost.app.ui.theme.GhostTextDim
 import com.localghost.app.ui.theme.TerminalGreen
 import com.localghost.app.ui.theme.Warning
+import com.localghost.app.net.UnlockSnapshot
+import androidx.compose.runtime.getValue
 import com.localghost.app.R
 
+/**
+ * The lock screen. When unlocking is true it shows the streamed stage list (UnlockProgress) instead
+ * of the UNLOCK button: a hot account fills in instantly, a cold one ticks through stages once a
+ * second. The progress is identical for any account, so the cold loading view is the same whether a
+ * real, decoy, or duress PIN was entered.
+ */
 @Composable
-fun LockScreen(error: String?, onUnlock: () -> Unit) {
+fun LockScreen(
+    error: String?,
+    unlocking: Boolean,
+    progress: UnlockSnapshot?,
+    onUnlock: () -> Unit,
+) {
     GhostScaffold { pad ->
         Column(
             Modifier.fillMaxSize().padding(pad).padding(32.dp),
@@ -34,9 +47,7 @@ fun LockScreen(error: String?, onUnlock: () -> Unit) {
                 modifier = Modifier.size(72.dp),
             )
             Spacer(Modifier.height(16.dp))
-            // Wordmark fits on one line: size scales to the available width.
             BoxWithConstraints(Modifier.fillMaxWidth()) {
-                // ~0.165 * width keeps the 10-char wordmark on one line comfortably.
                 val fs = (maxWidth.value * 0.165f).coerceIn(28f, 56f)
                 Text("LOCALGHOST", color = TerminalGreen,
                     fontSize = fs.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false,
@@ -46,11 +57,17 @@ fun LockScreen(error: String?, onUnlock: () -> Unit) {
             Text("> the only cloud is you", color = GhostTextDim,
                 style = MaterialTheme.typography.bodyMedium)
             Spacer(Modifier.height(48.dp))
-            GhostButton("UNLOCK", onUnlock, modifier = Modifier.fillMaxWidth())
-            error?.let {
-                Spacer(Modifier.height(16.dp))
-                Text("! $it", color = Warning, textAlign = TextAlign.Center,
-                    style = MaterialTheme.typography.bodyMedium)
+
+            if (unlocking && progress != null) {
+                // Streamed loading state: the stage list ticks through as the box reports progress.
+                UnlockProgress(progress)
+            } else {
+                GhostButton("UNLOCK", onUnlock, modifier = Modifier.fillMaxWidth())
+                error?.let {
+                    Spacer(Modifier.height(16.dp))
+                    Text("! $it", color = Warning, textAlign = TextAlign.Center,
+                        style = MaterialTheme.typography.bodyMedium)
+                }
             }
         }
     }

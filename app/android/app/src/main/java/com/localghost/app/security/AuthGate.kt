@@ -22,16 +22,17 @@ class AuthGate {
     /**
      * App went to the background. Returns true if the caller must lock (go to the gate) and tear
      * down the cached state. Returns false when an in-app picker is in flight, or a crash screen
-     * is showing (pass crashShowing = true so the lock doesn't replace it).
+     * is showing, or the user is mid-setup (pass keepCurrentScreen = true so the lock doesn't
+     * replace those screens).
      *
      * Matches the original MainActivity.onStop exactly:
      *   if (expectingResult) keep session
      *   else if (crash showing) keep crash
      *   else lock + tearDown
      */
-    fun onStop(crashShowing: Boolean): Boolean {
+    fun onStop(keepCurrentScreen: Boolean): Boolean {
         if (expectingResult) return false
-        if (crashShowing) return false
+        if (keepCurrentScreen) return false
         return true
     }
 

@@ -59,6 +59,18 @@ fun VerifyScreen() {
         Field(ctx, "signing cert SHA-256", signingFp, mono = true)
 
         Spacer(Modifier.height(16.dp))
+        SectionLabel("BUILD ENVIRONMENT")
+        Spacer(Modifier.height(6.dp))
+        Field(ctx, "JVM (major)", BuildConfig.BUILD_JVM_MAJOR)
+        Field(ctx, "OS", BuildConfig.BUILD_OS_NAME)
+        Field(ctx, "Gradle", BuildConfig.BUILD_GRADLE_VERSION)
+        Field(ctx, "AGP", BuildConfig.BUILD_AGP_VERSION)
+        Field(ctx, "Kotlin", BuildConfig.BUILD_KOTLIN_VERSION)
+        Text("Exact patch versions (JDK build, kernel) are in ghost/build-env.txt in the signed " +
+             "source, kept out of the APK so the build stays byte-reproducible.",
+             color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+
+        Spacer(Modifier.height(16.dp))
         LinkButton("OPEN SOURCE AT THIS COMMIT", commitUrl, ctx)
         Spacer(Modifier.height(8.dp))
         LinkButton("OPEN SIGNED SOURCE MANIFEST", manifestUrl, ctx)

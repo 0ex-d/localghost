@@ -12,19 +12,13 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import java.io.InputStream
+import org.json.JSONObject
 
 data class PendingNotification(val daemonId: String, val title: String, val body: String)
 
 /** A saved conversation. Lives on the box (synthd); the phone lists + loads, holds the active
  *  one in memory only. */
 data class Conversation(val id: String, val title: String, val updatedLabel: String, val messageCount: Int)
-
-/** A PIN's behaviour when entered at the lock screen. */
-enum class PinBehaviour { MOUNT_REAL, MOUNT_DECOY, WIPE }
-
-/** A PIN belonging to the CURRENTLY MOUNTED persona. Digits are never returned by the box
- *  after creation — only a masked hint and the behaviour. */
-data class PinEntry(val id: String, val hint: String, val behaviour: PinBehaviour, val label: String)
 
 /** A device enrolled against this persona. Sync state is per-device. */
 data class DeviceInfo(
@@ -93,15 +87,144 @@ object BoxClient {
 
     data class Session(val ok: Boolean)
 
-    /** Cheap reachability check. STUB returns true; real: mTLS ping to the box. Routing
-     *  uses this to decide box vs on-phone model. */
-    suspend fun reachable(): Boolean { delay(60); return boxReachableStub }
+    /**
+     * Submit a PIN and stream unlock progress by polling the box once a second. Emits a snapshot
+     * immediately (RESOLVE running), then a snapshot per poll until the account is open (done) or a
+     * stage errors (failed). A HOT account returns every stage complete on the first poll, so the
+     * flow emits one full snapshot and finishes , fast. A COLD account returns the stages finished so
+     * far, so the flow emits a growing snapshot each second until READY.
+     *
+     * The poll response is identical in shape for every account; this code cannot and does not infer
+     * whether the opened account is real or a decoy. The behaviour the PIN triggered (real/decoy/wipe)
+     * happened on the box; here we only render progress.
+     *
+     * Seam: pollUnlock is the real GET against ghost.secd over the mTLS channel. The stub below drives
+     * a believable cold sequence so the UI and tests are exercisable without the box.
+     */
+    fun submitPinStreaming(ctx: Context, pin: String): Flow<UnlockSnapshot> = flow {
+        emit(UnlockSnapshot.initial())
+        // Start the unlock on the box: POST the PIN. The box resolves it (real/decoy/wipe) and runs
+        // the stage stream; we then poll once a second and render progress. This code cannot infer
+        // whether the opened account is real or a decoy: the poll shape is identical for every
+        // account. Whatever the PIN triggered happened on the box.
+        try {
+            BoxHttp.postJson(ctx, "/v1/unlock", JSONObject().put("pin", pin))
+        } catch (e: Exception) {
+            emit(UnlockSnapshot.failed("could not reach the box: ${e.message}"))
+            return@flow
+        }
+        while (true) {
+            val states = try {
+                pollUnlock(ctx)
+            } catch (e: Exception) {
+                emit(UnlockSnapshot.failed("lost contact with the box: ${e.message}"))
+                return@flow
+            }
+            val snap = UnlockSnapshot.from(states)
+            emit(snap)
+            if (snap.done || snap.failed != null) break
+            delay(1000) // poll cadence: once a second
+        }
+    }
 
-    /** test seam: flip to simulate the box being down. */
-    @Volatile var boxReachableStub: Boolean = true
+    /** Back-compat one-shot: unlocks and resolves when the stream reaches done. */
+    suspend fun submitPin(ctx: Context, pin: String): Session {
+        var ok = false
+        submitPinStreaming(ctx, pin).collect { snap ->
+            if (snap.done) ok = true
+        }
+        return Session(ok = ok)
+    }
 
-    suspend fun submitPin(@Suppress("UNUSED_PARAMETER") pin: String): Session {
-        delay(1500); return Session(ok = true)
+    /** Poll the box for the current unlock stage states, mapping the JSON to the app enums. */
+    private fun pollUnlock(ctx: Context): Map<UnlockStage, StageState> {
+        val resp = BoxHttp.getJson(ctx, "/v1/unlock/poll")
+        val out = mutableMapOf<UnlockStage, StageState>()
+        val arr = resp.optJSONArray("stages") ?: return out
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            val stage = stageFromName(o.optString("stage")) ?: continue
+            out[stage] = stateFromName(o.optString("state"))
+        }
+        return out
+    }
+
+    private fun stageFromName(n: String): UnlockStage? = when (n) {
+        "RESOLVE" -> UnlockStage.RESOLVE
+        "UNSEAL" -> UnlockStage.UNSEAL
+        "MOUNT" -> UnlockStage.MOUNT
+        "START_DB" -> UnlockStage.START_DB
+        "START_CACHE" -> UnlockStage.START_CACHE
+        "DAEMONS" -> UnlockStage.DAEMONS
+        "READY" -> UnlockStage.READY
+        else -> null
+    }
+
+    private fun stateFromName(n: String): StageState = when (n) {
+        "RUNNING" -> StageState.RUNNING
+        "SKIPPED" -> StageState.SKIPPED
+        "COMPLETE" -> StageState.COMPLETE
+        "ERRORED" -> StageState.ERRORED
+        else -> StageState.PENDING
+    }
+
+    /**
+     * Enrollment result. On success the box has registered this device against a persona and
+     * returned a device token; the caller persists baseUrl + token via BoxConfig.
+     * STUB: validates inputs shallowly and echoes a fake token. Real (ghost.secd): the phone
+     * generates a keypair (DeviceIdentity), sends a CSR + the pairing code to baseUrl, the box
+     * mounts the persona the code selects, signs the cert, and returns the device token.
+     */
+    data class Enrollment(
+        val ok: Boolean,
+        val deviceToken: String = "",
+        val deviceCertPem: String? = null, // box-issued device cert, delivered on enroll
+        val deviceKeyPem: String? = null,  // its PKCS8 private key (box-generated, stored via DeviceCert)
+        val error: String? = null,
+    )
+
+    suspend fun enroll(
+        baseUrl: String,
+        pairingCode: String,
+        deviceName: String,
+        certFingerprint: String,
+    ): Enrollment {
+        if (baseUrl.isBlank() || pairingCode.isBlank()) {
+            return Enrollment(ok = false, error = "box address and pairing code are required")
+        }
+        // Bootstrap call: pin the box server cert by the fingerprint from the QR (BoxTrust) and POST
+        // the pairing code. No device cert is presented yet (this is the call that gets us one).
+        // nginx allows /v1/enroll without a client cert; every other route requires it. The box
+        // validates the code via its rate-limited gate and returns a device token (and, in the
+        // box-generates model, the device cert/key). The caller stores cert/key via DeviceCert.store
+        // and token/fingerprint/baseUrl via BoxConfig; thereafter every call presents the device
+        // cert for mTLS, which nginx checks at the handshake before any account/PIN.
+        return try {
+            val body = JSONObject()
+                .put("pairingCode", pairingCode)
+                .put("deviceName", deviceName)
+            val resp = BoxHttp.enroll(baseUrl, certFingerprint, body)
+            if (resp.optBoolean("ok", false)) {
+                Enrollment(
+                    ok = true,
+                    deviceToken = resp.optString("deviceToken", ""),
+                    deviceCertPem = resp.optString("deviceCertPem", null),
+                    deviceKeyPem = resp.optString("deviceKeyPem", null),
+                )
+            } else {
+                Enrollment(ok = false, error = resp.optString("error", "enrolment refused"))
+            }
+        } catch (e: Exception) {
+            Enrollment(ok = false, error = "could not reach the box: ${e.message}")
+        }
+    }
+
+    /** Cheap reachability check: mTLS GET /v1/health. Routing uses this to decide box vs on-phone
+     *  model. Returns false (not enrolled / unreachable) rather than throwing. */
+    suspend fun reachable(ctx: Context): Boolean = try {
+        BoxHttp.getJson(ctx, "/v1/health").optBoolean("ok", false)
+    } catch (e: Exception) {
+        false
     }
 
     // --- CHAT (RAG over the life-model) ---
@@ -233,25 +356,6 @@ object BoxClient {
      * PINs for the CURRENTLY MOUNTED persona only. The box cannot return another persona's
      * pins — it lacks the keys while this persona is mounted. STUB returns a sample set.
      */
-    suspend fun personaPins(@Suppress("UNUSED_PARAMETER") ctx: Context): List<PinEntry> {
-        delay(150)
-        return listOf(
-            PinEntry("p1", "••••", PinBehaviour.MOUNT_REAL, "primary"),
-            PinEntry("p2", "••••••", PinBehaviour.MOUNT_DECOY, "hand-over"),
-            PinEntry("p3", "••••••", PinBehaviour.WIPE, "burn"),
-        )
-    }
-
-    /** Add a pin to the mounted persona. STUB returns true. Real: ghost.secd derives + stores. */
-    suspend fun addPin(
-        @Suppress("UNUSED_PARAMETER") pin: String,
-        @Suppress("UNUSED_PARAMETER") behaviour: PinBehaviour,
-        @Suppress("UNUSED_PARAMETER") label: String,
-    ): Boolean { delay(400); return true }
-
-    /** Remove a pin from the mounted persona. STUB true. (Cannot remove the last MOUNT_REAL.) */
-    suspend fun removePin(@Suppress("UNUSED_PARAMETER") id: String): Boolean { delay(300); return true }
-
     // --- devices (per-device sync state, deduped index) ---
 
     suspend fun devices(@Suppress("UNUSED_PARAMETER") ctx: Context): List<DeviceInfo> {
@@ -276,22 +380,29 @@ object BoxClient {
     // --- on-phone models (served by the box) ---
 
     /** Models the box offers for the phone to run. STUB. Real: mTLS GET to the box registry. */
-    suspend fun availableModels(@Suppress("UNUSED_PARAMETER") ctx: Context): List<PhoneModel> {
-        delay(150)
-        // The box (ghost.secd / ghost.synthd) advertises the full set it can serve to the
-        // phone — small enough to run locally. Real impl: mTLS GET to the box model registry.
-        return listOf(
-            PhoneModel("gemma4-e2b-q4", "Gemma 4 E2B (Q4_K_M)",
-                "small · generic questions only", 2_600_000_000L, null),
-            PhoneModel("qwen25-1_5b-q4", "Qwen2.5 1.5B (Q4_K_M)",
-                "tiny · fast on phone", 1_100_000_000L, null),
-            PhoneModel("qwen25-3b-q4", "Qwen2.5 3B (Q4_K_M)",
-                "small · better reasoning", 2_100_000_000L, null),
-            PhoneModel("phi4-mini-q4", "Phi-4 mini (Q4_K_M)",
-                "small · strong for size", 2_400_000_000L, null),
-            PhoneModel("llama32-3b-q4", "Llama 3.2 3B (Q4_K_M)",
-                "small · general purpose", 2_000_000_000L, null),
-        )
+    suspend fun availableModels(ctx: Context): List<PhoneModel> {
+        // The box advertises the phone-runnable models it serves from its unencrypted shared model
+        // area (no account needed). mTLS GET to the registry; the phone downloads and runs locally.
+        return try {
+            val resp = BoxHttp.getJson(ctx, "/v1/models")
+            val arr = resp.optJSONArray("models") ?: return emptyList()
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    add(
+                        PhoneModel(
+                            id = o.optString("id"),
+                            name = o.optString("name"),
+                            detail = o.optString("detail"),
+                            sizeBytes = o.optLong("sizeBytes"),
+                            sha256 = o.optString("sha256", null),
+                        )
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            emptyList() // box unreachable: no box-served models; on-phone models still work
+        }
     }
 
     /**
@@ -300,12 +411,13 @@ object BoxClient {
      * GET /models/{id} with Range. The phone writes to filesDir/models and tracks it locally.
      */
     suspend fun downloadModel(
-        @Suppress("UNUSED_PARAMETER") id: String,
-        @Suppress("UNUSED_PARAMETER") offset: Long,
+        ctx: Context,
+        id: String,
+        offset: Long,
     ): java.io.InputStream {
-        delay(100)
-        // STUB: a tiny placeholder stream so the flow works end-to-end without the box.
-        return java.io.ByteArrayInputStream(ByteArray(0))
+        // mTLS GET /v1/models/{id}; Range header makes the download resumable from offset. The
+        // caller writes to filesDir/models and verifies the SHA-256 from the catalogue after.
+        return BoxHttp.openStream(ctx, "/v1/models/$id", offset)
     }
 
     // --- chat capabilities + connectors (box-side) ---
@@ -369,13 +481,6 @@ object BoxClient {
      * cannot preserve the old data - the old wrapping key is destroyed. So changing the
      * PIN wipes. STUB: returns true. Real: ghost.secd re-keys and crypto-erases the old slot.
      */
-    suspend fun changePin(
-        @Suppress("UNUSED_PARAMETER") oldPin: String,
-        @Suppress("UNUSED_PARAMETER") newPin: String,
-    ): Boolean {
-        delay(800); return true
-    }
-
     /**
      * Ingest a chat attachment to the box index using the SAME raw-bytes path as camera
      * sync, so the content hash matches and dedup links them — the same item attached in
