@@ -1,0 +1,82 @@
+package pair
+
+import (
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/pem"
+	"fmt"
+	"net"
+	"os"
+	"strings"
+)
+
+// NewPairingCode mints a short, high-entropy one-time code. Crockford-ish base32 without the
+// ambiguous letters, grouped for readability (e.g. "K7QF-2M9X"). The box keeps it live until it is
+// used once or it expires; that lifecycle lives in the daemon, not here.
+func NewPairingCode() (string, error) {
+	const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ" // no I L O U
+	buf := make([]byte, 8)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	out := make([]byte, 8)
+	for i, b := range buf {
+		out[i] = alphabet[int(b)%len(alphabet)]
+	}
+	return fmt.Sprintf("%s-%s", out[:4], out[4:]), nil
+}
+
+// CertFingerprint reads a PEM cert file and returns the SHA-256 of its DER, as uppercase
+// colon-separated hex. This is the value the phone pins. It must be computed over the exact cert
+// the box serves on its mTLS port.
+func CertFingerprint(pemPath string) (string, error) {
+	raw, err := os.ReadFile(pemPath)
+	if err != nil {
+		return "", err
+	}
+	block, _ := pem.Decode(raw)
+	if block == nil {
+		return "", fmt.Errorf("no PEM block in %s", pemPath)
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(cert.Raw)
+	parts := make([]string, len(sum))
+	for i, b := range sum {
+		parts[i] = fmt.Sprintf("%02X", b)
+	}
+	return strings.Join(parts, ":"), nil
+}
+
+// LANHost returns the box's best-guess LAN address for the QR. Prefers a private IPv4 on an up,
+// non-loopback interface. The operator can always override with a flag (e.g. a .local name).
+func LANHost() (string, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return "", err
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipnet, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip := ipnet.IP.To4()
+			if ip == nil || !ip.IsPrivate() {
+				continue
+			}
+			return ip.String(), nil
+		}
+	}
+	return "", fmt.Errorf("no private IPv4 found; pass --host explicitly")
+}
