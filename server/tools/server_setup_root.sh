@@ -103,14 +103,48 @@ else RUN "modprobe dm_crypt" && echo "  loaded (or would load)" || echo "  WARNI
 grep -qxF dm_crypt /etc/modules-load.d/localghost.conf 2>/dev/null \
     || RUN "echo dm_crypt > /etc/modules-load.d/localghost.conf"
 
-# --- TPM access for the service user (tss group) ---
-echo "> TPM access for $SVC_USER..."
+# --- TPM access for the service user (kernel resource manager, /dev/tpmrm0) ---
+# hw/tpm.go opens /dev/tpmrm0 directly (the KERNEL resource manager), so we do NOT need tpm2-abrmd.
+# We just need: a 'tss' group, the device group-owned by tss with group rw, and the service user in
+# the group. We create the group if absent and install a udev rule so the device permissions persist
+# across reboots (the device is recreated on each boot, so a one-off chown would not survive).
+echo "> TPM access for $SVC_USER (kernel RM, no abrmd)..."
 if [ -e /dev/tpmrm0 ]; then
+    # 1. ensure the tss group exists (this box has no tpm packages, so it likely does not yet)
     if getent group tss >/dev/null; then
-        id -nG "$SVC_USER" | grep -qw tss && echo "  $SVC_USER already in tss" \
-            || { RUN "usermod -aG tss '$SVC_USER'"; echo "  added $SVC_USER to tss (re-login to activate)"; }
-    else echo "  WARNING: no 'tss' group; tpm2 stack may be incomplete"; fi
-else echo "  WARNING: no /dev/tpmrm0 (enable Intel PTT / firmware TPM in BIOS)"; fi
+        echo "  tss group exists"
+    else
+        RUN "groupadd --system tss"
+        echo "  created system group tss"
+    fi
+    # 2. udev rule: on boot, set /dev/tpmrm0 (and /dev/tpm0) to root:tss mode 0660 so the group has rw.
+    UDEV=/etc/udev/rules.d/60-localghost-tpm.rules
+    if [ "$DRY" = 1 ]; then
+        echo "  [would] write $UDEV granting group tss rw on /dev/tpm0 and /dev/tpmrm0"
+        echo "  [would] udevadm control --reload && udevadm trigger (apply now)"
+        echo "  [would] chgrp tss /dev/tpmrm0 /dev/tpm0 && chmod 0660 ... (immediate, pre-reboot)"
+    else
+        cat > "$UDEV" <<'EOF'
+# LocalGhost: give group 'tss' read/write on the TPM so ghost.secd (kernel RM) can seal/unseal
+# without root. Applies on every boot since the device nodes are recreated each time.
+KERNEL=="tpm0",   MODE="0660", OWNER="root", GROUP="tss"
+KERNEL=="tpmrm0", MODE="0660", OWNER="root", GROUP="tss"
+EOF
+        chmod 0644 "$UDEV"
+        echo "  wrote $UDEV"
+        # apply the rule now, and also chgrp the live device so we do not have to reboot first
+        udevadm control --reload >/dev/null 2>&1 || true
+        udevadm trigger -c add -s tpm >/dev/null 2>&1 || true
+        chgrp tss /dev/tpmrm0 /dev/tpm0 2>/dev/null || true
+        chmod 0660 /dev/tpmrm0 /dev/tpm0 2>/dev/null || true
+        echo "  applied group rw on /dev/tpmrm0 now (and persistent via udev)"
+    fi
+    # 3. add the service user to tss
+    id -nG "$SVC_USER" | grep -qw tss && echo "  $SVC_USER already in tss" \
+        || { RUN "usermod -aG tss '$SVC_USER'"; echo "  added $SVC_USER to tss (RE-LOGIN to activate)"; }
+else
+    echo "  WARNING: no /dev/tpmrm0 (enable Intel PTT / firmware TPM in BIOS)"
+fi
 
 # --- scoped sudo: ghost.* service management for the service user (nginx is already granted) ---
 echo "> Scoped sudo for $SVC_USER to manage ghost.* services..."
