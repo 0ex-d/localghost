@@ -33,4 +33,20 @@ object DeviceIdentity {
             .setDigests(KeyProperties.DIGEST_SHA256)
             .apply { if (strongBox) setIsStrongBoxBacked(true) }
             .build()
+
+    /**
+     * Delete the device identity key from the keystore. Part of a deliberate "clear the phone" before
+     * a risky crossing: revocability is the protection, so the key that authenticates this phone to the
+     * box must actually be destroyed, not just forgotten in RAM. Re-pairing then needs the box (and the
+     * FIDO key at home), which is the point. Best-effort: a missing alias is success, not an error.
+     */
+    fun clear() {
+        try {
+            val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+            if (ks.containsAlias(ALIAS)) ks.deleteEntry(ALIAS)
+        } catch (e: Exception) {
+            // keystore unavailable or already gone; nothing more we can do, and the goal (no usable
+            // key) is met either way.
+        }
+    }
 }

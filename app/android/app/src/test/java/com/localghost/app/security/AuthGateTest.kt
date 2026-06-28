@@ -62,4 +62,24 @@ class AuthGateTest {
         assertFalse(g.expectingResult)
         assertTrue(g.onStop(keepCurrentScreen = false))
     }
+    // --- keepForScreen: the screen-to-keep mapping MainActivity.onStop uses. These pin Bug 2 (a
+    // mid-setup background , including the camera permission dialog on the scan screen , wrongly
+    // re-prompting for a fingerprint) so it cannot regress. ---
+
+    @Test fun keepForScreen_preEnrolment_keeps_session() {
+        // setup and the QR scan that feeds it are pre-enrolment; backgrounding must NOT lock.
+        assertTrue("pre-enrolment screens survive backgrounding",
+            AuthGate.keepForScreen(preEnrolment = true, crashShowing = false))
+    }
+
+    @Test fun keepForScreen_crash_keeps_session() {
+        assertTrue("crash must not be replaced by the lock",
+            AuthGate.keepForScreen(preEnrolment = false, crashShowing = true))
+    }
+
+    @Test fun keepForScreen_normal_screen_locks() {
+        // an enrolled, in-use screen (not pre-enrolment, no crash) must lock on background.
+        assertFalse("a normal screen must lock",
+            AuthGate.keepForScreen(preEnrolment = false, crashShowing = false))
+    }
 }

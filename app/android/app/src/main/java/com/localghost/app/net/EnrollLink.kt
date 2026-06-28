@@ -7,8 +7,13 @@ import java.net.URLDecoder
  * discovery or trust: the QR carries everything the phone needs to reach the box on the LAN and
  * to pin its identity on first contact.
  *
- *   localghost://enroll?host=192.168.1.20&port=8443&code=ABCD-1234&fp=AB:CD:...&name=xyntai
+ *   localghost://enroll?v=1&host=192.168.1.20&port=8443&code=ABCD-1234&fp=AB:CD:...&name=xyntai
  *
+ * - v     : format version. Absent means 1 (the original codes shipped without it). The phone
+ *           understands up to CURRENT_VERSION; a higher number means the box is newer than the app,
+ *           and parse returns a Result.Outdated so the scanner can say "update the app" instead of
+ *           failing in a way no one can read. This field exists so the format can change later
+ *           without old and new ends silently mis-parsing each other.
  * - host  : LAN address or .local name the phone can route to right now.
  * - port  : the box's mTLS port.
  * - code  : one-time pairing code the box is showing.
@@ -29,36 +34,62 @@ data class EnrollLink(
     val code: String,
     val certFingerprint: String,
     val boxName: String = "",
+    val version: Int = CURRENT_VERSION,
 ) {
     /** The base URL the phone will store and connect to. */
     fun baseUrl(): String = "https://$host:$port"
 
+    /** The outcome of parsing a scanned/typed payload. */
+    sealed interface Result {
+        data class Ok(val link: EnrollLink) : Result
+        /** Looked like an enrol link but was malformed (missing required field, bad port). */
+        object Malformed : Result
+        /** A valid enrol link from a NEWER box than this app understands. Tell the user to update. */
+        data class Outdated(val sawVersion: Int) : Result
+        /** Not an enrol link at all (wrong scheme). */
+        object NotEnroll : Result
+    }
+
     companion object {
         const val PREFIX = "localghost://enroll?"
+        /** The newest enrol-link version this app understands. Bump when the format changes. */
+        const val CURRENT_VERSION = 1
 
-        /** Parse a scanned/typed payload. Returns null if it isn't a valid enroll link. */
-        fun parse(raw: String): EnrollLink? {
+        /**
+         * Parse a scanned/typed payload, keeping the version distinction. Use this where the caller
+         * wants to tell "newer box, update the app" apart from "garbage".
+         */
+        fun parseResult(raw: String): Result {
             val text = raw.trim()
-            // Case-insensitive scheme+host check.
             val lower = text.lowercase()
-            if (!lower.startsWith(PREFIX)) return null
-            val query = text.substring(PREFIX.length)
+            if (!lower.startsWith(PREFIX)) return Result.NotEnroll
+            val params = parseQuery(text.substring(PREFIX.length))
 
-            val params = parseQuery(query)
+            // version first: absent = 1 (original codes). A higher version than we know means the box
+            // is ahead of the app, which is a clean "update" message rather than a parse failure.
+            val version = params["v"]?.trim()?.toIntOrNull() ?: 1
+            if (version > CURRENT_VERSION) return Result.Outdated(version)
+
             val host = params["host"]?.trim().orEmpty()
             val code = params["code"]?.trim().orEmpty()
             val fp = params["fp"]?.trim().orEmpty()
             val port = params["port"]?.trim()?.toIntOrNull() ?: 8443
             val name = params["name"]?.trim().orEmpty()
 
-            // host, code, and fingerprint are all required: without the fingerprint there is no
-            // trust anchor, so we refuse rather than enroll insecurely.
-            if (host.isEmpty() || code.isEmpty() || fp.isEmpty()) return null
-            if (port !in 1..65535) return null
+            if (host.isEmpty() || code.isEmpty() || fp.isEmpty()) return Result.Malformed
+            if (port !in 1..65535) return Result.Malformed
 
-            return EnrollLink(host = host, port = port, code = code,
-                certFingerprint = normaliseFp(fp), boxName = name)
+            return Result.Ok(
+                EnrollLink(
+                    host = host, port = port, code = code,
+                    certFingerprint = normaliseFp(fp), boxName = name, version = version,
+                )
+            )
         }
+
+        /** Parse a scanned/typed payload. Returns null if it isn't a valid, current enroll link. */
+        fun parse(raw: String): EnrollLink? =
+            (parseResult(raw) as? Result.Ok)?.link
 
         private fun parseQuery(query: String): Map<String, String> =
             query.split("&").mapNotNull { pair ->

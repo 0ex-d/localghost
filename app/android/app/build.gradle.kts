@@ -1,12 +1,15 @@
 import java.util.Properties
 import org.gradle.api.artifacts.VersionCatalogsExtension
+import java.time.Instant
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
 }
 
-// --- build provenance: read git at configure time ---
+// --- build provenance: read git + source manifest at configure time ---
 // Uses providers.exec (configuration-cache safe); falls back to "" if git isn't available.
 fun git(vararg args: String): String = try {
     providers.exec {
@@ -18,9 +21,9 @@ fun git(vararg args: String): String = try {
 val gitCommit = git("rev-parse", "HEAD").ifEmpty { "unknown" }
 val gitCommitShort = git("rev-parse", "--short", "HEAD").ifEmpty { "unknown" }
 val gitTreeClean = git("status", "--porcelain").isEmpty()
-// DETERMINISTIC build time: the commit's committer date (ISO-8601 UTC), NOT wall-clock. A wall-clock
-// time would change the APK bytes on every build and break reproducibility. Same commit -> same time.
-val buildTimeUtc: String = git("log", "-1", "--pretty=%cI", "HEAD").ifEmpty { "unknown" }
+val buildTimeUtc: String = DateTimeFormatter.ISO_INSTANT
+    .withZone(ZoneOffset.UTC)
+    .format(Instant.now())
 val manifestRoot = rootProject.file("MANIFEST.root")
     .let { if (it.exists()) it.readText().trim() else "" }
 
@@ -37,19 +40,6 @@ val gradleVersion: String = gradle.gradleVersion
 val catalog = extensions.getByType<VersionCatalogsExtension>().named("libs")
 val agpVersion: String = catalog.findVersion("agp").map { it.toString() }.orElse("unknown")
 val kotlinVersion: String = catalog.findVersion("kotlin").map { it.toString() }.orElse("unknown")
-
-// Read the llama.cpp pins from CMakeLists.txt. The regex anchors on `set(LLAMA_CPP_...` so it matches
-// the actual set() calls, NOT the comment line above them that mentions both identifiers. Matching
-// the bare identifier would let `.find()` latch onto the comment and run forward to the wrong quote
-// (which is how the commit field once came out as the tag value).
-fun cmakePin(key: String): String {
-    val cmake = rootProject.file("app/src/main/cpp/CMakeLists.txt")
-    if (!cmake.exists()) return "unknown"
-    return Regex("""set\(\s*$key\s+"([^"]+)"""")
-        .find(cmake.readText())?.groupValues?.get(1) ?: "unknown"
-}
-val llamaTag: String = cmakePin("LLAMA_CPP_TAG")
-val llamaCommit: String = cmakePin("LLAMA_CPP_COMMIT")
 
 android {
     val localProps = Properties().apply {
@@ -142,50 +132,38 @@ dependencies {
 // install to reproduce the build. Deliberately NOT in BuildConfig: the exact JDK patch and kernel
 // string vary between machines and would change the APK bytes. Run by tools/release.sh before the
 // build; the file is committed and signed alongside the source manifest.
-//
-// Everything written here is either a toolchain version (build-determining) or clearly-labelled
-// context. It deliberately OMITS jdk.home (a machine-specific path, useless for reproduction and a
-// minor info leak) and uses the commit's committer time for "Written" (deterministic, so the file
-// reproduces). The llama.cpp pins are read from CMakeLists.txt via the anchored regex above.
 tasks.register("writeBuildEnv") {
     val out = rootProject.file("ghost/build-env.txt")
     val commit = gitCommit
-    val writtenAt = buildTimeUtc
-    val jdkVersion = System.getProperty("java.version")
-    val jdkVendor = System.getProperty("java.vendor")
-    val osVersion = System.getProperty("os.version")
-    val osArch = System.getProperty("os.arch")
-    val gv = gradle.gradleVersion
-    val agp = agpVersion
-    val kotlin = kotlinVersion
-    val lTag = llamaTag
-    val lCommit = llamaCommit
     notCompatibleWithConfigurationCache("writes a provenance file at execution time")
     doLast {
         out.parentFile.mkdirs()
         out.writeText(buildString {
             appendLine("# LocalGhost App Build Environment")
             appendLine("# Build: $commit")
-            appendLine("# Written: $writtenAt")
-            appendLine("#")
-            appendLine("# Build-determining: match these to reproduce the APK bytes.")
+            appendLine("# Written: ${DateTimeFormatter.ISO_INSTANT.withZone(ZoneOffset.UTC).format(Instant.now())}")
             appendLine()
-            appendLine("jdk.version      $jdkVersion")
-            appendLine("jdk.vendor       $jdkVendor")
-            appendLine("gradle.version   $gv")
-            appendLine("agp.version      $agp")
-            appendLine("kotlin.version   $kotlin")
+            appendLine("jdk.version      ${System.getProperty("java.version")}")
+            appendLine("jdk.vendor       ${System.getProperty("java.vendor")}")
+            appendLine("jdk.home         ${System.getProperty("java.home")}")
+            appendLine("os.name          ${System.getProperty("os.name")}")
+            appendLine("os.version       ${System.getProperty("os.version")}")
+            appendLine("os.arch          ${System.getProperty("os.arch")}")
+            appendLine("gradle.version   ${gradle.gradleVersion}")
+            appendLine("agp.version      $agpVersion")
+            appendLine("kotlin.version   $kotlinVersion")
             appendLine("compileSdk       37")
             appendLine("targetSdk        36")
             appendLine("minSdk           35")
             appendLine("buildTools       36.0.0")
-            appendLine("llama.cpp.tag    $lTag")
-            appendLine("llama.cpp.commit $lCommit")
-            appendLine()
-            appendLine("# Informational: NOT build-determining, recorded for context only.")
-            appendLine("os.name          ${System.getProperty("os.name")}")
-            appendLine("os.version       $osVersion")
-            appendLine("os.arch          $osArch")
+            val cmake = rootProject.file("app/src/main/cpp/CMakeLists.txt")
+            if (cmake.exists()) {
+                val txt = cmake.readText()
+                val tag = Regex("""LLAMA_CPP_TAG[^"]*"([^"]+)"""").find(txt)?.groupValues?.get(1) ?: "unknown"
+                val commit = Regex("""LLAMA_CPP_COMMIT[^"]*"([^"]+)"""").find(txt)?.groupValues?.get(1) ?: "unknown"
+                appendLine("llama.cpp.tag    $tag")
+                appendLine("llama.cpp.commit $commit")
+            }
         })
         println("wrote ${out.relativeTo(rootProject.projectDir)}")
     }

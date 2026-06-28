@@ -32,3 +32,38 @@ class QrMatrixDecodeTest {
         assertThrows(Exception::class.java) { QrMatrixDecode.decode(grid) }
     }
 }
+
+// --- poison resistance: malformed input must fail as DecodeError, never an uncaught crash ---
+// A hostile QR cannot enrol (the fingerprint pin stops that), but it must not be able to crash the
+// decoder either. These feed adversarial grids and assert a clean DecodeError rather than an
+// IndexOutOfBounds, OOM, or hang.
+class QrMatrixDecodePoisonTest {
+
+    private fun squareGrid(n: Int, fill: Boolean = false) = Array(n) { BooleanArray(n) { fill } }
+
+    @org.junit.Test fun jaggedGridRejected() {
+        val g = Array(25) { i -> BooleanArray(if (i == 0) 10 else 25) } // row 0 too short
+        try { QrMatrixDecode.decode(g); org.junit.Assert.fail("expected DecodeError") }
+        catch (e: QrMatrixDecode.DecodeError) { /* good */ }
+    }
+
+    @org.junit.Test fun oversizedGridRejected() {
+        try { QrMatrixDecode.decode(squareGrid(101)); org.junit.Assert.fail("expected DecodeError") }
+        catch (e: QrMatrixDecode.DecodeError) { /* good */ }
+    }
+
+    @org.junit.Test fun tinyGridRejected() {
+        try { QrMatrixDecode.decode(squareGrid(9)); org.junit.Assert.fail("expected DecodeError") }
+        catch (e: QrMatrixDecode.DecodeError) { /* good */ }
+    }
+
+    @org.junit.Test fun garbageValidSizeGridDoesNotCrash() {
+        // a correctly-sized (v1, 21x21) but content-garbage grid must throw DecodeError, not crash
+        val rnd = java.util.Random(42)
+        repeat(50) {
+            val g = Array(21) { BooleanArray(21) { rnd.nextBoolean() } }
+            try { QrMatrixDecode.decode(g) } catch (e: QrMatrixDecode.DecodeError) { /* expected */ }
+            // any other throwable would fail the test by propagating
+        }
+    }
+}

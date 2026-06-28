@@ -85,9 +85,6 @@ object BoxClient {
 
     private const val CADENCE_MS = 15 * 60 * 1000L
 
-    private fun JSONObject.optStringOrNull(key: String): String? =
-        if (has(key) && !isNull(key)) getString(key) else null
-
     data class Session(val ok: Boolean)
 
     /**
@@ -211,8 +208,8 @@ object BoxClient {
                 Enrollment(
                     ok = true,
                     deviceToken = resp.optString("deviceToken", ""),
-                    deviceCertPem = resp.optStringOrNull("deviceCertPem"),
-                    deviceKeyPem = resp.optStringOrNull("deviceKeyPem"),
+                    deviceCertPem = resp.optString("deviceCertPem", null),
+                    deviceKeyPem = resp.optString("deviceKeyPem", null),
                 )
             } else {
                 Enrollment(ok = false, error = resp.optString("error", "enrolment refused"))
@@ -398,7 +395,7 @@ object BoxClient {
                             name = o.optString("name"),
                             detail = o.optString("detail"),
                             sizeBytes = o.optLong("sizeBytes"),
-                            sha256 = o.optStringOrNull("sha256"),
+                            sha256 = o.optString("sha256", null),
                         )
                     )
                 }

@@ -7,7 +7,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -101,11 +101,25 @@ private fun toggleRow(label: String, sub: String, checked: Boolean, onChange: (B
 
 @Composable
 private fun WipeButton(onWipe: () -> Unit) {
+    var confirming by remember { mutableStateOf(false) }
     androidx.compose.material3.OutlinedButton(
-        onClick = onWipe,
+        onClick = { confirming = true },
         shape = androidx.compose.ui.graphics.RectangleShape,
         border = androidx.compose.foundation.BorderStroke(1.dp, Warning),
         colors = androidx.compose.material3.ButtonDefaults.outlinedButtonColors(contentColor = Warning),
         modifier = Modifier.fillMaxWidth(),
     ) { Text("[ WIPE EVERYTHING ]", style = MaterialTheme.typography.labelLarge) }
+
+    if (confirming) {
+        ConfirmDialog(
+            title = "WIPE THIS PHONE",
+            body = "This destroys the box connection, the device certificate, and the identity key on " +
+                "this phone. The box keeps your data. To use this phone again you re-pair it, which " +
+                "needs to be done at home with your security key. There is no undo from here.",
+            requireWord = "WIPE",
+            confirmLabel = "WIPE EVERYTHING",
+            onConfirm = { confirming = false; onWipe() },
+            onDismiss = { confirming = false },
+        )
+    }
 }

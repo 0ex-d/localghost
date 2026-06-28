@@ -48,7 +48,11 @@ object QrMatrixDecode {
     /** Decode a square module grid to text. Throws DecodeError on any inconsistency. */
     fun decode(grid: Array<BooleanArray>): String {
         val n = grid.size
-        if (n < 21 || (n - 17) % 4 != 0) throw DecodeError("not a valid module count: $n")
+        if (n < 21 || n > 57 || (n - 17) % 4 != 0) throw DecodeError("not a valid module count: $n")
+        // defence in depth: the grid must be square (every row n wide). The sampler builds square
+        // grids, but decode also runs on adversarial input, and a jagged grid would throw an
+        // unpredictable index error deep in the readers. Reject it cleanly here instead.
+        for (row in grid) if (row.size != n) throw DecodeError("jagged grid")
         val v = (n - 17) / 4
         if (v !in 1..10) throw DecodeError("unsupported version $v")
 
@@ -160,7 +164,11 @@ object QrMatrixDecode {
         val bits = ArrayList<Int>(data.size * 8)
         for (cw in data) for (i in 7 downTo 0) bits.add((cw shr i) and 1)
         var pos = 0
+        // take reads k bits, but NEVER past the end. A malformed QR can claim a length or mode that
+        // runs off the data; without this guard take() would throw IndexOutOfBounds on adversarial
+        // input. We treat "not enough bits" as a decode error, not a crash.
         fun take(k: Int): Int {
+            if (pos + k > bits.size) throw DecodeError("ran out of bits")
             var x = 0
             repeat(k) { x = (x shl 1) or bits[pos]; pos++ }
             return x
@@ -169,6 +177,12 @@ object QrMatrixDecode {
         if (mode != 0b0100) throw DecodeError("not byte mode (got $mode)")
         val ccbits = if (v < 10) 8 else 16
         val len = take(ccbits)
+        // Cap len to what the data could actually hold. A poisoned QR can put a huge length here; the
+        // ByteArray(len) alloc and the read loop must be bounded by the real remaining bytes, or we
+        // either over-read (caught above) or, with a very large len, risk a big allocation. The
+        // remaining whole bytes is a hard ceiling.
+        val maxBytes = (bits.size - pos) / 8
+        if (len > maxBytes) throw DecodeError("length $len exceeds data ($maxBytes)")
         val bytes = ByteArray(len)
         for (i in 0 until len) bytes[i] = take(8).toByte()
         return String(bytes, Charsets.ISO_8859_1)

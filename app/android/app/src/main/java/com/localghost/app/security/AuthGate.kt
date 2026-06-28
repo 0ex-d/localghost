@@ -38,4 +38,20 @@ class AuthGate {
 
     /** App returned to the foreground. The picker guard is consumed here (one-shot). */
     fun onResume() { expectingResult = false }
+
+    companion object {
+        /**
+         * Whether the current screen must survive backgrounding rather than being replaced by the
+         * lock. Two reasons a screen is kept: it is PRE-ENROLMENT (setup or the QR scan that feeds it,
+         * where the user is not enrolled against a box yet, so locking to the biometric gate is wrong
+         * and, for scan, the camera permission dialog backgrounds the app and would otherwise lock the
+         * user out mid-setup), or a CRASH screen is showing (which must not be replaced by the lock).
+         *
+         * Pure and flag-based (not the Screen type, which is private to MainActivity) so it is unit
+         * testable. MainActivity maps its current screen to these flags and passes the result to
+         * onStop as keepCurrentScreen.
+         */
+        fun keepForScreen(preEnrolment: Boolean, crashShowing: Boolean): Boolean =
+            preEnrolment || crashShowing
+    }
 }

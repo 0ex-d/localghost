@@ -39,7 +39,6 @@ import com.localghost.app.net.DaemonStatus
 import com.localghost.app.net.LifeContext
 import com.localghost.app.net.MemoryEntry
 import com.localghost.app.net.DeviceInfo
-import com.localghost.app.net.DeviceCert
 import com.localghost.app.net.PendingNotification
 import com.localghost.app.net.UnlockSnapshot
 import com.localghost.app.notify.ForegroundPoller
@@ -56,14 +55,15 @@ import com.localghost.app.sync.MediaKind
 import com.localghost.app.sync.SyncEngine
 import com.localghost.app.sync.SyncWorker
 import com.localghost.app.ui.CrashScreen
-import com.localghost.app.ui.QrScanScreen
 import com.localghost.app.ui.SetupScreen
+import com.localghost.app.ui.QrScanScreen
 import com.localghost.app.ui.Loadable
 import com.localghost.app.ui.PermState
 import com.localghost.app.net.ChatCapabilities
 import com.localghost.app.net.Connector
 import com.localghost.app.net.BoxSettings
 import com.localghost.app.net.Conversation
+import com.localghost.app.net.DeviceCert
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import com.localghost.app.local.LocalModel
@@ -272,8 +272,15 @@ class MainActivity : ComponentActivity() {
     override fun onStop() {
         super.onStop()
         // authGate decides: lock + tear down unless we launched a picker, or a crash is showing.
-        // Setup also survives backgrounding (the user isn't enrolled yet, so the gate is wrong).
-        val mustTearDown = authGate.onStop(keepCurrentScreen = screen is Screen.Crash || screen is Screen.Setup)
+        // Setup AND Scan survive backgrounding: both are pre-enrolment (the user isn't enrolled yet, so
+        // the gate is wrong), and Scan in particular backgrounds the activity itself when the camera
+        // permission dialog appears , without this it would lock the user out mid-setup and re-prompt
+        // for a fingerprint they have not even set up against a box yet. The rule lives in AuthGate so
+        // it is unit-tested (see AuthGateTest.keepForScreen_*).
+        val preEnrolment = screen is Screen.Setup || screen is Screen.Scan
+        val mustTearDown = authGate.onStop(
+            keepCurrentScreen = AuthGate.keepForScreen(preEnrolment, crashShowing = screen is Screen.Crash)
+        )
         if (mustTearDown) {
             screen = Screen.Gate; busy = false; error = null; autoSyncTried = false
             tearDownCache()
@@ -528,6 +535,18 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Run a single Loadable load, turning any failure into Loadable.Failed instead of letting it
+     * throw. Used for the post-unlock loads so one failing endpoint shows its own error line rather
+     * than aborting the rest of the screen. The label names the section in the error.
+     */
+    private suspend fun <T> loadOr(label: String, block: suspend () -> Loadable<T>): Loadable<T> =
+        try {
+            block()
+        } catch (e: Exception) {
+            Loadable.Failed("could not load $label")
+        }
+
     private fun tearDownCache() {
         messages.clear()
         pendingAttachments = emptyList()
@@ -603,10 +622,25 @@ class MainActivity : ComponentActivity() {
 
     private fun wipeEverything() {
         lifecycleScope.launch {
+            // Tell the box to crypto-erase its side (best effort; may be unreachable, which is fine ,
+            // the point of clearing the phone is that it stops being a usable key regardless).
             BoxClient.wipeEverything(this@MainActivity)
-            // local teardown: drop session, return to lock
-            tearDownCache()
-            screen = Screen.Gate
+
+            // The REAL local clear. This is the revocability the security model depends on: before a
+            // risky crossing the phone must stop being a working credential, not merely forget its UI
+            // state. So destroy what persists, not just what is in RAM:
+            //   - BoxConfig.clear: box URL, device token, name, fingerprint, AND the device cert + key
+            //     (DeviceCert stores them as BoxConfig secrets), all in the encrypted prefs.
+            //   - DeviceIdentity.clear: the keystore-backed identity keypair.
+            //   - the crash log, in case it captured anything.
+            // After this the phone cannot reach or authenticate to the box; re-pairing needs the box
+            // and the FIDO key at home, which is the intended cost.
+            BoxConfig.clear(this@MainActivity)
+            DeviceIdentity.clear()
+            CrashHandler.clear(this@MainActivity)
+
+            tearDownCache()        // in-memory UI state
+            screen = Screen.Setup  // unenrolled now, so setup is the correct destination, not the gate
         }
     }
 
@@ -682,24 +716,31 @@ class MainActivity : ComponentActivity() {
                 screen = Screen.Shell
                 buzz()
                 maybeAutoSync()
-                pending = Loadable.Loaded(BoxClient.pollPending(this@MainActivity))
-                lifeContext = BoxClient.lifeContext(this@MainActivity)
-                memories = Loadable.Loaded(BoxClient.memories(this@MainActivity))
-                daemons = Loadable.Loaded(BoxClient.daemonStatuses(this@MainActivity))
-                devices = Loadable.Loaded(BoxClient.devices(this@MainActivity))
-                connectors = Loadable.Loaded(BoxClient.connectors(this@MainActivity))
-                availableDaemons = BoxClient.availableChatDaemons(this@MainActivity)
-                localModelPresent = LocalModel.isModelPresent(this@MainActivity)
-                offeredModels = BoxClient.availableModels(this@MainActivity)
-                boxReachable = BoxClient.reachable(this@MainActivity)
-                conversations = BoxClient.conversations(this@MainActivity)
-                allowMobileSyncState = AppSettings.allowMobileSync(this@MainActivity)
-                refreshModels()
-                offeredModels.forEach { m -> reattachIfDownloading(m.id) }
-                val bs = BoxClient.settings(this@MainActivity)
-                AppSettings.setAllowMobileSync(this@MainActivity, bs.allowMobileSync)
-                NotifyState.setMuted(this@MainActivity, bs.notificationsMuted)
-                sync = sync.copy(notificationsMuted = bs.notificationsMuted)
+                // Each load is independent. Against the real box one endpoint can fail (a daemon down,
+                // a network blip) without the others, so wrap each Loadable load so a failure lands as
+                // Loadable.Failed (which every screen renders as an ErrorLine) instead of throwing and
+                // aborting the rest , which would leave later sections stuck on Loading forever. The
+                // non-Loadable bits below are best-effort and guarded the same way.
+                pending = loadOr("pending") { Loadable.Loaded(BoxClient.pollPending(this@MainActivity)) }
+                lifeContext = runCatching { BoxClient.lifeContext(this@MainActivity) }.getOrNull()
+                memories = loadOr("memories") { Loadable.Loaded(BoxClient.memories(this@MainActivity)) }
+                daemons = loadOr("daemons") { Loadable.Loaded(BoxClient.daemonStatuses(this@MainActivity)) }
+                devices = loadOr("devices") { Loadable.Loaded(BoxClient.devices(this@MainActivity)) }
+                connectors = loadOr("connectors") { Loadable.Loaded(BoxClient.connectors(this@MainActivity)) }
+                runCatching {
+                    availableDaemons = BoxClient.availableChatDaemons(this@MainActivity)
+                    localModelPresent = LocalModel.isModelPresent(this@MainActivity)
+                    offeredModels = BoxClient.availableModels(this@MainActivity)
+                    boxReachable = BoxClient.reachable(this@MainActivity)
+                    conversations = BoxClient.conversations(this@MainActivity)
+                    allowMobileSyncState = AppSettings.allowMobileSync(this@MainActivity)
+                    refreshModels()
+                    offeredModels.forEach { m -> reattachIfDownloading(m.id) }
+                    val bs = BoxClient.settings(this@MainActivity)
+                    AppSettings.setAllowMobileSync(this@MainActivity, bs.allowMobileSync)
+                    NotifyState.setMuted(this@MainActivity, bs.notificationsMuted)
+                    sync = sync.copy(notificationsMuted = bs.notificationsMuted)
+                }
             } else error = "Could not reach your box"
         }
     }
