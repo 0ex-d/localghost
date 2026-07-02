@@ -44,6 +44,8 @@ import com.localghost.app.net.MemoryEntry
 import com.localghost.app.net.DeviceInfo
 import com.localghost.app.net.PendingNotification
 import com.localghost.app.net.UnlockSnapshot
+import com.localghost.app.net.UnlockStage
+import com.localghost.app.net.StageState
 import com.localghost.app.notify.ForegroundPoller
 import com.localghost.app.notify.NotifyState
 import com.localghost.app.notify.Notifications
@@ -51,7 +53,6 @@ import com.localghost.app.notify.PollWorker
 import com.localghost.app.security.AppLock
 import com.localghost.app.security.AuthGate
 import com.localghost.app.security.BoxConfig
-import com.localghost.app.security.DeviceIdentity
 import com.localghost.app.settings.AppSettings
 import com.localghost.app.sync.CommandResult
 import com.localghost.app.sync.MediaKind
@@ -97,6 +98,8 @@ class MainActivity : ComponentActivity() {
     private var screen by mutableStateOf<Screen>(Screen.Gate)
     private var busy by mutableStateOf(false)
     private var unlockProgress by mutableStateOf<UnlockSnapshot?>(null)
+    // Teardown progress shown at the gate while the box spins down after a LOCK.
+    private var lockProgress by mutableStateOf<UnlockSnapshot?>(null)
     private var error by mutableStateOf<String?>(null)
     // After a QR scan we keep the decoded link here so the Setup screen can prefill its fields (and keep
     // them if the box rejects us), and track the background enrol's outcome: null = still in flight, true
@@ -113,6 +116,9 @@ class MainActivity : ComponentActivity() {
     private val authGate = AuthGate()     // testable lock-decision logic (see AuthGateTest)
     private var chatCaps by mutableStateOf(ChatCapabilities())
     private var forceLocalMode by mutableStateOf(false)   // manual override
+    // Local-only mode: the escape hatch when there is no box, or setup/enrol/PIN failed. A limited
+    // interface , on-phone models only, no box, no history , so the app is usable regardless.
+    private var localOnly by mutableStateOf(false)
     private var localModeActive by mutableStateOf(false)  // box-down or forced, shown in chat
     private var localModelPresent by mutableStateOf(false)
     private var boxReachable by mutableStateOf(true)
@@ -174,7 +180,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        DeviceIdentity.ensureKey()
         AppLock.ensureKey()
         Notifications.ensureChannel(this)
         PollWorker.schedule(this)
@@ -218,6 +223,7 @@ class MainActivity : ComponentActivity() {
                         prefilledFingerprint = scannedLink?.certFingerprint ?: "",
                         onScanQr = { scannedLink = null; error = null; scanEnrolOk = null; screen = Screen.Scan },
                         onEnroll = { url, code, name, fp -> enroll(url, code, name, fp) },
+                        onLocalOnly = ::enterLocalOnly,
                     )
                     Screen.Scan -> QrScanScreen(
                         // Fires the instant a valid enrol code is confirmed: start the network enrol NOW so it
@@ -232,7 +238,7 @@ class MainActivity : ComponentActivity() {
                         },
                         onCancel = { scannedLink = null; error = null; scanEnrolOk = null; screen = Screen.Setup },
                     )
-                    Screen.Gate -> LockScreen(error, unlocking = false, progress = null) { passBiometric() }
+                    Screen.Gate -> LockScreen(error, unlocking = lockProgress != null, progress = lockProgress, onLocalOnly = ::enterLocalOnly) { passBiometric() }
                     Screen.Pin -> PinScreen(busy, error, unlockProgress) { submit(it) }
                     Screen.Shell -> MainShell(
                         messages = messages, streaming = streaming, onSend = ::sendChat, onStopChat = ::stopChat,
@@ -273,8 +279,8 @@ class MainActivity : ComponentActivity() {
                         allowMobileSync = allowMobileSyncState,
                         onToggleMobileSync = ::setMobileSync,
                         onToggleMute = ::setMute,
-                        boxConnected = true,
-                        onLock = { tearDownCache(); screen = Screen.Gate },
+                        boxConnected = !localOnly,
+                        onLock = ::lockBox,
                         onExport = ::exportJson,
                         exportState = exportState,
                         onWipe = ::wipeEverything,
@@ -577,7 +583,39 @@ class MainActivity : ComponentActivity() {
             Loadable.Failed("could not load $label")
         }
 
-    private fun tearDownCache() {
+    // Lock: tell the box to spin the drive down, show the teardown steps ticking through (mirroring
+    // the mount so it's visibly a fresh cold start next time), then lock the app UI at the gate. The
+    // box call is best-effort , on failure we still lock the app and go to the gate.
+    // Enter the on-phone-only interface: no box, no history, chat served by a local model. The escape
+    // hatch reachable from Setup (skip enrolment) and from the lock gate (skip the PIN), so a broken or
+    // unreachable box, a failed enrol, or a forgotten PIN never leaves the app unusable.
+    private fun enterLocalOnly() {
+        forceLocalMode = true
+        localOnly = true
+        error = null
+        tearDownCache()          // no history , clean local slate
+        localModeActive = true
+        localModelPresent = LocalModel.isModelPresent(this)
+        screen = Screen.Shell
+    }
+
+    private fun lockBox() {
+        lifecycleScope.launch {
+            val steps = try { BoxClient.lock(this@MainActivity) } catch (_: Exception) { emptyList() }
+            screen = Screen.Gate
+            if (steps.isNotEmpty()) {
+                val acc = mutableMapOf<UnlockStage, StageState>()
+                for (s in steps) {
+                    acc[s.stage] = s.state
+                    lockProgress = UnlockSnapshot.teardown(acc)
+                    kotlinx.coroutines.delay(160)
+                }
+                kotlinx.coroutines.delay(300)
+                lockProgress = null
+            }
+            tearDownCache()
+        }
+    }
         messages.clear()
         pendingAttachments = emptyList()
         lifeContext = null
@@ -661,12 +699,10 @@ class MainActivity : ComponentActivity() {
             // state. So destroy what persists, not just what is in RAM:
             //   - BoxConfig.clear: box URL, device token, name, fingerprint, AND the device cert + key
             //     (DeviceCert stores them as BoxConfig secrets), all in the encrypted prefs.
-            //   - DeviceIdentity.clear: the keystore-backed identity keypair.
             //   - the crash log, in case it captured anything.
-            // After this the phone cannot reach or authenticate to the box; re-pairing needs the box
-            // and the FIDO key at home, which is the intended cost.
+            // After this the phone cannot reach or authenticate to the box; re-pairing needs a fresh
+            // enrolment QR from the box at home, which is the intended cost.
             BoxConfig.clear(this@MainActivity)
-            DeviceIdentity.clear()
             CrashHandler.clear(this@MainActivity)
 
             tearDownCache()        // in-memory UI state
@@ -711,28 +747,34 @@ class MainActivity : ComponentActivity() {
         return combo.ifBlank { "phone" }
     }
 
-    // Shared enrol core. Runs the network enrol and, on success, stores the device cert/key (needed for
-    // mTLS on every later call , nginx checks it at the handshake) and writes the box config. Returns null
-    // on success, or a human error string on failure. Navigation is left to the caller.
-    private suspend fun doEnroll(url: String, code: String, name: String, fingerprint: String): String? {
-        val result = BoxClient.enroll(url, code, name, fingerprint)
-        if (!result.ok) return result.error ?: "enrolment failed"
-        val certPem = result.deviceCertPem
-        val keyPem = result.deviceKeyPem
+    // Shared enrol core. Enrolment is one SCAN, no network call: the box generated the device keypair
+    // and delivered the cert + key inside the QR (EnrollLink), so we import them into the encrypted
+    // store (DeviceCert) , used for mTLS on every later call , and write the box config. url/name may
+    // have been edited on the setup screen (e.g. a DDNS host); the cert, key, and fingerprint come from
+    // the scanned link. Returns null on success, or a human error string. Navigation is the caller's.
+    private suspend fun doEnrollFromLink(link: EnrollLink, url: String, name: String): String? {
+        val certPem = link.deviceCertPem
+        val keyPem = link.deviceKeyPem
         if (certPem.isNullOrBlank() || keyPem.isNullOrBlank())
-            return "the box did not return a device certificate; enrolment incomplete"
+            return "this QR carries no device certificate , regenerate the enrolment QR on the box"
         DeviceCert.store(this, certPem, keyPem)
         BoxConfig.write(this, BoxConfig.Config(
-            baseUrl = url, deviceToken = result.deviceToken,
-            deviceName = name, certFingerprint = fingerprint))
+            baseUrl = url, deviceToken = "", // no session yet; a token is issued on first PIN unlock
+            deviceName = name, certFingerprint = link.certFingerprint))
         return null
     }
 
-    // Typed path: enrol and, on success, go straight to the gate to authenticate.
+    // Typed/confirm path: the cert/key are only ever in the scanned QR, so this enrols from the last
+    // scanned link (with any edited url/name), or asks the user to scan if there is none.
     private fun enroll(url: String, code: String, name: String, fingerprint: String) {
+        val link = scannedLink
+        if (link == null) {
+            error = "scan the box QR to enrol , the certificate is delivered in the QR, not entered"
+            return
+        }
         busy = true; error = null
         lifecycleScope.launch {
-            val err = doEnroll(url, code, name, fingerprint)
+            val err = doEnrollFromLink(link, url, name)
             busy = false
             error = err
             if (err == null) { scannedLink = null; scanEnrolOk = null; screen = Screen.Gate }
@@ -746,7 +788,7 @@ class MainActivity : ComponentActivity() {
     private fun enrollFromScan(link: EnrollLink) {
         busy = true; error = null; scanEnrolOk = null
         lifecycleScope.launch {
-            val err = doEnroll(link.baseUrl(), link.code, phoneName(), link.certFingerprint)
+            val err = doEnrollFromLink(link, link.baseUrl(), phoneName())
             busy = false
             error = err
             scanEnrolOk = (err == null)

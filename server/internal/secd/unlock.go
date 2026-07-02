@@ -36,6 +36,27 @@ func newUnlockService(backend UnlockBackend) *unlockService {
 	}
 }
 
+// Lock spins the slot down via the backend, collecting the teardown steps it emits (so the app can
+// show the spin-down), then resets the unlock service to its cold, pre-unlock state so the next open
+// re-runs every stage from scratch. Idempotent at the backend level.
+func (u *unlockService) Lock(slot int) ([]map[string]any, error) {
+	steps := make([]map[string]any, 0, len(profile.LockStages))
+	err := u.backend.Lock(slot, func(p profile.Progress) {
+		steps = append(steps, map[string]any{
+			"stage": stageName(p.Stage),
+			"label": p.Stage.Label(),
+			"state": stepStateName(p.State),
+		})
+	})
+	u.mu.Lock()
+	u.progress = map[profile.Stage]profile.StepState{}
+	u.done = false
+	u.failed = ""
+	u.openSlot = profile.NoSlot
+	u.mu.Unlock()
+	return steps, err
+}
+
 type unlockRequest struct {
 	Pin string `json:"pin"`
 }
@@ -145,6 +166,16 @@ func stageName(st profile.Stage) string {
 		return "DAEMONS"
 	case profile.StageReady:
 		return "READY"
+	case profile.StageStopServices:
+		return "STOP_SERVICES"
+	case profile.StageStopCache:
+		return "STOP_CACHE"
+	case profile.StageStopDB:
+		return "STOP_DB"
+	case profile.StageUnmount:
+		return "UNMOUNT"
+	case profile.StageLocked:
+		return "LOCKED"
 	default:
 		return "UNKNOWN"
 	}

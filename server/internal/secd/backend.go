@@ -39,6 +39,14 @@ type UnlockBackend interface {
 	// Warm reports whether the slot is already mounted and running (a hot unlock), so the heavy
 	// stages report Skipped instead of re-running.
 	Warm(slot int) bool
+
+	// Lock spins the slot back down: stop its services, stop Redis and Postgres, unmount the container
+	// and luksClose the mapping so the volume key leaves the kernel. It emits a Progress per teardown
+	// stage (profile.LockStages) so the app can show the spin-down the same way it shows the mount ,
+	// making it visible that the next open is a genuine cold start. Idempotent: locking an already-cold
+	// slot walks the same stages, each a no-op Complete. This is the deliberate "lock now" action,
+	// distinct from the wipe (which destroys keys).
+	Lock(slot int, emit func(profile.Progress)) error
 }
 
 // runUnlock drives the backend through the unlock stages, emitting progress. It is shared by both

@@ -35,3 +35,17 @@ func (simBackend) Mount(int, []byte) error            { time.Sleep(400 * time.Mi
 func (simBackend) StartDB(int) error                  { time.Sleep(300 * time.Millisecond); return nil }
 func (simBackend) StartCache(int) error               { time.Sleep(100 * time.Millisecond); return nil }
 func (simBackend) Warm(int) bool                      { return false }
+func (simBackend) Lock(_ int, emit func(profile.Progress)) error {
+	// Walk the same teardown stages as the real backend, with a small cost each, so the app's lock
+	// UI is exercisable off-box.
+	for _, st := range profile.LockStages {
+		if st == profile.StageLocked {
+			emit(profile.Progress{Stage: st, State: profile.Complete})
+			continue
+		}
+		emit(profile.Progress{Stage: st, State: profile.Running})
+		time.Sleep(120 * time.Millisecond)
+		emit(profile.Progress{Stage: st, State: profile.Complete})
+	}
+	return nil
+}

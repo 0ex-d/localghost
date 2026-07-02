@@ -77,6 +77,12 @@ func (d *DataStore) Stop(slot int) error {
 	return rerr
 }
 
+// StopCache stops this slot's Redis. Split out so the lock teardown can report it as its own step.
+func (d *DataStore) StopCache(slot int) error { return d.stopRedis(slot) }
+
+// StopDB stops this slot's Postgres. Split out so the lock teardown can report it as its own step.
+func (d *DataStore) StopDB(slot int) error { return d.stopPostgres(slot) }
+
 func (d *DataStore) startPostgres(slot int) error {
 	data := d.pgData(slot)
 	firstRun := false

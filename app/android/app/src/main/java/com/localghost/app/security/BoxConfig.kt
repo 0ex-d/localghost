@@ -17,8 +17,9 @@ import javax.crypto.spec.GCMParameterSpec
  * app is "configured" once enrollment writes them. That empty-vs-present check is the
  * setup-vs-use signal.
  *
- * This is NOT the auth credential (the mTLS client cert is, via DeviceIdentity). The token here is
- * an enrollment/identifier value the box hands back; losing it just means re-enrolling.
+ * This is NOT the auth credential (the mTLS client cert is, via DeviceCert , the box-issued cert +
+ * key delivered in the enrolment QR). The token here is an enrollment/identifier value the box hands
+ * back; losing it just means re-enrolling.
  */
 object BoxConfig {
 

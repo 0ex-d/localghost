@@ -21,6 +21,7 @@ fun SettingsScreen(
     onToggleMute: (Boolean) -> Unit,
     onExport: () -> Unit,
     exportState: String?,
+    onLock: () -> Unit,
     onWipe: () -> Unit,
 ) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())
@@ -64,6 +65,15 @@ fun SettingsScreen(
         Text("PIN changes happen at the box, not in the app. Run `ghost.secd changepin-<slot>` " +
              "(keeps your data) or `ghost.secd resetup-<slot>` (wipes and starts fresh) over a " +
              "local-network SSH session. A coerced phone cannot change or reset a PIN.",
+             color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+
+        Spacer(Modifier.height(24.dp))
+        SectionLabel("SESSION")
+        Spacer(Modifier.height(8.dp))
+        GhostButton("LOCK BOX NOW", onLock, modifier = Modifier.fillMaxWidth())
+        Spacer(Modifier.height(4.dp))
+        Text("Spins the box down: stops the databases, unmounts the drive, and drops the key from " +
+             "memory. The box goes dark until you enter your PIN again. Your data is untouched.",
              color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
 
         Spacer(Modifier.height(20.dp))

@@ -35,6 +35,7 @@ fun SetupScreen(
     onScanQr: () -> Unit,
     onEnroll: (url: String, code: String, deviceName: String, fingerprint: String) -> Unit,
     prefilledFingerprint: String = "",
+    onLocalOnly: () -> Unit = {},
 ) {
     var url by remember(prefilledUrl) { mutableStateOf(prefilledUrl) }
     // The pairing code rides in from the scan and is never surfaced as a field.
@@ -87,6 +88,13 @@ fun SetupScreen(
             Text("The only cloud is you.", color = TerminalDim,
                 style = MaterialTheme.typography.labelMedium,
                 textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+
+            Spacer(Modifier.height(16.dp))
+            GhostButton("SKIP , USE ON-PHONE MODELS ONLY", onLocalOnly, modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(4.dp))
+            Text("No box needed. A limited interface with on-phone models only and no history. You can " +
+                 "enrol a box later.", color = GhostTextDim, style = MaterialTheme.typography.labelMedium,
+                 modifier = Modifier.fillMaxWidth())
         }
     }
 }

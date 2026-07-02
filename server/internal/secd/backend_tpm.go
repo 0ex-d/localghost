@@ -101,6 +101,36 @@ func (b *tpmBackend) Warm(slot int) bool {
 	return b.mounter.IsMounted(slot)
 }
 
+// Lock spins the slot down, emitting a Progress per teardown stage so the app can render the
+// spin-down like the mount. Order mirrors the mount in reverse: stop services, stop cache (Redis),
+// stop database (Postgres), then unmount + luksClose (which evicts the volume key from the kernel).
+// Stop errors are recorded as Errored but do not abort the unmount , we still want the volume closed
+// , while a failed UNMOUNT is returned, since it means the drive is still open and the lock did not
+// actually take.
+func (b *tpmBackend) Lock(slot int, emit func(profile.Progress)) error {
+	step := func(st profile.Stage, do func() error) error {
+		emit(profile.Progress{Stage: st, State: profile.Running})
+		err := do()
+		if err != nil {
+			emit(profile.Progress{Stage: st, State: profile.Errored})
+		} else {
+			emit(profile.Progress{Stage: st, State: profile.Complete})
+		}
+		return err
+	}
+
+	// No per-account daemons run yet (they are stubs), so this stage is a structural no-op for now ,
+	// it holds the symmetry with the mount's StageDaemons and is where daemon shutdown will hook in.
+	_ = step(profile.StageStopServices, func() error { return nil })
+	_ = step(profile.StageStopCache, func() error { return b.store.StopCache(slot) })
+	_ = step(profile.StageStopDB, func() error { return b.store.StopDB(slot) })
+	if err := step(profile.StageUnmount, func() error { return b.mounter.Unmount(slot) }); err != nil {
+		return err
+	}
+	emit(profile.Progress{Stage: profile.StageLocked, State: profile.Complete})
+	return nil
+}
+
 // tpmEraser adapts the TPM to wipe.HardwareEraser: crypto-erase destroys a slot's sealed key so the
 // volume becomes unrecoverable.
 type tpmEraser struct{}

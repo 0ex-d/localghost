@@ -21,11 +21,39 @@ enum class UnlockStage(val label: String) {
     START_DB("starting database"),
     START_CACHE("starting cache"),
     DAEMONS("starting services"),
-    READY("ready");
+    READY("ready"),
+
+    // Teardown stages, mirroring the mount in reverse. Shown on lock so the spin-down is visible and
+    // the next unlock is obviously a fresh cold start.
+    STOP_SERVICES("stopping services"),
+    STOP_CACHE("stopping cache"),
+    STOP_DB("stopping database"),
+    UNMOUNT("unmounting store"),
+    LOCKED("locked");
 
     companion object {
         /** The fixed order every unlock walks. Same for all accounts. */
         val order = listOf(RESOLVE, UNSEAL, MOUNT, START_DB, START_CACHE, DAEMONS, READY)
+
+        /** The teardown order a lock walks , the mount in reverse. */
+        val teardownOrder = listOf(STOP_SERVICES, STOP_CACHE, STOP_DB, UNMOUNT, LOCKED)
+
+        /** Map a box stage name to the enum (both unlock and teardown names). */
+        fun fromName(n: String): UnlockStage? = when (n) {
+            "RESOLVE" -> RESOLVE
+            "UNSEAL" -> UNSEAL
+            "MOUNT" -> MOUNT
+            "START_DB" -> START_DB
+            "START_CACHE" -> START_CACHE
+            "DAEMONS" -> DAEMONS
+            "READY" -> READY
+            "STOP_SERVICES" -> STOP_SERVICES
+            "STOP_CACHE" -> STOP_CACHE
+            "STOP_DB" -> STOP_DB
+            "UNMOUNT" -> UNMOUNT
+            "LOCKED" -> LOCKED
+            else -> null
+        }
     }
 }
 
@@ -60,6 +88,20 @@ data class UnlockSnapshot(
 
         /** The initial snapshot shown the instant a PIN is submitted, before the first poll. */
         fun initial(): UnlockSnapshot = from(mapOf(UnlockStage.RESOLVE to StageState.RUNNING))
+
+        /** A teardown snapshot from a flat map over the LOCK stages (used by the lock spin-down view). */
+        fun teardown(states: Map<UnlockStage, StageState>): UnlockSnapshot {
+            val rows = UnlockStage.teardownOrder.map { st ->
+                StageProgress(st, states[st] ?: StageState.PENDING)
+            }
+            val done = states[UnlockStage.LOCKED] == StageState.COMPLETE
+            val err = rows.firstOrNull { it.state == StageState.ERRORED }
+            return UnlockSnapshot(
+                stages = rows,
+                done = done,
+                failed = if (err != null) "failed at ${err.stage.label}" else null,
+            )
+        }
 
         /** A terminal snapshot for a transport failure (could not reach or lost contact with box). */
         fun failed(reason: String): UnlockSnapshot =

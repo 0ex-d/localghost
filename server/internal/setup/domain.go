@@ -57,47 +57,49 @@ server {
     listen 443 ssl http2;
     server_name %[1]s;
 
+    # Give away nothing about the software here. server_tokens off drops the nginx VERSION from the
+    # Server header and from any default error page. (The bare string "Server: nginx" can only be
+    # removed with the headers-more module; it is near-zero signal , nginx serves a large fraction of
+    # the web , but if that module is present, add:  more_clear_headers Server;)
+    server_tokens off;
+
     # The box is its own CA. This server cert is self-issued and the phone PINS it (the
     # fingerprint travels in the enrollment QR), so there is no Let's Encrypt, no ACME, no port 80.
     ssl_certificate     /etc/ghost/ca/box-server.pem;
     ssl_certificate_key /etc/ghost/ca/box-server-key.pem;
 
-    # ACCESS LAYER, before any account or PIN: a device cert issued by THIS box's CA is the access
-    # key. We set verification to OPTIONAL at the server level so the ONE bootstrap endpoint ,
-    # enrolment , can be reached by a device that does not have a cert yet (that call is how it gets
-    # one). Every other location REQUIRES a verified cert, enforced per-location below. A scanner
-    # hitting the public IP can reach only /v1/enroll, and that is gated by the one-time pairing
-    # code (rate-limited, locks out). Reachability is not access.
+    # ACCESS LAYER. A device cert issued by THIS box's CA is the access key, but its ABSENCE or
+    # INVALIDITY must never be distinguishable from the box being down. So verification is OPTIONAL at
+    # the TLS layer (a certless client still completes the handshake, otherwise the handshake failure
+    # itself would be a signal), and whether the cert verified is decided INSIDE, collapsing to the
+    # same 503 as everything else. There is no public location that answers anything but 503.
     ssl_client_certificate /etc/ghost/ca/devices-ca.pem;  # the box CA bundle
-    ssl_verify_client      optional;                      # required is enforced per-location
+    ssl_verify_client      optional;                      # NEVER 'on' , a handshake reject is a tell
 
-    # APPEARS-DOWN: a genuinely-down ghost.secd (connect failure -> 502) and a deliberate 502 from
-    # ghost.secd (wrong/expired session token, or a muted notification poll) must look IDENTICAL, so
-    # an observer cannot tell "the app is down" from "wrong PIN" or "notifications muted". Intercept
-    # upstream errors and render ONE fixed generic response for all of them. Set at the server level
-    # so it covers every location below.
+    # APPEARS-DOWN, TOTAL. Every request , no cert, a broken or forged cert, a valid cert, a wrong PIN,
+    # an expired token, a muted poll, a genuinely-off daemon, an unknown path , returns the SAME plain
+    # 503. From outside, the only fact observable is "this host answers TLS on 443 and says the service
+    # is unavailable". That is true of countless servers and reveals nothing: not that LocalGhost runs
+    # here, not that a box is enrolled, not whether your cert is good, not whether the daemon is up.
+    # It is deliberately hard to debug from the outside , which is the point.
     proxy_intercept_errors on;
-    error_page 502 503 504 = @down;
+    error_page 400 401 403 404 495 496 497 502 503 504 = @down;
 
     location @down {
-        # generic, unbranded, looks like any unavailable service. No LocalGhost hint.
-        add_header Content-Type text/plain always;
-        return 503 "service unavailable\n";
+        # One plain, standard 503 for everything. We supply our own generic body so nginx never renders
+        # its default error page (whose footer prints "nginx"); it names neither LocalGhost nor nginx.
+        default_type text/html;
+        return 503 "<!doctype html><title>503 Service Unavailable</title>\n<h1>Service Unavailable</h1>\n";
     }
 
-    # Enrolment bootstrap: no client cert yet (the device is getting one). Still TLS, still pinned by
-    # the phone, still gated by the one-time pairing code inside ghost.secd.
-    location = /v1/enroll {
-        proxy_pass https://%[2]s;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $remote_addr;
-        proxy_ssl_verify off;
-    }
-
-    # Everything else: reject anyone whose device cert did not verify against the box CA, at the edge,
-    # before the request reaches ghost.secd.
+    # There is NO public endpoint , not even enrolment. Enrolment is a LAN / first-contact action done
+    # entirely by SCANNING the box's QR: the box generates the device keypair and the QR carries the
+    # signed device certificate AND its key (an offline, screen-to-camera transfer), so the phone is
+    # enrolled by the scan alone , it never makes a certless call to get a cert. The public domain
+    # therefore never needs a certless door. A device with a valid cert proxies through; anyone else ,
+    # no cert, bad cert, wrong path , gets the identical 503.
     location / {
-        if ($ssl_client_verify != SUCCESS) { return 403; }
+        if ($ssl_client_verify != SUCCESS) { return 503; }
         proxy_pass https://%[2]s;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $remote_addr;

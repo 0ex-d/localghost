@@ -21,6 +21,14 @@ const (
 	StageStartCache             // start this account's Redis
 	StageDaemons                // bring the ghost.<x>d daemons online for this account
 	StageReady                  // account is open
+
+	// Teardown stages, mirroring the mount in reverse so a lock reads as a real cold spin-down and the
+	// next unlock is visibly fresh (full mount stages, not Skipped).
+	StageStopServices // stopping the ghost.<x>d daemons
+	StageStopCache    // stop this account's Redis
+	StageStopDB       // stop this account's Postgres
+	StageUnmount      // luksClose + unmount the container (key leaves the kernel)
+	StageLocked       // account is cold again
 )
 
 func (s Stage) Label() string {
@@ -39,6 +47,16 @@ func (s Stage) Label() string {
 		return "starting services"
 	case StageReady:
 		return "ready"
+	case StageStopServices:
+		return "stopping services"
+	case StageStopCache:
+		return "stopping cache"
+	case StageStopDB:
+		return "stopping database"
+	case StageUnmount:
+		return "unmounting store"
+	case StageLocked:
+		return "locked"
 	default:
 		return "working"
 	}
@@ -65,6 +83,12 @@ type Progress struct {
 // what keep the stream uniform across accounts.
 var unlockStages = []Stage{
 	StageResolve, StageUnseal, StageMount, StageStartDB, StageStartCache, StageDaemons, StageReady,
+}
+
+// LockStages is the ordered teardown sequence a lock walks, the mount in reverse. Exported so the
+// daemon can drive the spin-down and report each step.
+var LockStages = []Stage{
+	StageStopServices, StageStopCache, StageStopDB, StageUnmount, StageLocked,
 }
 
 // StreamUnlock walks the stages and emits Progress for each. `warm` reports, per stage, whether that

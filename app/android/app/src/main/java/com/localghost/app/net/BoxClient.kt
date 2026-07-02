@@ -168,63 +168,30 @@ object BoxClient {
         else -> StageState.PENDING
     }
 
-    /**
-     * Enrollment result. On success the box has registered this device against a persona and
-     * returned a device token; the caller persists baseUrl + token via BoxConfig.
-     * STUB: validates inputs shallowly and echoes a fake token. Real (ghost.secd): the phone
-     * generates a keypair (DeviceIdentity), sends a CSR + the pairing code to baseUrl, the box
-     * mounts the persona the code selects, signs the cert, and returns the device token.
-     */
-    data class Enrollment(
-        val ok: Boolean,
-        val deviceToken: String = "",
-        val deviceCertPem: String? = null, // box-issued device cert, delivered on enroll
-        val deviceKeyPem: String? = null,  // its PKCS8 private key (box-generated, stored via DeviceCert)
-        val error: String? = null,
-    )
-
-    suspend fun enroll(
-        baseUrl: String,
-        pairingCode: String,
-        deviceName: String,
-        certFingerprint: String,
-    ): Enrollment {
-        if (baseUrl.isBlank() || pairingCode.isBlank()) {
-            return Enrollment(ok = false, error = "box address and pairing code are required")
-        }
-        // Bootstrap call: pin the box server cert by the fingerprint from the QR (BoxTrust) and POST
-        // the pairing code. No device cert is presented yet (this is the call that gets us one).
-        // nginx allows /v1/enroll without a client cert; every other route requires it. The box
-        // validates the code via its rate-limited gate and returns a device token (and, in the
-        // box-generates model, the device cert/key). The caller stores cert/key via DeviceCert.store
-        // and token/fingerprint/baseUrl via BoxConfig; thereafter every call presents the device
-        // cert for mTLS, which nginx checks at the handshake before any account/PIN.
-        return try {
-            val body = JSONObject()
-                .put("pairingCode", pairingCode)
-                .put("deviceName", deviceName)
-            val resp = BoxHttp.enroll(baseUrl, certFingerprint, body)
-            if (resp.optBoolean("ok", false)) {
-                Enrollment(
-                    ok = true,
-                    deviceToken = resp.optString("deviceToken", ""),
-                    deviceCertPem = resp.optString("deviceCertPem", null),
-                    deviceKeyPem = resp.optString("deviceKeyPem", null),
-                )
-            } else {
-                Enrollment(ok = false, error = resp.optString("error", "enrolment refused"))
-            }
-        } catch (e: Exception) {
-            Enrollment(ok = false, error = "could not reach the box: ${e.message}")
-        }
-    }
-
     /** Cheap reachability check: mTLS GET /v1/health. Routing uses this to decide box vs on-phone
      *  model. Returns false (not enrolled / unreachable) rather than throwing. */
     suspend fun reachable(ctx: Context): Boolean = try {
         BoxHttp.getJson(ctx, "/v1/health").optBoolean("ok", false)
     } catch (e: Exception) {
         false
+    }
+
+    /** Lock the box: ask ghost.secd to spin the account down , stop its Postgres/Redis, unmount and
+     *  luksClose the volume (the key leaves the kernel), and revoke the session. After this every call
+     *  appears down until the next PIN unlock. Returns the ordered teardown steps the box reported (so
+     *  the app can show the spin-down), or an empty list on any error , the caller still locks the app. */
+    suspend fun lock(ctx: Context): List<StageProgress> = try {
+        val resp = BoxHttp.postJson(ctx, "/v1/lock", org.json.JSONObject())
+        val arr = resp.optJSONArray("steps") ?: org.json.JSONArray()
+        val out = mutableListOf<StageProgress>()
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            val stage = UnlockStage.fromName(o.optString("stage")) ?: continue
+            out.add(StageProgress(stage, stateFromName(o.optString("state"))))
+        }
+        out
+    } catch (e: Exception) {
+        emptyList()
     }
 
     // --- CHAT (RAG over the life-model) ---

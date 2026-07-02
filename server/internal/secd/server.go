@@ -78,6 +78,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/enroll", s.handleEnroll)
 	mux.HandleFunc("/v1/unlock", s.handleUnlockStart)
 	mux.HandleFunc("/v1/unlock/poll", s.handleUnlockPoll)
+	mux.HandleFunc("/v1/lock", s.handleLock)
 	mux.HandleFunc("/v1/info", s.handleInfo)
 	mux.HandleFunc("/v1/notifications", s.handleNotifications)
 	mux.HandleFunc("/v1/notifications/mute", s.handleMute)
@@ -93,6 +94,46 @@ func (s *Server) Handler() http.Handler {
 // handleHealth is the cheap reachability check the app's reachable() calls. It needs no account.
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true, "service": "ghost.secd"})
+}
+
+// handleLock spins the box down on demand: the settings "lock now" button. A deliberate foreground
+// action by an AUTHENTICATED app , it requires a valid session (you cannot lock a box you cannot
+// already talk to), then stops the account's DBs, unmounts + luksCloses the volume (evicting the key
+// from the kernel), marks the box locked, and revokes the session so every subsequent request , the
+// app's own poll included , collapses to the appears-down 502 until a PIN unlocks it again.
+//
+// Idempotent: locking an already-locked box succeeds without doing anything. The response is a normal
+// 200 (the app asked for this and wants confirmation); only an authenticated caller can reach it, so
+// it adds no oracle. A failed unmount is a real error , the drive did NOT close , and is reported so
+// the app does not falsely tell the user the box is locked.
+func (s *Server) handleLock(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) {
+		s.appearsDown(w) // no session -> looks down, same as everything else
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+
+	if mounted < 0 {
+		s.session.Revoke() // already cold; make sure the caller's token is dead too
+		writeJSON(w, map[string]any{"locked": true, "steps": []any{}})
+		return
+	}
+
+	steps, err := s.unlock.Lock(mounted)
+	if err != nil {
+		// The volume did not fully close. Do NOT claim locked, but DO return the steps so the app can
+		// show which one failed, and keep the mounted state honest (still mounted).
+		writeJSON(w, map[string]any{"locked": false, "steps": steps, "error": "lock failed"})
+		return
+	}
+
+	s.mu.Lock()
+	s.mounted = -1
+	s.mu.Unlock()
+	s.session.Revoke() // kill the token: foreground + poller both go down until the next unlock
+	writeJSON(w, map[string]any{"locked": true, "steps": steps})
 }
 
 // handleInfo returns box + mounted-account summary for the app's home screen. Returns locked state

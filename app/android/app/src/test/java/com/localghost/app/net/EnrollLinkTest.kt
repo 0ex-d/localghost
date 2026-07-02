@@ -55,4 +55,25 @@ class EnrollLinkTest {
     @Test fun rejectsBadPort() {
         assertNull(EnrollLink.parse("localghost://enroll?host=h&code=c&fp=aa&port=99999"))
     }
+
+    @Test fun v1LinkHasNoCertOrKey() {
+        val link = EnrollLink.parse("localghost://enroll?host=h&code=c&fp=aa:bb")
+        assertNotNull(link)
+        assertNull(link!!.deviceCertPem)
+        assertNull(link.deviceKeyPem)
+    }
+
+    @Test fun v2LinkCarriesCertAndKey() {
+        // base64url of "CERT-PEM" and "KEY-PEM" (no padding), as the box would encode them.
+        val certB64 = java.util.Base64.getUrlEncoder().withoutPadding()
+            .encodeToString("CERT-PEM".toByteArray())
+        val keyB64 = java.util.Base64.getUrlEncoder().withoutPadding()
+            .encodeToString("KEY-PEM".toByteArray())
+        val link = EnrollLink.parse(
+            "localghost://enroll?v=2&host=h&port=8443&code=c&fp=aa:bb&cert=$certB64&key=$keyB64")
+        assertNotNull(link)
+        assertEquals(2, link!!.version)
+        assertEquals("CERT-PEM", link.deviceCertPem)
+        assertEquals("KEY-PEM", link.deviceKeyPem)
+    }
 }

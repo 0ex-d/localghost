@@ -171,6 +171,7 @@ fun MainShell(
                             onToggleMute = onToggleMute,
                             onExport = onExport,
                             exportState = exportState,
+                            onLock = onLock,
                             onWipe = { showWipe = true },
                         )
                         Dest.GLOSSARY -> GlossaryScreen()

@@ -9,6 +9,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.ui.unit.dp
@@ -32,6 +33,7 @@ fun LockScreen(
     error: String?,
     unlocking: Boolean,
     progress: UnlockSnapshot?,
+    onLocalOnly: () -> Unit = {},
     onUnlock: () -> Unit,
 ) {
     GhostScaffold { pad ->
@@ -68,6 +70,10 @@ fun LockScreen(
                     Text("! $it", color = Warning, textAlign = TextAlign.Center,
                         style = MaterialTheme.typography.bodyMedium)
                 }
+                Spacer(Modifier.height(24.dp))
+                Text("CAN'T REACH YOUR BOX? USE ON-PHONE MODELS ONLY", color = GhostTextDim,
+                    textAlign = TextAlign.Center, style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.fillMaxWidth().clickable { onLocalOnly() })
             }
         }
     }

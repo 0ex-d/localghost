@@ -4,7 +4,7 @@ The phone's own secrets and the rules about when it is allowed to be open. None 
 PIN (that lives on the box); this is the layer that decides whether the person holding the phone right
 now gets to use it, and that keeps the phone's identity key somewhere a thief cannot extract it.
 
-DeviceIdentity is the phone's keypair, an EC P-256 key in the AndroidKeyStore, StrongBox-backed when
+DeviceCert holds the box-issued device certificate + private key delivered in the enrolment QR (the
 the hardware allows. It signs the CSR the box enrols and authenticates the mTLS channel, and the
 private key never leaves secure hardware. AppLock is the biometric gate, a keystore key bound to user
 authentication so the fingerprint or face prompt proves a real person and not a tapped button.
