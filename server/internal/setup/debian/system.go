@@ -1,12 +1,15 @@
 package debian
 
 import (
+	"bytes"
+	"crypto/rand"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
+	"github.com/LocalGhostDao/localghost/server/internal/profile"
 	"github.com/LocalGhostDao/localghost/server/internal/setup"
 )
 
@@ -15,23 +18,40 @@ import (
 // nginx). Each Do has a matching exists-Check so the setup plan is idempotent, and the destructive
 // disk steps run only in Apply.
 //
+// Storage model: ONE full-disk LUKS container on the raw disk (no partition table, no decoys, no
+// equal-size juggling). The LUKS key is a random full-entropy AMK that is sealed in the TPM bound to
+// the main PIN, so unlock requires the PIN (the TPM checks it and applies its DA lockout in hardware)
+// and the key never exists outside a TPM unseal. The PIN is chosen at setup, so the AMK can be
+// sealed and the disk formatted in one pass.
+//
 // This is the concrete box backend the orchestration in setup/plan.go drives. It must run as root.
 type System struct {
-	Disk     string // e.g. /dev/nvme0n1, the disk to partition
-	CaDir    string // e.g. /etc/ghost/ca
-	Host     string // box IP/hostname for the server cert
-	ExecDir  string // where the daemon binaries live, e.g. /usr/local/bin
-	StateDir string // /var/lib/ghost
-	SlotSize string // e.g. "200G", the equal container size
+	Disk      string // e.g. /dev/nvme1n1, the RAW disk to LUKS-format whole (DESTRUCTIVE)
+	CaDir     string // e.g. /etc/ghost/ca
+	Host      string // box IP/hostname for the server cert
+	ExecDir   string // where the daemon binaries live, e.g. /usr/local/bin
+	StateDir  string // /var/lib/ghost
+	TPMDevice string // e.g. /dev/tpmrm0, where the AMK is sealed
+	MainPIN   string // chosen at setup; seals the AMK and opens the container
+	WipePIN   string // chosen at setup; crypto-erases everything (optional, "" to skip)
+
+	// Confirm asks the operator a yes/no question during setup. It is used by the TPM sole-tenant
+	// check: if the box's TPM already holds objects LocalGhost did not create, setting the GLOBAL
+	// dictionary-attack policy (and a later `tpm2 clear` during resetup) would affect them too, so
+	// we ask before proceeding. Set by ghost-setup to a terminal y/N prompt. If nil, the check
+	// fails CLOSED , an unresolved "is this a shared TPM?" aborts rather than silently reconfigures.
+	Confirm func(prompt string) (bool, error)
 
 	pki *PKI
 }
 
-// NewSystem builds the Debian backend. Construct the PKI from CaDir + Host.
-func NewSystem(disk, caDir, host, execDir, stateDir, slotSize string) *System {
+// NewSystem builds the Debian backend. Construct the PKI from CaDir + Host. tpmDevice is the TPM
+// resource-manager node (/dev/tpmrm0); mainPIN seals the AMK; wipePIN (optional) registers the wipe.
+func NewSystem(disk, caDir, host, execDir, stateDir, tpmDevice, mainPIN, wipePIN string) *System {
 	return &System{
 		Disk: disk, CaDir: caDir, Host: host, ExecDir: execDir,
-		StateDir: stateDir, SlotSize: slotSize, pki: NewPKI(caDir, host),
+		StateDir: stateDir, TPMDevice: tpmDevice, MainPIN: mainPIN, WipePIN: wipePIN,
+		pki: NewPKI(caDir, host),
 	}
 }
 
@@ -46,56 +66,144 @@ func run(name string, args ...string) error {
 
 func have(name string) bool { _, err := exec.LookPath(name); return err == nil }
 
-// --- disk / partitions (DESTRUCTIVE) ---
-
-// containerPath is the file-backed container for a slot, under StateDir (so it lives on the chosen
-// data drive). Using files keeps setup simple and equal-size trivial; a partition-backed variant
-// swaps these for /dev/mapper devices.
-func (s *System) containerPath(slot int) string {
-	return filepath.Join(s.StateDir, "containers", fmt.Sprintf("slot%d.img", slot))
-}
-
-func (s *System) PartitionsReady() (bool, error) {
-	for slot := 0; slot < 3; slot++ {
-		if _, err := os.Stat(s.containerPath(slot)); err != nil {
-			return false, nil
-		}
-	}
-	return true, nil
-}
-
-func (s *System) DescribePartitioning() (string, error) {
-	return fmt.Sprintf("create 3 equal-size %s containers under %s (data drive); this allocates the space",
-		s.SlotSize, filepath.Join(s.StateDir, "containers")), nil
-}
-
-func (s *System) CreatePartitions() error {
-	dir := filepath.Join(s.StateDir, "containers")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	// Allocate three equal-size sparse container files. fallocate gives equal apparent size.
-	for slot := 0; slot < 3; slot++ {
-		if err := run("fallocate", "-l", s.SlotSize, s.containerPath(slot)); err != nil {
-			return err
-		}
+// runStdin runs a command feeding `in` on its stdin (used to pass the LUKS key to cryptsetup without
+// it ever appearing in argv or on disk).
+func runStdin(in []byte, name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Stdin = bytes.NewReader(in)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s %s: %v: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
 
-// FormatContainers sets up dm-crypt (LUKS) on each container. The per-account key comes from the
-// TPM seam at unlock; here we format with a temporary key the cryptsetup/TPM wiring replaces. Until
-// the TPM backend lands, this is the place that gains the real per-account keying.
+// --- disk / container (DESTRUCTIVE) ---
+//
+// Single full-disk LUKS container on the raw disk. No partition table: cryptsetup luksFormat is
+// applied to s.Disk directly, so the whole device is the encrypted container. The key is a random
+// AMK sealed in the TPM under the main PIN (see hw.TPMSealedKey). Setup flow:
+//   1. generate a random AMK,
+//   2. seal it in the TPM bound to MainPIN (so unlock needs the PIN and the TPM rate-limits),
+//   3. luksFormat the raw disk with that AMK as the key,
+//   4. open it, mkfs.ext4 the mapper, leave it ready.
+// The AMK only ever exists in memory here long enough to seal + format, then is zeroised.
+
+const ghostSlot = 0 // the single account
+
+func (s *System) mapperName() string { return "ghost-slot0" }
+func (s *System) mapperPath() string { return "/dev/mapper/" + s.mapperName() }
+
+// PartitionsReady reports whether the disk already holds our LUKS container (idempotency check).
+func (s *System) PartitionsReady() (bool, error) {
+	if s.Disk == "" {
+		return false, fmt.Errorf("no disk configured")
+	}
+	// `cryptsetup isLuks` exits 0 if the device is already a LUKS container.
+	return run("cryptsetup", "isLuks", s.Disk) == nil, nil
+}
+
+func (s *System) DescribePartitioning() (string, error) {
+	return fmt.Sprintf("LUKS-format the WHOLE raw disk %s as one container, key sealed in the TPM "+
+		"under the main PIN; THIS ERASES %s", s.Disk, s.Disk), nil
+}
+
+// CreatePartitions is a no-op in the raw-disk model: there is no partition table to create, the whole
+// disk becomes the LUKS container in FormatContainers. Kept to satisfy the plan's step shape.
+func (s *System) CreatePartitions() error {
+	if s.Disk == "" {
+		return fmt.Errorf("no disk configured")
+	}
+	return nil
+}
+
+// FormatContainers generates the AMK, seals it in the TPM under the main PIN, and LUKS-formats the
+// raw disk with it. This is the destructive, one-time provisioning of the encrypted store. The
+// TPM-sealing step lives in a build-tagged helper (sealAndFormat): the real seal under -tags tpm, a
+// refusal in the simulation build (you cannot really provision encrypted storage without a TPM).
 func (s *System) FormatContainers() error {
 	if !have("cryptsetup") {
 		return fmt.Errorf("cryptsetup not installed")
 	}
-	// Real keying is the TPM seam; formatting structure is created here. Left as the integration
-	// point so the disk layout exists without committing a key model the hardware path owns.
+	if s.Disk == "" {
+		return fmt.Errorf("no disk configured")
+	}
+	if s.MainPIN == "" {
+		return fmt.Errorf("a main PIN is required to seal the AMK")
+	}
+	return s.sealAndFormat()
+}
+
+// formatLUKS does the cryptsetup work given an already-obtained key: luksFormat the raw disk, open,
+// mkfs.ext4, close. Shared by the real and (hypothetical) sim paths so the disk logic lives once.
+func (s *System) formatLUKS(amk []byte) error {
+	// luksFormat the RAW disk with the AMK as the key, fed on stdin (never argv or a file).
+	// --keyfile-size=32 makes cryptsetup read EXACTLY 32 bytes: the AMK is random binary and may
+	// contain a 0x0A byte, which cryptsetup would otherwise treat as end-of-key and silently
+	// truncate, keying the disk with a short key. Fixed length avoids that on both format and open.
+	if err := runStdin(amk, "cryptsetup", "luksFormat", "--type", "luks2", "--key-file", "-",
+		"--keyfile-size", "32", "--batch-mode", s.Disk); err != nil {
+		return fmt.Errorf("luksFormat %s: %w", s.Disk, err)
+	}
+	if err := runStdin(amk, "cryptsetup", "open", "--key-file", "-", "--keyfile-size", "32",
+		s.Disk, s.mapperName()); err != nil {
+		return fmt.Errorf("open container: %w", err)
+	}
+	// mkfs.ext4 -F -q: -F forces creation without prompting even if the mapper presents a detectable
+	// filesystem signature (possible when re-provisioning a disk), since prompting would block with no
+	// tty; -q suppresses progress output. Safe because provisioning is already explicitly confirmed.
+	if err := run("mkfs.ext4", "-F", "-q", s.mapperPath()); err != nil {
+		_ = run("cryptsetup", "close", s.mapperName())
+		return fmt.Errorf("mkfs.ext4: %w", err)
+	}
+	if err := run("cryptsetup", "close", s.mapperName()); err != nil {
+		return fmt.Errorf("close container after format: %w", err)
+	}
 	return nil
 }
 
-// --- ghost user ---
+// --- PIN registry ---
+
+// RegistryReady reports whether the PIN registry already exists (idempotency).
+func (s *System) RegistryReady() (bool, error) {
+	_, err := os.Stat(filepath.Join(s.StateDir, "registry.blob"))
+	return err == nil, nil
+}
+
+// WriteRegistry builds the PIN registry , main PIN opens slot 0, wipe PIN (if set) triggers the
+// global crypto-erase , and persists it to the state dir where the daemon loads it at startup. The
+// registry holds only salted PIN HASHES (never the AMK, never a PIN in the clear); the AMK itself is
+// sealed in the TPM by FormatContainers. The two PINs are stored indistinguishably and padded with
+// random filler, so the blob never reveals which PIN wipes or that a wipe PIN exists.
+func (s *System) WriteRegistry() error {
+	if s.MainPIN == "" {
+		return fmt.Errorf("a main PIN is required")
+	}
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		return fmt.Errorf("registry salt: %w", err)
+	}
+	st, err := profile.NewSetup(salt)
+	if err != nil {
+		return err
+	}
+	if err := st.SetMain(s.MainPIN); err != nil {
+		return fmt.Errorf("register main PIN: %w", err)
+	}
+	if s.WipePIN != "" {
+		if err := st.SetWipe(s.WipePIN); err != nil {
+			return fmt.Errorf("register wipe PIN: %w", err)
+		}
+	}
+	reg, err := st.Finalize()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(s.StateDir, 0o700); err != nil {
+		return err
+	}
+	return reg.Save(filepath.Join(s.StateDir, "registry.blob"))
+}
 
 func (s *System) GhostUserExists() (bool, error) {
 	return run("id", "ghost") == nil, nil

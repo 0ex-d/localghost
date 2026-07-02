@@ -26,6 +26,7 @@ type DaemonConfig struct {
 	Host     string // box IP/hostname for device cert issuance
 	CaDir    string // /etc/ghost/ca
 	StateDir string // /var/lib/ghost
+	Disk     string // the raw LUKS data disk ghost.secd mounts on unlock, e.g. /dev/nvme1n1
 	Port     int    // mTLS port behind nginx
 }
 
@@ -72,8 +73,8 @@ func renderUnit(name, execDir string, cfg DaemonConfig) string {
 		// code from an environment file that setup writes and clears after first enrolment, so no
 		// secret is baked into the unit. GHOST_PAIRING_CODE is empty/absent in normal operation.
 		fmt.Fprintf(&b, "EnvironmentFile=-%s/enroll.env\n", cfg.StateDir)
-		fmt.Fprintf(&b, "ExecStart=%s/%s --host %s --ca %s --state %s --addr 127.0.0.1:%d\n",
-			execDir, name, cfg.Host, cfg.CaDir, cfg.StateDir, cfg.Port)
+		fmt.Fprintf(&b, "ExecStart=%s/%s --host %s --ca %s --state %s --disk %s --addr 127.0.0.1:%d\n",
+			execDir, name, cfg.Host, cfg.CaDir, cfg.StateDir, cfg.Disk, cfg.Port)
 	} else {
 		fmt.Fprintf(&b, "ExecStart=%s/%s\n", execDir, name)
 	}

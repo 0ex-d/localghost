@@ -5,14 +5,12 @@ import "encoding/json"
 // Mounting an account decrypts its store; the integrations live inside that plaintext. Load builds
 // the Set from the just-mounted account's bytes. There is no global integration store and no other
 // constructor that crosses accounts, so a Set always belongs to exactly the account that was
-// unlocked. isDecoy comes from the slot the unlock resolved to (slot 0 is the main; others are
-// decoys), so the paused-default and enable-refusal apply automatically without a separate flag to
-// set.
+// unlocked.
 //
 // blob is the integrations section of the account's decrypted store. On unmount, call Set.Zeroise
 // then drop the Set, so no token survives in memory past the account being open.
 func Load(slot int, blob []byte) (*Set, error) {
-	s := NewSet(slot, slot != 0) // slot 0 == main; everything else is a decoy
+	s := NewSet(slot)
 	if len(blob) == 0 {
 		return s, nil
 	}
@@ -22,11 +20,6 @@ func Load(slot int, blob []byte) (*Set, error) {
 	}
 	for _, si := range stored {
 		it := &Integration{ID: si.ID, Kind: si.Kind, Label: si.Label, State: si.State, Secret: si.Secret}
-		// A decoy never loads in an Enabled state, even if the blob somehow says so: enforce the
-		// invariant on load, not just on Enable.
-		if s.isDecoy {
-			it.State = Paused
-		}
 		s.items[si.ID] = it
 	}
 	return s, nil

@@ -26,5 +26,14 @@ fun AboutScreen() {
              "holds no index and no model. If you lose the phone, the data is on the box, not " +
              "in your pocket.",
              color = GhostText, style = MaterialTheme.typography.bodyMedium)
+
+        Spacer(Modifier.height(24.dp))
+        SectionLabel("ACKNOWLEDGEMENTS")
+        Spacer(Modifier.height(8.dp))
+        Text("The QR scanner is our own implementation, with no third-party barcode library. Its " +
+             "geometry , finder detection, perspective sampling, and grid extraction , was inspired " +
+             "by the ZXing project (github.com/zxing/zxing, Apache-2.0). We ported the approach " +
+             "rather than the code, and we are grateful for their work.",
+             color = GhostText, style = MaterialTheme.typography.bodyMedium)
     }
 }

@@ -13,7 +13,7 @@ import (
 
 // KeyVault holds a separate account master key (AMK) per profile slot. Each slot's data is wrapped
 // so unwrapping needs BOTH that slot's AMK AND the slot's PIN-derived key. Because the keys are
-// per-slot, wiping one slot destroys only its AMK: a duress PIN can crypto-erase the main account
+// per-slot, wiping one slot destroys only its AMK: the wipe PIN crypto-erases the account
 // while every other PIN keeps opening its profile, so nothing looks different afterwards.
 //
 // Each AMK is random (never PIN-derived) and is sealed in hardware (see destroy.go). Destroying one

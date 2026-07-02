@@ -7,11 +7,15 @@ import "fmt"
 // mkfs, cryptsetup, useradd, the box PKI, nginx, and systemd. Every "do" has a matching "exists"
 // check so steps are idempotent, and a describe for the dry run.
 type System interface {
-	// Disk and partitions (DESTRUCTIVE).
+	// Disk and container (DESTRUCTIVE).
 	PartitionsReady() (bool, error)
-	DescribePartitioning() (string, error) // e.g. "GPT on /dev/nvme0n1: 3x 200GiB LUKS containers; erases disk"
+	DescribePartitioning() (string, error) // e.g. "GPT on /dev/nvme0n1: one full-disk LUKS container; erases disk"
 	CreatePartitions() error
-	FormatContainers() error // equal-size encrypted containers, one per account slot
+	FormatContainers() error // the single full-disk encrypted container for the account
+
+	// PIN registry: maps the main PIN to the account and the wipe PIN to the global erase.
+	RegistryReady() (bool, error)
+	WriteRegistry() error
 
 	// Privileged user the daemons run as.
 	GhostUserExists() (bool, error)
@@ -67,11 +71,17 @@ func DefaultPlan(sys System, withDomain bool, dnsCheck func() error, nginxConf s
 			Do:          sys.CreatePartitions,
 		},
 		{
-			Name:        "format equal-size containers",
+			Name:        "format container",
 			Destructive: true,
 			Check:       sys.PartitionsReady, // formatting is part of the same readiness check
-			Describe:    func() (string, error) { return "format 3 equal-size LUKS containers (main + 2 decoys)", nil },
+			Describe:    func() (string, error) { return "format one full-disk LUKS container", nil },
 			Do:          sys.FormatContainers,
+		},
+		{
+			Name:     "write PIN registry",
+			Check:    sys.RegistryReady,
+			Describe: func() (string, error) { return "write the PIN registry (main PIN + optional wipe PIN)", nil },
+			Do:       sys.WriteRegistry,
 		},
 		{
 			Name:     "ghost user",

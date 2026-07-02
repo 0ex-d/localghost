@@ -6,7 +6,7 @@ import "errors"
 // ghost.shadowd, ...) listens only on the loopback interface and is never exposed directly. All
 // outside traffic terminates at ghost.secd, which authenticates it (mTLS + the unlocked account),
 // then proxies to the right daemon for the MOUNTED account. This makes ghost.secd the single trust
-// boundary: auth, account selection, and the wipe/duress logic all live at one chokepoint, and a
+// boundary: auth, account selection, and the wipe logic all live at one chokepoint, and a
 // daemon can only ever serve the account that is currently unlocked.
 //
 //	internet ──TLS──> nginx ──> ghost.secd (authn + account routing) ──loopback──> ghost.<x>d

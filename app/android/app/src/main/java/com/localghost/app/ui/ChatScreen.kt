@@ -93,7 +93,10 @@ fun ChatScreen(
         }
 
         // composer: one rounded container, pill on top, then + / field / send
-        val canSend = input.isNotBlank() || pendingAttachments.isNotEmpty()
+        // Not sendable while a reply is streaming: the round button already morphs into STOP, but the
+        // keyboard's IME send action goes through canSend too , without this it could fire a second
+        // generation mid-stream, interleaving two replies into the transcript.
+        val canSend = !streaming && (input.isNotBlank() || pendingAttachments.isNotEmpty())
         Column(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp)
                 .border(1.dp, GhostBorder, RoundedCornerShape(24.dp))

@@ -1,30 +1,24 @@
 package integration
 
-// Set is the integrations belonging to ONE mounted account. It is constructed only from that
+// Set is the integrations belonging to the mounted account. It is constructed only from that
 // account's decrypted store, so by construction it can never see another account's connectors. The
-// daemon holds a Set only for the currently-mounted account; unmounting drops it and zeroises the
-// secrets.
+// daemon holds a Set only while the account is mounted; unmounting drops it and zeroises the secrets.
 //
-// isDecoy controls the safe default: a new integration on a decoy starts Paused (configured, not
-// polling), so a decoy reads as set-up-but-unused rather than showing live token refreshes a stale
-// account would not. On the main, Add still defaults to Paused and you Enable explicitly, so nothing
-// goes live by accident.
+// Add always defaults an integration to Paused and you Enable explicitly, so nothing goes live the
+// moment it is added , a connector only starts polling when you deliberately enable it.
 type Set struct {
-	slot    int
-	isDecoy bool
-	items   map[string]*Integration
+	slot  int
+	items map[string]*Integration
 }
 
-func NewSet(slot int, isDecoy bool) *Set {
-	return &Set{slot: slot, isDecoy: isDecoy, items: make(map[string]*Integration)}
+func NewSet(slot int) *Set {
+	return &Set{slot: slot, items: make(map[string]*Integration)}
 }
 
-func (s *Set) Slot() int     { return s.slot }
-func (s *Set) IsDecoy() bool { return s.isDecoy }
+func (s *Set) Slot() int { return s.slot }
 
 // Add registers a connector. It always starts Paused; enabling is a separate, explicit step, so no
-// integration begins live polling the moment it is added. On a decoy it MUST stay Paused, see
-// Enable.
+// integration begins live polling the moment it is added.
 func (s *Set) Add(id string, kind Kind, label string, secret []byte) (*Integration, error) {
 	if _, ok := s.items[id]; ok {
 		return nil, ErrExists
@@ -34,22 +28,17 @@ func (s *Set) Add(id string, kind Kind, label string, secret []byte) (*Integrati
 	return it, nil
 }
 
-// Enable turns an integration live (token refresh, polling). Independent per integration. On a decoy
-// this is refused: a decoy with a live, refreshing connector is the behavioural tell we are avoiding,
-// so decoy integrations stay configured-but-paused. Enable a connector on the main only.
+// Enable turns an integration live (token refresh, polling). Independent per integration.
 func (s *Set) Enable(id string) error {
 	it, ok := s.items[id]
 	if !ok {
 		return ErrNotFound
 	}
-	if s.isDecoy {
-		return ErrDecoyStaysPaused
-	}
 	it.State = Enabled
 	return nil
 }
 
-// Disable pauses an integration without removing it. Allowed on any account; pausing is always safe.
+// Disable pauses an integration without removing it. Pausing is always safe.
 func (s *Set) Disable(id string) error {
 	it, ok := s.items[id]
 	if !ok {
@@ -70,8 +59,8 @@ func (s *Set) Remove(id string) error {
 	return nil
 }
 
-// Active returns the integrations that should be doing live background work right now. For a decoy
-// this is always empty (nothing is Enabled), so the daemons start no background polling for a decoy.
+// Active returns the integrations that should be doing live background work right now (the Enabled,
+// polling ones).
 func (s *Set) Active() []*Integration {
 	out := make([]*Integration, 0, len(s.items))
 	for _, it := range s.items {

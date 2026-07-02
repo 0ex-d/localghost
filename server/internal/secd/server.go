@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
+	"github.com/LocalGhostDao/localghost/server/internal/hw"
 	"github.com/LocalGhostDao/localghost/server/internal/models"
 	"github.com/LocalGhostDao/localghost/server/internal/profile"
 )
@@ -25,10 +27,14 @@ type Server struct {
 	mounted  int // currently mounted slot, -1 if locked
 	enroll   *enrollService
 	unlock   *unlockService
+	session  *sessionManager // the one live session token (foreground + poller share it)
+	mute     *hw.MuteStore   // notification mute read/write (in-volume Postgres/Redis), per scope
+	notif    *hw.NotifStore  // notification produce/read/seen/delete (in-volume Postgres/Redis)
 }
 
 type Config struct {
 	StateDir string // unencrypted: /var/lib/ghost (certs, models, enrollment records)
+	Disk     string // the raw LUKS-formatted data disk, e.g. /dev/nvme1n1 (used by the TPM backend)
 }
 
 func New(cfg Config) (*Server, error) {
@@ -44,6 +50,21 @@ func New(cfg Config) (*Server, error) {
 		mounted: -1,
 	}
 	s.enroll = newEnrollService(cfg.StateDir)
+	s.session = newSessionManager(12 * time.Hour)
+	// Wire the notification mute store. The mute lives in the in-volume Postgres/Redis, per scope
+	// (global "*" + per-service). The mount path for a slot is <stateDir>/mnt/slot<N> (matching
+	// DMCryptMounter) and the pg socket is its "postgres" subdir. The handlers read it on the
+	// notification poll and the settings control. Built in both sim and tpm builds (hw is not
+	// tpm-tagged except tpm.go); harmless in sim (no DBs -> the poller is "down" via the
+	// locked/mounted check before the mute is consulted).
+	s.mute = hw.NewMuteStore(func(slot int) string {
+		mnt := filepath.Join(cfg.StateDir, "mnt", fmt.Sprintf("slot%d", slot))
+		return hw.SocketForMount(mnt)
+	})
+	s.notif = hw.NewNotifStore(func(slot int) string {
+		mnt := filepath.Join(cfg.StateDir, "mnt", fmt.Sprintf("slot%d", slot))
+		return hw.SocketForMount(mnt)
+	})
 	// newDefaultBackend is build-tag-selected: the simulation in the default build, the real TPM +
 	// dm-crypt + Postgres/Redis backend with -tags tpm. This is the seam where unlock meets hardware.
 	s.unlock = newUnlockService(newDefaultBackend(cfg))
@@ -58,6 +79,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/unlock", s.handleUnlockStart)
 	mux.HandleFunc("/v1/unlock/poll", s.handleUnlockPoll)
 	mux.HandleFunc("/v1/info", s.handleInfo)
+	mux.HandleFunc("/v1/notifications", s.handleNotifications)
+	mux.HandleFunc("/v1/notifications/mute", s.handleMute)
+	mux.HandleFunc("/v1/notifications/list", s.handleNotificationList)
+	mux.HandleFunc("/v1/notifications/seen", s.handleNotificationSeen)
+	mux.HandleFunc("/v1/notifications/delete", s.handleNotificationDelete)
+	mux.HandleFunc("/v1/notifications/answer", s.handleNotificationAnswer)
 	mux.HandleFunc("/v1/models", s.handleModels)
 	mux.HandleFunc("/v1/models/", s.handleModelBytes) // /v1/models/{id}
 	return logRequests(mux)
@@ -81,7 +108,7 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{
 		"locked":      false,
 		"mountedSlot": mounted,
-		"daemons":     profile.TotalSlots, // placeholder until the backing daemons report in
+		"daemons":     1, // placeholder until the backing daemons report in
 	})
 }
 

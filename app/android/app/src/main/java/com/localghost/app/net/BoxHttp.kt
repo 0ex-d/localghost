@@ -26,6 +26,12 @@ object BoxHttp {
         val km = DeviceCert.keyManager(ctx) ?: throw NotEnrolled()
         val conn = URL(cfg.baseUrl.trimEnd('/') + path).openConnection() as HttpsURLConnection
         conn.sslSocketFactory = BoxTrust.socketFactory(cfg.certFingerprint, km)
+        // The fingerprint pin is the ENTIRE trust decision (BoxTrust): hostname/SAN checking against a
+        // self-signed pinned cert adds nothing , no CA exists to mis-issue for a different host , and it
+        // actively breaks the moment the box's LAN address changes (DHCP hands it a new IP, or the user
+        // types a hostname where the cert has an IP). Without this, every call would die on hostname
+        // verification with a perfectly matching pin.
+        conn.hostnameVerifier = javax.net.ssl.HostnameVerifier { _, _ -> true }
         conn.requestMethod = method
         conn.connectTimeout = 10_000
         conn.readTimeout = 30_000
@@ -78,6 +84,10 @@ object BoxHttp {
         // No client key manager yet; pin the server only. nginx allows /v1/enroll without a client
         // cert (it is the bootstrap endpoint); all other routes require the device cert.
         conn.sslSocketFactory = BoxTrust.socketFactory(pinnedFingerprint, EmptyKeyManager)
+        // Same as open(): the QR fingerprint pin is the whole trust decision; hostname/SAN checking is
+        // meaningless for a pinned self-signed cert and breaks enrolment when the QR carries an address
+        // the cert's SAN doesn't happen to list.
+        conn.hostnameVerifier = javax.net.ssl.HostnameVerifier { _, _ -> true }
         conn.requestMethod = "POST"
         conn.doOutput = true
         conn.connectTimeout = 10_000

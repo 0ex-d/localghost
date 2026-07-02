@@ -12,7 +12,7 @@ import (
 // UnlockStage stream. submitPin starts an unlock; the app polls /unlock/poll once a second and gets
 // the stages completed so far (all at once if the account is hot, accumulating if cold).
 //
-// The stage sequence is identical for every account, so a duress unlock looks the same as a real
+// The stage sequence is identical for every unlock, so a wipe looks the same as a real
 // one. This wires profile.StreamUnlock (the validated stage logic) to a poll-able state.
 type unlockService struct {
 	backend  UnlockBackend
@@ -63,7 +63,7 @@ func (s *Server) handleUnlockStart(w http.ResponseWriter, r *http.Request) {
 	u.openSlot = profile.NoSlot
 	u.mu.Unlock()
 
-	// Drive the unlock through the backend: resolve the PIN (real / decoy / duress-wipe / reject),
+	// Drive the unlock through the backend: resolve the PIN (main / wipe / reject),
 	// unseal the slot key from the TPM, map + mount the container, start the per-account DB + cache.
 	// The default build wires a simulation; the `tpm` build wires the real hardware path.
 	go u.run(req.Pin)
@@ -112,10 +112,19 @@ func (s *Server) handleUnlockPoll(w http.ResponseWriter, r *http.Request) {
 		resp["failed"] = u.failed
 	}
 	if u.done {
-		// reflect the mount on the server so /info shows unlocked
-		s.mu.Lock()
-		s.mounted = u.openSlot
-		s.mu.Unlock()
+		if u.failed == "" && u.openSlot >= 0 {
+			// correct PIN: reflect the mount and issue a FRESH session token for the app to carry.
+			s.mu.Lock()
+			s.mounted = u.openSlot
+			s.mu.Unlock()
+			if tok, err := s.session.Issue(); err == nil {
+				resp["token"] = tok
+			}
+		} else {
+			// wrong PIN (or failed unlock): revoke any live token, so the foreground AND the poller
+			// go dark together (shared fate). The mount is NOT touched.
+			s.session.Revoke()
+		}
 	}
 	writeJSON(w, resp)
 }

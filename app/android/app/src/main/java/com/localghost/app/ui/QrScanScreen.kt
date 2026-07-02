@@ -5,18 +5,21 @@ import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -28,18 +31,20 @@ import com.localghost.app.net.EnrollLink
 import com.localghost.app.qr.QrMatrixDecode
 import com.localghost.app.qr.QrSampler
 import com.localghost.app.ui.theme.*
+import androidx.compose.ui.graphics.nativeCanvas
 import java.util.concurrent.Executors
 
 /**
  * Camera QR scanner for enrolment. It previews the camera, runs each frame through the sampler +
- * matrix decoder, and on a successful decode of a localghost:// enrol link calls onLink. If the
+ * matrix decoder, and on a successful decode of a localghost:// enrol link calls onScanned. If the
  * camera permission is denied or scanning fails, the user falls back to the typed path , a bad scan
  * can never produce a wrong enrolment because the box fingerprint in the link must still match at
  * the TLS pin.
  */
 @Composable
 fun QrScanScreen(
-    onLink: (EnrollLink) -> Unit,
+    onScanned: (EnrollLink) -> Unit,
+    onProceed: () -> Unit,
     onCancel: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -51,16 +56,34 @@ fun QrScanScreen(
         )
     }
     var status by remember { mutableStateOf("point at the QR on the box") }
+    // Live decode diagnostic, surfaced on screen. ScanDiag.last is written by the analyser thread each
+    // frame with the exact stage reached (finder count, grid size, "no candidate decoded", "decoded N
+    // chars"), so polling it here shows WHERE a code is getting stuck instead of failing silently.
+    var diag by remember { mutableStateOf("") }
+    LaunchedEffect(Unit) {
+        while (true) {
+            diag = ScanDiag.last
+            kotlinx.coroutines.delay(180)
+        }
+    }
     // When a readable QR turns out not to be an enrol link, quip holds what it was + a dry line.
     // lastQuipFor debounces it so the same code does not re-fire every frame while it sits in view.
     var quip by remember { mutableStateOf<com.localghost.app.qr.QrGuess?>(null) }
     var lastQuipFor by remember { mutableStateOf<String?>(null) }
     // Geometry of the QR currently in view, for the AR overlay. Null when nothing is detected.
     var overlay by remember { mutableStateOf<Overlay?>(null) }
-    // On a valid enrol scan we latch the link here and play a brief happy-ghost animation, then hand
-    // off to onLink. Latching also stops the scanner re-triggering on later frames of the same code.
+    // On a valid enrol scan we latch the link here and play the happy-ghost animation. onScanned fires
+    // at once to begin enrolling; onProceed fires when the animation ends. Latching also stops the
+    // scanner re-triggering on later frames of the same code.
     var foundLink by remember { mutableStateOf<EnrollLink?>(null) }
     var enrolAnim by remember { mutableStateOf(0f) } // 0..1 over the animation
+    // Two-frame confirmation gate. A live scanner runs many decode attempts per frame (8 orientations,
+    // several versions and biases); very occasionally one lands a Reed-Solomon miscorrection that is
+    // internally consistent but wrong. A wrong decode is worse than no decode here, so we never act on a
+    // payload the first time we see it , we require the SAME payload on two decodes before promoting it.
+    // A real code repeats frame to frame; a random miscorrection does not. pendingPayload holds the
+    // last frame's payload awaiting a match; it is cleared whenever the chain breaks.
+    var pendingPayload by remember { mutableStateOf<String?>(null) }
     // Two-rate sampling. HUNTING (no code in view) decodes at most every 500ms , cheap, the common
     // case is pointing at nothing. FOUND (a not-for-us code held in view) decodes every 100ms so the
     // overlay tracks the code and the sad ghost animates smoothly. lastDecodeAt gates the rate;
@@ -76,31 +99,48 @@ fun QrScanScreen(
         if (!granted) permLauncher.launch(Manifest.permission.CAMERA)
     }
 
-    // On a found box: kick the enrol off in the BACKGROUND immediately (onLink starts the network
-    // request in MainActivity), and overlap it with a ~1.5s animation , the QR becomes a box, a ghost
-    // flies from it to the phone. The work and the delight happen at once, so the animation is not dead
-    // waiting time. onLink is called once, at the start; the screen navigates away when MainActivity
-    // flips state, and the animation is just what the person sees while the request is in flight.
+    // On a valid enrol scan: kick the enrol off in the BACKGROUND immediately (onScanned starts the
+    // network request in the host), then play a fixed ~2.6s AR success animation over the live camera , a
+    // big happy ghost pops in and bobs while fireworks burst around it. The enrol and the celebration run
+    // at once, so the time is not dead waiting even though the box can take a moment to answer. Only once
+    // the animation has fully played do we call onProceed to leave the scanner, so the success is always
+    // seen for its full length no matter how fast or slow the box responds; the host routes on the outcome.
     LaunchedEffect(foundLink) {
         val link = foundLink ?: return@LaunchedEffect
-        onLink(link) // start enrolling now, in the background
-        val steps = 30
+        onScanned(link) // start enrolling now, in the background
+        val steps = 52
         for (i in 1..steps) {
             enrolAnim = i.toFloat() / steps
-            kotlinx.coroutines.delay(50) // 30 * 50ms = 1500ms
+            kotlinx.coroutines.delay(50) // 52 * 50ms = 2600ms
         }
+        onProceed() // celebration done , hand off
     }
 
-    Column(Modifier.fillMaxSize().padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-        SectionLabel("SCAN THE BOX QR")
-        Spacer(Modifier.height(12.dp))
+    // Celebration clock: runs while a real box is found, drives the fireworks burst.
+    var celebrate by remember { mutableStateOf(0f) }
+    LaunchedEffect(foundLink) {
+        while (foundLink != null) {
+            celebrate += 0.06f
+            kotlinx.coroutines.delay(40)
+        }
+        celebrate = 0f
+    }
+
+    Box(Modifier.fillMaxSize().background(Void)) {
         if (!granted) {
-            Text("Camera permission is needed to scan. You can also go back and type the box " +
-                 "address, code and fingerprint by hand.",
-                 color = GhostTextDim, style = MaterialTheme.typography.bodyMedium)
-            Spacer(Modifier.height(16.dp))
-            GhostButton("BACK TO TYPED ENTRY", onCancel, modifier = Modifier.fillMaxWidth())
-            return@Column
+            Column(
+                Modifier.fillMaxSize().systemBarsPadding().padding(20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                SectionLabel("SCAN THE BOX QR")
+                Spacer(Modifier.height(12.dp))
+                Text("Camera permission is needed to scan. You can also go back and type the box " +
+                     "address, code and fingerprint by hand.",
+                     color = GhostTextDim, style = MaterialTheme.typography.bodyMedium)
+                Spacer(Modifier.height(16.dp))
+                GhostButton("BACK TO TYPED ENTRY", onCancel, modifier = Modifier.fillMaxWidth())
+            }
+            return@Box
         }
 
         val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
@@ -113,6 +153,22 @@ fun QrScanScreen(
         // bindToLifecycle with the real lifecycleOwner handles stop/resume itself, so the camera
         // returns when the app does.
         val previewView = remember { PreviewView(context) }
+        // The bound Camera, kept so the tap-to-focus gesture below can drive its CameraControl.
+        var camera by remember { mutableStateOf<androidx.camera.core.Camera?>(null) }
+        // Tap-to-focus feedback ring: where the last tap landed and its fade clock. tapTick (not the
+        // offset) keys the animation so tapping the same spot twice still replays the ring.
+        var focusRingAt by remember { mutableStateOf<androidx.compose.ui.geometry.Offset?>(null) }
+        var focusRingTick by remember { mutableIntStateOf(0) }
+        var focusRingT by remember { mutableStateOf(1f) }
+        LaunchedEffect(focusRingTick) {
+            if (focusRingAt == null) return@LaunchedEffect
+            focusRingT = 0f
+            while (focusRingT < 1f) {
+                kotlinx.coroutines.delay(30)
+                focusRingT += 0.07f
+            }
+            focusRingAt = null
+        }
 
         LaunchedEffect(granted) {
             if (!granted) return@LaunchedEffect
@@ -122,14 +178,36 @@ fun QrScanScreen(
             val preview = androidx.camera.core.Preview.Builder().build().also {
                 it.surfaceProvider = previewView.surfaceProvider
             }
+            // Analysis resolution. A dense code (v9 enrol code is 57 modules, a v11 is 61) needs enough
+            // pixels per module for the binariser and finder detection to resolve small modules. 720p gave
+            // roughly 7px per module on a code filling the frame, which is why the big ones only decoded in
+            // a narrow zoom band. 1080p gives ~50% more linear resolution, widening the workable distance.
+            // Each frame is ~2x heavier to binarise and scan, but the frame throttle keeps the rate low, so
+            // the extra cost is paid a few times a second, not thirty. If it runs warm, this is the dial.
+            // ResolutionStrategy picks the closest the device actually supports.
+            val resolutionSelector = androidx.camera.core.resolutionselector.ResolutionSelector.Builder()
+                .setResolutionStrategy(
+                    androidx.camera.core.resolutionselector.ResolutionStrategy(
+                        android.util.Size(1920, 1080),
+                        androidx.camera.core.resolutionselector.ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER,
+                    )
+                )
+                .build()
             val analysis = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .setResolutionSelector(resolutionSelector)
                 .build()
             analysis.setAnalyzer(analysisExecutor) { proxy ->
-                // Two-rate gate. In found mode (a quip is showing) decode every 100ms to track
-                // the code and animate; otherwise hunt at 500ms. Skipped frames close cheaply.
+                // Two-rate gate. The full pipeline (binarise, finder scan, multi-triple sample, decode) is
+                // heavy, and running it flat out heats the phone and then thermally throttles, which is what
+                // makes it feel slower over time. So we push HARD only when it matters: once a code has been
+                // DETECTED in the recent past (finders found this frame, whether or not it decoded), sample
+                // every ~180ms so a stubborn dense code gets many attempts a second and locks fast; when
+                // nothing is in view, fall back to ~400ms hunting. The ghost and reticle animate on their own
+                // clocks between decodes, so the rate itself is not felt.
                 val now = System.currentTimeMillis()
-                val interval = if (quip != null) 100L else 500L
+                val codeInView = now - timing.lastDetectAt < DETECT_WINDOW_MS
+                val interval = if (codeInView) 180L else 400L
                 if (now - timing.lastDecodeAt < interval) {
                     proxy.close()
                     return@setAnalyzer
@@ -137,33 +215,57 @@ fun QrScanScreen(
                 timing.lastDecodeAt = now
                 val result = tryDecode(proxy)
                 proxy.close()
+                // A code is "in view" when this frame either sampled a grid (corners set) or saw at least
+                // two finder patterns , the marginal codes that fail to sample are exactly the ones that
+                // need more attempts per second, and previously they never opened the fast window at all.
+                // Two finders, not one: a single 1:1:3:1:1 coincidence in texture is common, two together
+                // almost always means a real code, so the fast rate doesn't burn battery on wallpaper.
+                if (com.localghost.app.qr.QrSampler.ScanGeom.corners != null ||
+                    com.localghost.app.qr.QrSampler.ScanGeom.findersSeen >= 2) timing.lastDetectAt = now
                 when (result) {
                     is ScanResult.Enrol -> {
-                        // Found the box. Latch it and play a brief happy-ghost animation, then
-                        // hand off. Latch once (ignore later frames of the same scan) so the
-                        // animation is not restarted and onLink fires exactly once.
+                        // Found the box. A CLEAN decode (plain RS, no erasures) that parsed as a valid enrol
+                        // link is trustworthy on the first frame: the strict localghost:// pattern plus a
+                        // well-formed 64-hex pinned fingerprint make a random miscorrection into a valid link
+                        // effectively impossible, and a wrong fingerprint would fail the TLS pin anyway (fails
+                        // safe , connection refused, re-scan). So we latch it at once. An erasure-path decode
+                        // ("conf"/"logo", e.g. a logo or blurred code) is more willing to manufacture a
+                        // consistent-but-wrong payload, so those still require the same payload on two frames.
+                        val payload = "${result.link.host}:${result.link.port}:${result.link.code}:${result.link.certFingerprint}"
+                        overlay = result.overlay
+                        timing.lastSeenAt = now
                         if (foundLink == null) {
-                            status = "found ${result.link.host}"
-                            overlay = result.overlay
-                            quip = null
-                            foundLink = result.link
+                            if (result.clean || pendingPayload == payload) {
+                                status = "found ${result.link.host}"
+                                quip = null
+                                foundLink = result.link
+                            } else {
+                                status = "reading…"
+                                pendingPayload = payload
+                            }
                         }
                     }
                     is ScanResult.NotForUs -> {
-                        // A readable code that is not the way in. Anchor the overlay and let the
-                        // sad ghost orbit it. Refresh the overlay every pass so it tracks; debounce
-                        // the quip text so it does not re-fire. Mark lastSeenAt for the timeout.
+                        // A readable code that is not the way in. Anchor the overlay and let the ghost
+                        // orbit it. Only name it once the same payload has been seen twice, so a transient
+                        // wrong decode never flashes the wrong opinion. Mark lastSeenAt for the timeout.
                         overlay = result.overlay
                         timing.lastSeenAt = now
-                        if (result.guess.preview != lastQuipFor) {
-                            lastQuipFor = result.guess.preview
-                            quip = result.guess
+                        val payload = result.guess.preview
+                        if (pendingPayload == payload) {
+                            if (result.guess.preview != lastQuipFor) {
+                                lastQuipFor = result.guess.preview
+                                quip = result.guess
+                            }
+                        } else {
+                            pendingPayload = payload
                         }
                     }
                     ScanResult.Nothing -> {
-                        // No readable QR this frame. In found mode, keep the ghost for a short
-                        // grace period (the code may just have blurred for a frame); once it has
-                        // been gone past the timeout, drop back to hunting and clear the ghost.
+                        // No readable QR this frame. A gap breaks the confirmation chain. In found mode,
+                        // keep the ghost for a short grace period (the code may just have blurred for a
+                        // frame); once gone past the timeout, drop back to hunting and clear the ghost.
+                        pendingPayload = null
                         if (quip != null && now - timing.lastSeenAt > FOUND_TIMEOUT_MS) {
                             quip = null
                             lastQuipFor = null
@@ -175,15 +277,76 @@ fun QrScanScreen(
                 }
             }
             provider.unbindAll()
-            provider.bindToLifecycle(
+            camera = provider.bindToLifecycle(
                 lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis
             )
         }
 
-        Box(Modifier.weight(1f).fillMaxWidth()) {
-            AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
+        // Full-bleed camera preview. The AR overlays and the text panels float over it. Tapping focuses
+        // AND meters at that point: focus fixes close-range blur (a phone screen at 12cm sits at the edge
+        // of the lens's comfort zone and hunts), and exposure metering on the tapped spot is the real win
+        // for scanning a SCREEN , auto-exposure averages the dark room and blows the bright screen out,
+        // crushing exactly the low-contrast grey marks (Samsung's ring finders) that detection needs.
+        // previewView.meteringPointFactory maps view coordinates through the preview's own transform, so
+        // the tap lands on the right sensor region regardless of crop or rotation. The action auto-cancels
+        // back to continuous auto after a few seconds, so a stray tap can never leave the camera stuck.
+        AndroidView(
+            factory = { previewView },
+            modifier = Modifier.fillMaxSize().pointerInput(Unit) {
+                detectTapGestures { tap ->
+                    val cam = camera ?: return@detectTapGestures
+                    val point = previewView.meteringPointFactory.createPoint(tap.x, tap.y)
+                    val action = FocusMeteringAction
+                        .Builder(point, FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE)
+                        .setAutoCancelDuration(6, java.util.concurrent.TimeUnit.SECONDS)
+                        .build()
+                    cam.cameraControl.startFocusAndMetering(action)
+                    focusRingAt = tap
+                    focusRingTick++
+                }
+            },
+        )
 
-            // AR overlay: a bracket on the code and a sad ghost orbiting it, because the code decoded
+        // Brief expanding ring where the tap landed, so focusing visibly registered.
+        run {
+            val at = focusRingAt
+            if (at != null && focusRingT < 1f) {
+                Canvas(Modifier.fillMaxSize()) {
+                    drawCircle(
+                        color = TerminalGreen.copy(alpha = (1f - focusRingT) * 0.85f),
+                        radius = 40f * (1f + 0.5f * focusRingT),
+                        center = at,
+                        style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f),
+                    )
+                }
+            }
+        }
+
+            // FEEDBACK RETICLE: whenever the detector has locked onto a code's position this frame
+            // (ScanGeom.corners is set), draw a clean pulsing corner-bracket square around it, so the
+            // person can see "yes, I'm seeing a code, hold steady" even while the decode is still being
+            // worked out. It tracks the detected quad; it is feedback, not the decode verdict (that is
+            // the ghost). Refreshed on its own ~80ms tick so it animates between decode passes.
+            var geomTick by remember { mutableStateOf(0) }
+            LaunchedEffect(granted) {
+                while (granted) { geomTick++; kotlinx.coroutines.delay(80) }
+            }
+            run {
+                geomTick // read so this recomposes on the tick
+                val corners = com.localghost.app.qr.QrSampler.ScanGeom.corners
+                if (foundLink == null && corners != null && corners.size == 4 && quadLooksSquare(corners)) {
+                    val fw = com.localghost.app.qr.QrSampler.ScanGeom.frameW
+                    val fh = com.localghost.app.qr.QrSampler.ScanGeom.frameH
+                    val rot = com.localghost.app.qr.QrSampler.ScanGeom.rotation
+                    Canvas(Modifier.fillMaxSize()) {
+                        val q = mapPointsToView(corners, fw, fh, rot, size.width, size.height)
+                        val pulse = 0.5f + 0.5f * kotlin.math.sin(geomTick * 0.25f)
+                        drawReticle(q, TerminalGreen, pulse)
+                    }
+                }
+            }
+
+            // AR overlay: the ghost drawn over the code, because the code decoded
             // but it is not the way in. The orbit phase advances on its own clock (~100ms) so the ghost
             // flies even between decode passes. The finder points come from the analysis frame (image
             // space); we map them to this Canvas's view space. HONEST NOTE: the mapping is the part to
@@ -196,63 +359,177 @@ fun QrScanScreen(
                     kotlinx.coroutines.delay(100)
                 }
             }
+            // Rage ramps toward 1 while a wrong code is in view and decays when it leaves, so the ghost
+            // visibly gets angrier the longer you keep showing it the wrong code, then calms down.
+            var rage by remember { mutableStateOf(0f) }
+            LaunchedEffect(granted) {
+                while (granted) {
+                    rage = if (quip != null) (rage + 0.022f).coerceAtMost(1f) else (rage - 0.04f).coerceAtLeast(0f)
+                    kotlinx.coroutines.delay(50)
+                }
+            }
             overlay?.let { ov ->
                 Canvas(Modifier.fillMaxSize()) {
                     val pts = mapFindersToView(ov, size.width, size.height)
-                    if (pts.size == 3) {
-                        val enrolling = foundLink != null
-                        val color = if (enrolling) TerminalGreen else Warning
+                    // Only the WRONG-code ghost is drawn over the code. A successful scan is handled by the
+                    // full-screen celebration layer at the end, so nothing is drawn on the code on success.
+                    if (pts.size == 3 && quip != null) {
+                        // No bracket , just the ghost, getting ANGRIER the longer you keep showing it
+                        // rubbish. `rage` ramps toward 1 while a wrong code is in view (and decays
+                        // otherwise); it reddens the ghost, grows it, shakes it harder, and pushes a red
+                        // glow out behind it. The thing we scanned pops up above and mouths off.
                         val minX = pts.minOf { it.x }; val maxX = pts.maxOf { it.x }
-                        val minY = pts.minOf { it.y }; val maxY = pts.maxOf { it.y }
+                        val minY = pts.minOf { it.y }
                         val cx = (minX + maxX) / 2f
-                        val cy = (minY + maxY) / 2f
                         val pad = 24f
-                        // bracket on the code (green when enrolling, amber for a wrong code)
-                        drawRect(
-                            color = color,
-                            topLeft = androidx.compose.ui.geometry.Offset(minX - pad, minY - pad),
-                            size = androidx.compose.ui.geometry.Size((maxX - minX) + pad * 2, (maxY - minY) + pad * 2),
-                            style = androidx.compose.ui.graphics.drawscope.Stroke(width = 4f),
-                        )
-                        if (enrolling) {
-                            // QR -> box -> ghost flies to the phone, over enrolAnim 0..1.
-                            drawEnrolAnimation(cx, cy, (maxX - minX), (maxY - minY), size.height, enrolAnim, color)
-                        } else if (quip != null) {
-                            // a wrong code. The sad ghost orbits the bounding box.
-                            val rx = (maxX - minX) / 2f + 80f
-                            val ry = (maxY - minY) / 2f + 80f
-                            val gx = cx + rx * kotlin.math.cos(orbit)
-                            val gy = cy + ry * kotlin.math.sin(orbit)
-                            drawSadGhost(gx, gy, 34f, color)
+                        val angry = androidx.compose.ui.graphics.lerp(Warning, AngryRed, rage)
+                        val ghostS = 54f + rage * 34f
+                        val jx = kotlin.math.sin(orbit * (3.1f + rage * 3f)) * (6f + rage * 14f)
+                        val jy = kotlin.math.cos(orbit * (2.7f + rage * 3f)) * (4f + rage * 10f)
+                        val gx = cx + jx
+                        val gy = minY - pad - ghostS * 1.3f + jy
+                        // Spooky backdrop: a deep void heart with a faint breathing mist ring, so the ghost
+                        // reads over a bright or busy camera frame AND looks like it brought its own gloom.
+                        // Drawn always, even before rage builds, so the ghost is visible the instant it appears.
+                        drawSpookyHalo(gx, gy, ghostS, angry, orbit)
+                        if (rage > 0.02f) {
+                            drawCircle(
+                                brush = androidx.compose.ui.graphics.Brush.radialGradient(
+                                    colors = listOf(AngryRed.copy(alpha = 0.45f * rage), androidx.compose.ui.graphics.Color.Transparent),
+                                    center = androidx.compose.ui.geometry.Offset(gx, gy),
+                                    radius = ghostS * 2.6f,
+                                ),
+                                radius = ghostS * 2.6f,
+                                center = androidx.compose.ui.geometry.Offset(gx, gy),
+                            )
+                        }
+                        drawAngryGhost(gx, gy, ghostS, angry, orbit, rage)
+                        val said = quip?.let { shoutFor(it) } ?: ""
+                        if (said.isNotEmpty()) {
+                            drawSpeechBubble(gx, gy - ghostS * 1.5f, said, angry, orbit)
                         }
                     }
                 }
             }
-        }
 
-        Spacer(Modifier.height(12.dp))
-        Text("> $status", color = TerminalGreen, style = MaterialTheme.typography.labelMedium)
 
-        // When a readable-but-wrong QR is in view, say what it was and have an opinion. This is the fix
-        // for the old silence: a valid WiFi/URL/contact code now gets named, not swallowed.
-        quip?.let { g ->
-            Spacer(Modifier.height(10.dp))
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(VoidLighter, MaterialTheme.shapes.small)
-                    .padding(12.dp)
+        // Floating title at the top, clear of the status bar and the camera cutout. Sits on a dark
+        // rounded pill so the green text stays legible even over a bright or greenish camera image.
+        if (foundLink == null) Column(
+            Modifier.align(Alignment.TopCenter).fillMaxWidth().statusBarsPadding().padding(20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Box(
+                Modifier
+                    .background(Void.copy(alpha = 0.72f), MaterialTheme.shapes.small)
+                    .padding(horizontal = 14.dp, vertical = 7.dp)
             ) {
-                Text("Looks like ${g.label}.", color = Warning, style = MaterialTheme.typography.bodyMedium)
-                Spacer(Modifier.height(4.dp))
-                Text(g.quip, color = TerminalGreen, style = MaterialTheme.typography.bodySmall)
-                Spacer(Modifier.height(6.dp))
-                Text(g.preview, color = GhostTextDim, style = MaterialTheme.typography.labelSmall)
+                SectionLabel("SCAN THE BOX QR")
             }
         }
 
-        Spacer(Modifier.height(8.dp))
-        GhostButton("CANCEL / TYPE INSTEAD", onCancel, modifier = Modifier.fillMaxWidth())
+        // Floating panel at the bottom, over the camera, clear of the nav buttons. A dark gradient
+        // scrim sits under the text so it stays legible over a bright camera image.
+        if (foundLink == null) Column(
+            Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                .background(
+                    androidx.compose.ui.graphics.Brush.verticalGradient(
+                        listOf(androidx.compose.ui.graphics.Color.Transparent, Void.copy(alpha = 0.82f), Void)
+                    )
+                )
+                .navigationBarsPadding()
+                .padding(horizontal = 20.dp, vertical = 16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            // Status and live decode diagnostic, on their own dark pill so they read over any camera
+            // content. The diagnostic line is the honest feedback: it names the stage the current frame
+            // reached, so a code that detects but will not decode says so ("grid found, no candidate
+            // decoded") instead of just sitting there silently.
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .background(Void.copy(alpha = 0.72f), MaterialTheme.shapes.small)
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
+            ) {
+                Text("> $status", color = TerminalGreen, style = MaterialTheme.typography.labelMedium)
+                if (diag.isNotEmpty()) {
+                    Spacer(Modifier.height(3.dp))
+                    Text("· $diag", color = GhostTextDim, style = MaterialTheme.typography.labelSmall)
+                }
+            }
+
+            // When a readable-but-wrong QR is in view, say what it was and have an opinion.
+            quip?.let { g ->
+                Spacer(Modifier.height(10.dp))
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(VoidLighter, MaterialTheme.shapes.small)
+                        .padding(12.dp)
+                ) {
+                    Text("Looks like ${g.label}.", color = Warning, style = MaterialTheme.typography.bodyMedium)
+                    Spacer(Modifier.height(4.dp))
+                    Text(g.quip, color = TerminalGreen, style = MaterialTheme.typography.bodySmall)
+                    Spacer(Modifier.height(6.dp))
+                    Text(g.preview, color = GhostTextDim, style = MaterialTheme.typography.labelSmall)
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+            GhostButton("CANCEL / TYPE INSTEAD", onCancel, modifier = Modifier.fillMaxWidth())
+        }
+
+        // SUCCESS. A real box is scanned. This is AR: the live camera stays behind the celebration, and a
+        // big happy ghost pops in and bobs over a soft glow while colourful fireworks burst around it. The
+        // status text sits on a dark pill so it stays legible over the camera. enrolAnim (0..1 over the
+        // animation) pops the ghost in with a little overshoot; celebrate is the free clock driving the
+        // fireworks and the bob. Nothing is drawn opaque , the whole point is to keep the AR camera visible.
+        if (foundLink != null) {
+            val boxLabel = foundLink?.boxName?.trim()?.takeIf { it.isNotEmpty() } ?: "the box"
+            Box(Modifier.fillMaxSize()) {
+                Canvas(Modifier.fillMaxSize()) {
+                    drawFireworks(size.width, size.height, celebrate)
+                    val cx = size.width / 2f
+                    val cy = size.height * 0.42f + kotlin.math.sin(celebrate * 2.2f) * (size.height * 0.012f)
+                    val a = enrolAnim.coerceIn(0f, 1f)
+                    val pop = 1f - (1f - a) * (1f - a)                                   // ease-out
+                    val overshoot = 1f + 0.10f * kotlin.math.sin(a * Math.PI.toFloat())  // gentle pop
+                    val s = size.minDimension * 0.12f * pop * overshoot
+                    if (s > 1f) {
+                        // Spooky backdrop: same treatment as the angry ghost , deep void heart with a faint
+                        // breathing spectral-green mist , then the celebration's own green glow on top.
+                        drawSpookyHalo(cx, cy, s, TerminalGreen, celebrate)
+                        drawCircle(
+                            brush = androidx.compose.ui.graphics.Brush.radialGradient(
+                                colors = listOf(TerminalGreen.copy(alpha = 0.30f), androidx.compose.ui.graphics.Color.Transparent),
+                                center = androidx.compose.ui.geometry.Offset(cx, cy),
+                                radius = s * 2.6f,
+                            ),
+                            radius = s * 2.6f,
+                            center = androidx.compose.ui.geometry.Offset(cx, cy),
+                        )
+                        drawHappyGhost(cx, cy, s, TerminalGreen)
+                    }
+                }
+                Column(
+                    Modifier.fillMaxSize().systemBarsPadding().padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Spacer(Modifier.weight(0.62f))
+                    Column(
+                        Modifier
+                            .background(Void.copy(alpha = 0.72f), MaterialTheme.shapes.small)
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Text("BOX FOUND", color = TerminalGreen, style = MaterialTheme.typography.headlineSmall)
+                        Spacer(Modifier.height(4.dp))
+                        Text("connecting to $boxLabel…", color = GhostTextDim, style = MaterialTheme.typography.bodyMedium)
+                    }
+                    Spacer(Modifier.weight(0.38f))
+                }
+            }
+        }
     }
 }
 
@@ -264,7 +541,7 @@ fun QrScanScreen(
  */
 private sealed interface ScanResult {
     object Nothing : ScanResult
-    data class Enrol(val link: EnrollLink, val overlay: Overlay) : ScanResult
+    data class Enrol(val link: EnrollLink, val overlay: Overlay, val clean: Boolean) : ScanResult
     data class NotForUs(val guess: com.localghost.app.qr.QrGuess, val overlay: Overlay) : ScanResult
 }
 
@@ -278,6 +555,7 @@ private data class Overlay(
     val frameW: Int,
     val frameH: Int,
     val rotation: Int,
+    val corners: List<com.localghost.app.qr.QrSampler.FinderPoint>? = null,
 )
 
 /**
@@ -294,23 +572,85 @@ private fun mapFindersToView(
     ov: Overlay,
     viewW: Float,
     viewH: Float,
+): List<androidx.compose.ui.geometry.Offset> =
+    mapPointsToView(ov.finders, ov.frameW, ov.frameH, ov.rotation, viewW, viewH)
+
+/**
+ * Map a list of image-space points (analysis frame) to Canvas view space, applying the frame rotation
+ * then PreviewView's FILL_CENTER scale/crop. Shared by the finder overlay and the diagnostic QR outline.
+ */
+/**
+ * Whether a sampled quad is plausibly a QR code seen in perspective. The sampler sets ScanGeom.corners
+ * for ANY grid it managed to sample, including grids built from finder-shaped coincidences in ordinary
+ * texture; drawing the reticle on those covers the screen in shapes where there is no code at all. A
+ * real code, even tilted hard, keeps its four sides within a modest band of each other and its two
+ * diagonals close; junk quads assembled from unrelated points are wildly skewed and fail one of the
+ * two ratio checks. Gates only the DRAWING , detection, sampling and the fast-rate signal are untouched.
+ */
+private fun quadLooksSquare(q: List<com.localghost.app.qr.QrSampler.FinderPoint>): Boolean {
+    if (q.size != 4) return false
+    fun d(a: com.localghost.app.qr.QrSampler.FinderPoint, b: com.localghost.app.qr.QrSampler.FinderPoint): Float =
+        kotlin.math.hypot((a.x - b.x).toFloat(), (a.y - b.y).toFloat())
+    val sides = listOf(d(q[0], q[1]), d(q[1], q[2]), d(q[2], q[3]), d(q[3], q[0]))
+    val shortest = sides.min()
+    if (shortest < 1f) return false                    // degenerate
+    if (sides.max() / shortest > 1.8f) return false    // ~45 degrees of tilt still passes; junk doesn't
+    val d1 = d(q[0], q[2]); val d2 = d(q[1], q[3])
+    return maxOf(d1, d2) / minOf(d1, d2).coerceAtLeast(1f) <= 1.45f
+}
+
+/**
+ * The ghosts' backdrop: a deep void heart with a faint, slowly breathing mist ring in the ghost's own
+ * colour, so it reads over a bright or busy camera frame and looks properly haunted rather than like a
+ * drop shadow. Everything is radial and fades to transparent, keeping the AR feel. `t` is any advancing
+ * animation clock (orbit for the angry ghost, the celebration clock for the happy one).
+ */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSpookyHalo(
+    cx: Float, cy: Float, s: Float,
+    tint: androidx.compose.ui.graphics.Color, t: Float,
+) {
+    val centre = androidx.compose.ui.geometry.Offset(cx, cy)
+    val breathe = 0.9f + 0.1f * kotlin.math.sin(t * 5.3f)   // slow candle-flicker of the mist
+    // Outer spectral mist: transparent at the heart, faint tint mid-ring, gone at the edge.
+    drawCircle(
+        brush = androidx.compose.ui.graphics.Brush.radialGradient(
+            0.0f to androidx.compose.ui.graphics.Color.Transparent,
+            0.55f to tint.copy(alpha = 0.13f * breathe),
+            1.0f to androidx.compose.ui.graphics.Color.Transparent,
+            center = centre, radius = s * 3.1f,
+        ),
+        radius = s * 3.1f, center = centre,
+    )
+    // Deep void heart, darker than a shadow , the gloom the ghost brought with it.
+    drawCircle(
+        brush = androidx.compose.ui.graphics.Brush.radialGradient(
+            colors = listOf(Void.copy(alpha = 0.80f), Void.copy(alpha = 0.42f), androidx.compose.ui.graphics.Color.Transparent),
+            center = centre, radius = s * 2.2f,
+        ),
+        radius = s * 2.2f, center = centre,
+    )
+}
+
+private fun mapPointsToView(
+    points: List<com.localghost.app.qr.QrSampler.FinderPoint>,
+    frameW: Int,
+    frameH: Int,
+    rotation: Int,
+    viewW: Float,
+    viewH: Float,
 ): List<androidx.compose.ui.geometry.Offset> {
-    // upright frame dimensions after applying rotation
-    val (upW, upH) = when (ov.rotation) {
-        90, 270 -> ov.frameH.toFloat() to ov.frameW.toFloat()
-        else -> ov.frameW.toFloat() to ov.frameH.toFloat()
+    val (upW, upH) = when (rotation) {
+        90, 270 -> frameH.toFloat() to frameW.toFloat()
+        else -> frameW.toFloat() to frameH.toFloat()
     }
-    // FILL_CENTER: scale so the upright image covers the view, crop the overflow
     val scale = maxOf(viewW / upW, viewH / upH)
     val dx = (viewW - upW * scale) / 2f
     val dy = (viewH - upH * scale) / 2f
-
-    return ov.finders.map { p ->
-        // rotate image-space (p.x, p.y) into upright space
-        val (rx, ry) = when (ov.rotation) {
-            90 -> (ov.frameH - p.y).toFloat() to p.x.toFloat()
-            180 -> (ov.frameW - p.x).toFloat() to (ov.frameH - p.y).toFloat()
-            270 -> p.y.toFloat() to (ov.frameW - p.x).toFloat()
+    return points.map { p ->
+        val (rx, ry) = when (rotation) {
+            90 -> (frameH - p.y).toFloat() to p.x.toFloat()
+            180 -> (frameW - p.x).toFloat() to (frameH - p.y).toFloat()
+            270 -> p.y.toFloat() to (frameW - p.x).toFloat()
             else -> p.x.toFloat() to p.y.toFloat()
         }
         androidx.compose.ui.geometry.Offset(rx * scale + dx, ry * scale + dy)
@@ -321,10 +661,16 @@ private fun mapFindersToView(
 private class ScanTiming {
     var lastDecodeAt = 0L
     var lastSeenAt = 0L
+    var lastDetectAt = 0L
 }
 
 /** How long a found code can be missing before found-mode drops back to hunting. */
 private const val FOUND_TIMEOUT_MS = 1500L
+
+/** How recently finders must have been detected to keep sampling at the fast (in-view) rate. Long
+ *  enough to bridge a frame or two of blur while holding a code steady, short enough to drop back to
+ *  the hunting rate once the code has genuinely left the frame. */
+private const val DETECT_WINDOW_MS = 700L
 
 /** The ghost silhouette body (dome top, scalloped bottom), centred at (cx, cy), size s. */
 private fun ghostBody(cx: Float, cy: Float, s: Float): androidx.compose.ui.graphics.Path =
@@ -344,97 +690,245 @@ private fun ghostBody(cx: Float, cy: Float, s: Float): androidx.compose.ui.graph
     }
 
 /**
- * The brand ghost, sad variant, centred at (cx, cy). Downturned eye strokes so it reads as sad about
- * the wrong code. Pure Canvas, so it animates wherever the orbit puts it.
+ * The brand ghost, ANGRY variant: bigger, filled, vibrating with rage. Centred at (cx, cy). The body
+ * is filled (so it reads as solid and full, not a wisp), with a darker fill under a bright outline.
+ * Angry V-brows, hard eyes, a jagged grimace, and anger marks puffing off the head that pulse with the
+ * phase. Pure Canvas so it animates wherever the hover/jitter puts it.
  */
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSadGhost(
-    cx: Float, cy: Float, s: Float, color: androidx.compose.ui.graphics.Color,
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawAngryGhost(
+    cx: Float, cy: Float, s: Float, color: androidx.compose.ui.graphics.Color, phase: Float, rage: Float,
 ) {
-    drawPath(ghostBody(cx, cy, s), color, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f))
-    val eyeY = cy - s * 0.1f
-    val eo = s * 0.42f
-    val el = s * 0.28f
+    val body = ghostBody(cx, cy, s)
+    // fill first (alpha grows with rage so it reads more solid and hot), then a bright outline
+    drawPath(body, color.copy(alpha = 0.22f + 0.3f * rage), style = androidx.compose.ui.graphics.drawscope.Fill)
+    drawPath(body, color, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 4f))
+
+    // angry eyebrows: two strokes angled down toward the centre (a scowl), steeper as rage climbs
+    val browY = cy - s * 0.32f
+    val eo = s * 0.40f
+    val bl = s * 0.34f
+    val tilt = bl * (0.35f + 0.4f * rage)
     drawLine(color,
-        androidx.compose.ui.geometry.Offset(cx - eo - el / 2, eyeY - el / 2),
-        androidx.compose.ui.geometry.Offset(cx - eo + el / 2, eyeY + el / 2), strokeWidth = 3f)
+        androidx.compose.ui.geometry.Offset(cx - eo - bl / 2, browY - tilt),
+        androidx.compose.ui.geometry.Offset(cx - eo + bl / 2, browY + tilt), strokeWidth = 5f)
     drawLine(color,
-        androidx.compose.ui.geometry.Offset(cx + eo - el / 2, eyeY + el / 2),
-        androidx.compose.ui.geometry.Offset(cx + eo + el / 2, eyeY - el / 2), strokeWidth = 3f)
+        androidx.compose.ui.geometry.Offset(cx + eo - bl / 2, browY + tilt),
+        androidx.compose.ui.geometry.Offset(cx + eo + bl / 2, browY - tilt), strokeWidth = 5f)
+
+    // hard round eyes under the brows
+    val eyeY = cy - s * 0.05f
+    drawCircle(color, radius = s * 0.16f, center = androidx.compose.ui.geometry.Offset(cx - eo, eyeY))
+    drawCircle(color, radius = s * 0.16f, center = androidx.compose.ui.geometry.Offset(cx + eo, eyeY))
+
+    // a jagged, gritted grimace (zig-zag) across the lower face
+    val mouth = androidx.compose.ui.graphics.Path().apply {
+        val mw = s * 0.7f
+        val my = cy + s * 0.42f
+        val left = cx - mw / 2f
+        moveTo(left, my)
+        val teeth = 4
+        val tw = mw / teeth
+        for (i in 0 until teeth) {
+            val x1 = left + tw * (i + 0.5f)
+            val x2 = left + tw * (i + 1f)
+            lineTo(x1, my - s * 0.14f)
+            lineTo(x2, my)
+        }
+    }
+    drawPath(mouth, color, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f))
+
+    // anger marks: jagged sparks puffing off the head, MORE of them and longer as rage climbs
+    val pulse = 0.6f + 0.4f * kotlin.math.sin(phase * 4f)
+    val markR = s * (1.15f + 0.12f * pulse)
+    val markLen = s * (0.22f + 0.4f * rage) * pulse
+    val count = 4 + (rage * 6f).toInt()
+    for (i in 0 until count) {
+        val a = (i.toFloat() / count) * (2f * Math.PI.toFloat()) + phase * 0.5f
+        val bx = cx + markR * kotlin.math.cos(a)
+        val by = cy + markR * kotlin.math.sin(a)
+        drawLine(color,
+            androidx.compose.ui.geometry.Offset(bx, by),
+            androidx.compose.ui.geometry.Offset(bx + markLen * kotlin.math.cos(a), by + markLen * kotlin.math.sin(a)),
+            strokeWidth = 3f)
+    }
+}
+
+/** Short angry thing the scanned code "shouts" from the bubble, by kind. Keep it punchy. */
+private fun shoutFor(g: com.localghost.app.qr.QrGuess): String = when {
+    g.label.contains("link", true) || g.label.contains("web", true) -> "I'm just a website!"
+    g.label.contains("wifi", true) -> "I'm someone's WiFi!"
+    g.label.contains("contact", true) || g.label.contains("card", true) -> "I'm a business card!"
+    g.label.contains("text", true) -> "I'm just text!"
+    else -> "Wrong code!"
 }
 
 /**
- * The brand ghost, happy variant, centred at (cx, cy). Round eyes and an upturned smile, for the
- * moment a real box is found. Drawn rising out of the code on the enrol animation.
+ * A small speech bubble centred above (cx, cy) holding the shout. Rounded rect with a downward tail,
+ * text drawn via the native canvas. Bobs gently on the phase so it feels alive.
  */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSpeechBubble(
+    cx: Float, cy: Float, text: String, color: androidx.compose.ui.graphics.Color, phase: Float,
+) {
+    val paint = android.graphics.Paint().apply {
+        isAntiAlias = true
+        textSize = 30f
+        typeface = android.graphics.Typeface.MONOSPACE
+        this.color = android.graphics.Color.argb(255, (color.red * 255).toInt(), (color.green * 255).toInt(), (color.blue * 255).toInt())
+    }
+    val bob = kotlin.math.sin(phase * 2f) * 3f
+    val tw = paint.measureText(text)
+    val padX = 18f; val padY = 12f
+    val bw = tw + padX * 2
+    val bh = 30f + padY * 2
+    val left = cx - bw / 2f
+    val top = cy - bh / 2f + bob
+    // bubble background (dark) and outline
+    val rect = androidx.compose.ui.geometry.Rect(left, top, left + bw, top + bh)
+    val corner = androidx.compose.ui.geometry.CornerRadius(12f, 12f)
+    drawRoundRect(
+        color = androidx.compose.ui.graphics.Color(0xFF101418),
+        topLeft = androidx.compose.ui.geometry.Offset(rect.left, rect.top),
+        size = androidx.compose.ui.geometry.Size(bw, bh), cornerRadius = corner,
+    )
+    drawRoundRect(
+        color = color,
+        topLeft = androidx.compose.ui.geometry.Offset(rect.left, rect.top),
+        size = androidx.compose.ui.geometry.Size(bw, bh), cornerRadius = corner,
+        style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f),
+    )
+    // downward tail toward the ghost
+    val tail = androidx.compose.ui.graphics.Path().apply {
+        moveTo(cx - 10f, top + bh)
+        lineTo(cx + 10f, top + bh)
+        lineTo(cx, top + bh + 16f)
+        close()
+    }
+    drawPath(tail, androidx.compose.ui.graphics.Color(0xFF101418))
+    drawPath(tail, color, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f))
+    // text
+    drawContext.canvas.nativeCanvas.drawText(text, left + padX, top + padY + 24f, paint)
+}
+
+/**
+ * A clean AR "locked on" reticle: four L-shaped corner brackets at the detected quad's corners, with
+ * a faint connecting outline. pulse (0..1) gently breathes the bracket length and alpha so it reads as
+ * a live lock, not a static box. q is the four corners in view space (TL, TR, BR, BL order).
+ */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawReticle(
+    q: List<androidx.compose.ui.geometry.Offset>, color: androidx.compose.ui.graphics.Color, pulse: Float,
+) {
+    if (q.size != 4) return
+    // faint full outline so the whole code is gently framed
+    for (i in 0 until 4) {
+        drawLine(color.copy(alpha = 0.25f), q[i], q[(i + 1) % 4], strokeWidth = 2f)
+    }
+    // bracket length is a fraction of the shorter side, breathing with the pulse
+    val side = minOf(
+        (q[0] - q[1]).getDistance(), (q[1] - q[2]).getDistance(),
+        (q[2] - q[3]).getDistance(), (q[3] - q[0]).getDistance(),
+    )
+    val len = side * (0.18f + 0.05f * pulse)
+    val a = 0.7f + 0.3f * pulse
+    for (i in 0 until 4) {
+        val p = q[i]
+        val nLeft = q[(i + 3) % 4]   // previous corner
+        val nRight = q[(i + 1) % 4]  // next corner
+        val toL = (nLeft - p).let { it / it.getDistance() }
+        val toR = (nRight - p).let { it / it.getDistance() }
+        drawLine(color.copy(alpha = a), p, p + toL * len, strokeWidth = 5f)
+        drawLine(color.copy(alpha = a), p, p + toR * len, strokeWidth = 5f)
+    }
+}
+
+
+/**
+ * Draws celebratory fireworks across the frame when an enrol scan succeeds: several bursts at
+ * staggered times and fixed pseudo-random positions, each throwing a ring of fading sparks outward.
+ * Driven by a single rising clock t, so it keeps going for the ~2.6s the success animation runs.
+ */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawFireworks(w: Float, h: Float, t: Float) {
+    fun frac(x: Float) = x - kotlin.math.floor(x)
+    val colors = listOf(
+        TerminalGreen,
+        androidx.compose.ui.graphics.Color(0xFFFFE066), // gold
+        androidx.compose.ui.graphics.Color(0xFF66FFCC), // mint
+        androidx.compose.ui.graphics.Color(0xFF66D9FF), // sky
+        androidx.compose.ui.graphics.Color(0xFFFF6FB5), // pink
+        androidx.compose.ui.graphics.Color(0xFFB388FF), // violet
+        androidx.compose.ui.graphics.Color(0xFFFF9E4D), // orange
+        androidx.compose.ui.graphics.Color(0xFF4DFFA6), // spring
+        Warning,                                        // amber
+    )
+    val bursts = 12
+    for (b in 0 until bursts) {
+        val seed = b * 97.13f
+        val bx = (0.08f + 0.84f * frac(kotlin.math.sin(seed) * 4391.7f)) * w
+        val by = (0.08f + 0.62f * frac(kotlin.math.cos(seed * 1.7f) * 2917.3f)) * h
+        val cycle = 1.4f
+        val local = (t - b * 0.13f) % cycle   // tighter stagger => more bursts alive at once
+        if (local < 0f || local > 1f) continue
+        val p = local                          // 0..1 burst progress
+        val col = colors[b % colors.size]
+        val rays = 12 + (b % 4) * 3            // 12..21 rays, varied per burst
+        val radius = p * (80f + (b % 4) * 28f)
+        val alpha = (1f - p).coerceIn(0f, 1f)
+        val spark = 2.5f + 2f * (1f - p)
+        for (i in 0 until rays) {
+            val a = (i.toFloat() / rays) * (2f * Math.PI.toFloat()) + b * 0.3f
+            val ca = kotlin.math.cos(a); val sa = kotlin.math.sin(a)
+            drawLine(
+                col.copy(alpha = alpha * 0.55f),
+                androidx.compose.ui.geometry.Offset(bx + radius * 0.5f * ca, by + radius * 0.5f * sa),
+                androidx.compose.ui.geometry.Offset(bx + radius * ca, by + radius * sa),
+                strokeWidth = 2f,
+            )
+            drawCircle(col.copy(alpha = alpha), radius = spark, center = androidx.compose.ui.geometry.Offset(bx + radius * ca, by + radius * sa))
+        }
+        // bright flash at the burst centre in its first moments
+        if (p < 0.25f) {
+            drawCircle(col.copy(alpha = (1f - p / 0.25f) * 0.8f), radius = 5f, center = androidx.compose.ui.geometry.Offset(bx, by))
+        }
+    }
+}
 private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawHappyGhost(
     cx: Float, cy: Float, s: Float, color: androidx.compose.ui.graphics.Color,
 ) {
-    drawPath(ghostBody(cx, cy, s), color, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f))
-    val eyeY = cy - s * 0.1f
-    val eo = s * 0.42f
-    // round happy eyes
-    drawCircle(color, radius = s * 0.13f, center = androidx.compose.ui.geometry.Offset(cx - eo, eyeY))
-    drawCircle(color, radius = s * 0.13f, center = androidx.compose.ui.geometry.Offset(cx + eo, eyeY))
-    // an upturned smile (a shallow arc), drawn as a small quad-curve path
+    val body = ghostBody(cx, cy, s)
+    val outline = (s * 0.04f).coerceAtLeast(3f)
+    // faint fill so a big ghost reads as solid rather than a wisp, then a crisp outline
+    drawPath(body, color.copy(alpha = 0.16f), style = androidx.compose.ui.graphics.drawscope.Fill)
+    drawPath(body, color, style = androidx.compose.ui.graphics.drawscope.Stroke(width = outline))
+    val eyeY = cy - s * 0.10f
+    val eo = s * 0.40f
+    // big round happy eyes
+    drawCircle(color, radius = s * 0.14f, center = androidx.compose.ui.geometry.Offset(cx - eo, eyeY))
+    drawCircle(color, radius = s * 0.14f, center = androidx.compose.ui.geometry.Offset(cx + eo, eyeY))
+    // a big upturned smile
     val smile = androidx.compose.ui.graphics.Path().apply {
-        moveTo(cx - s * 0.4f, cy + s * 0.35f)
-        quadraticTo(cx, cy + s * 0.75f, cx + s * 0.4f, cy + s * 0.35f)
+        moveTo(cx - s * 0.42f, cy + s * 0.28f)
+        quadraticTo(cx, cy + s * 0.86f, cx + s * 0.42f, cy + s * 0.28f)
     }
-    drawPath(smile, color, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f))
+    drawPath(smile, color, style = androidx.compose.ui.graphics.drawscope.Stroke(width = (s * 0.05f).coerceAtLeast(3f)))
 }
 
-/**
- * The found-the-box animation, over t in 0..1, centred at the code (cx, cy) with the code's size
- * (w, h). Three phases: the code becomes a small box (a drawn cube), a happy ghost emerges from it,
- * then the ghost flies down toward the phone (the bottom of the screen, viewH) and fades. Pure Canvas.
- */
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawEnrolAnimation(
-    cx: Float, cy: Float, w: Float, h: Float, viewH: Float, t: Float, color: androidx.compose.ui.graphics.Color,
-) {
-    val stroke = androidx.compose.ui.graphics.drawscope.Stroke(width = 4f)
-    // phase 1 (0..0.35): the code condenses into a small isometric box
-    // phase 2 (0.35..0.65): a ghost emerges from the top of the box
-    // phase 3 (0.65..1): the ghost flies down to the phone and fades
-    val boxSize = (minOf(w, h) * 0.6f).coerceAtLeast(60f)
-
-    // the box (drawn the whole time, fading slightly as the ghost leaves)
-    val boxAlpha = (1f - ((t - 0.65f) / 0.35f)).coerceIn(0.25f, 1f)
-    drawIsoBox(cx, cy, boxSize, color.copy(alpha = boxAlpha), stroke)
-
-    // the ghost: position interpolates from the box (phase 2) down toward the phone (phase 3)
-    if (t >= 0.35f) {
-        val gp = ((t - 0.35f) / 0.65f).coerceIn(0f, 1f) // 0 at emerge, 1 at phone
-        val startY = cy - boxSize * 0.2f
-        val endY = viewH - 80f
-        val gy = startY + (endY - startY) * gp
-        val ghostAlpha = (1f - gp).coerceIn(0f, 1f) * 0.9f + 0.1f
-        drawHappyGhost(cx, gy, 32f * (1f - gp * 0.4f), color.copy(alpha = ghostAlpha))
+/** Pull luminance from the frame, sample candidate grids, and let our decoder pick the real one. */
+// Reusable per-frame buffers. The analyser runs on a single thread, so one set of buffers can be
+// reused across frames instead of allocating a ~3.7MB luminance array (and a byte array) every decode.
+// Those repeated large allocations were churning the garbage collector, which both heats the phone and
+// makes it stutter more the longer it runs. Buffers grow only if the frame size changes.
+private object ScanBuffers {
+    var lum: IntArray = IntArray(0)
+    var bytes: ByteArray = ByteArray(0)
+    fun lumFor(size: Int): IntArray {
+        if (lum.size != size) lum = IntArray(size)
+        return lum
+    }
+    fun bytesFor(size: Int): ByteArray {
+        if (bytes.size != size) bytes = ByteArray(size)
+        return bytes
     }
 }
 
-/** A simple isometric box outline centred at (cx, cy), edge e. The QR "becomes" this. */
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawIsoBox(
-    cx: Float, cy: Float, e: Float, color: androidx.compose.ui.graphics.Color,
-    stroke: androidx.compose.ui.graphics.drawscope.Stroke,
-) {
-    val half = e / 2f
-    val d = e * 0.4f // depth offset for the iso effect
-    fun o(x: Float, y: Float) = androidx.compose.ui.geometry.Offset(cx + x, cy + y)
-    // front face
-    val fTL = o(-half, -half + d * 0.5f); val fTR = o(half, -half + d * 0.5f)
-    val fBL = o(-half, half + d * 0.5f); val fBR = o(half, half + d * 0.5f)
-    // top-back edge
-    val bTL = o(-half + d, -half - d * 0.5f); val bTR = o(half + d, -half - d * 0.5f)
-    drawLine(color, fTL, fTR, strokeWidth = stroke.width)
-    drawLine(color, fTR, fBR, strokeWidth = stroke.width)
-    drawLine(color, fBR, fBL, strokeWidth = stroke.width)
-    drawLine(color, fBL, fTL, strokeWidth = stroke.width)
-    drawLine(color, fTL, bTL, strokeWidth = stroke.width)
-    drawLine(color, fTR, bTR, strokeWidth = stroke.width)
-    drawLine(color, bTL, bTR, strokeWidth = stroke.width)
-}
-
-/** Pull luminance from the frame, sample a grid, decode, and classify. */
 private fun tryDecode(proxy: ImageProxy): ScanResult {
     return try {
         val plane = proxy.planes[0]
@@ -442,29 +936,64 @@ private fun tryDecode(proxy: ImageProxy): ScanResult {
         val rowStride = plane.rowStride
         val w = proxy.width
         val h = proxy.height
-        val lum = IntArray(w * h)
-        val data = ByteArray(buffer.remaining())
+        val lum = ScanBuffers.lumFor(w * h)
+        val data = ScanBuffers.bytesFor(buffer.remaining())
         buffer.get(data)
         for (y in 0 until h) {
             val base = y * rowStride
-            for (x in 0 until w) lum[y * w + x] = data[base + x].toInt() and 0xFF
+            val rowOut = y * w
+            for (x in 0 until w) lum[rowOut + x] = data[base + x].toInt() and 0xFF
         }
-        // Diagnostic sample: reports which stage the pipeline reaches (binarise, finders, grid) so the
-        // on-screen debug line can show why a real camera frame is not decoding.
-        val (sampled, diag) = QrSampler.sampleDiag(lum, w, h)
-        ScanDiag.last = diag.note
-        if (sampled == null) return ScanResult.Nothing
-        val overlay = Overlay(sampled.finders, w, h, proxy.imageInfo.rotationDegrees)
-        val text = try {
-            QrMatrixDecode.decode(sampled.grid)
-        } catch (e: Exception) {
-            // grid found but did not decode (logo in the middle, glare, perspective). Report it.
-            ScanDiag.last = "grid ${sampled.grid.size} found, decode failed: ${e.message ?: "error"}"
+        com.localghost.app.qr.QrSampler.ScanGeom.corners = null
+        com.localghost.app.qr.QrSampler.ScanGeom.findersSeen = 0
+        com.localghost.app.qr.QrSampler.ScanGeom.frameW = w
+        com.localghost.app.qr.QrSampler.ScanGeom.frameH = h
+        com.localghost.app.qr.QrSampler.ScanGeom.rotation = proxy.imageInfo.rotationDegrees
+
+        // Sample several candidate grids (versions, alignment on/off) and let the decoder be the judge.
+        // The image stage cannot tell a subtly-wrong sampling from a right one; only format BCH + Reed
+        // Solomon can. We try each candidate (and the decoder itself tries all 4 rotations) and keep the
+        // first that actually decodes. This is what makes tilted real frames work: the best-looking grid
+        // and the decodable grid are not always the same, and only the decode settles it.
+        val (candidates, diag) = QrSampler.sampleCandidates(lum, w, h)
+        // f=N is the finder-cluster count this frame , the detection-vs-decode discriminator that the
+        // frame dump used to answer: f=0 means the finders were never seen (detection problem), f>=3
+        // with no decode means the maths downstream is what is failing.
+        ScanDiag.last = "${diag.note} f=${QrSampler.ScanGeom.findersSeen}"
+        if (candidates.isEmpty()) return ScanResult.Nothing
+
+        var text: String? = null
+        var overlay: Overlay? = null
+        for (cand in candidates) {
+            val t = try {
+                QrMatrixDecode.decode(cand.grid, cand.conf)
+            } catch (e: Exception) {
+                null
+            }
+            if (t != null) {
+                text = t
+                overlay = Overlay(cand.finders, w, h, proxy.imageInfo.rotationDegrees,
+                    com.localghost.app.qr.QrSampler.ScanGeom.corners)
+                break
+            }
+        }
+        val gN = com.localghost.app.qr.QrSampler.ScanGeom.gridN
+        val ver = if (gN >= 21) (gN - 17) / 4 else 0
+        val align = if (com.localghost.app.qr.QrSampler.ScanGeom.alignFound) "align+" else "align-"
+        if (text == null || overlay == null) {
+            ScanDiag.last = "v$ver $align f=${com.localghost.app.qr.QrSampler.ScanGeom.findersSeen}: sampled, none decoded"
             return ScanResult.Nothing
         }
-        ScanDiag.last = "decoded ${text.length} chars"
+        // Whether the decode was CLEAN (plain Reed-Solomon, no erasures). A clean decode of a code that
+        // parses as a valid enrol link is trustworthy on the first frame , the strict URL pattern plus a
+        // well-formed pinned fingerprint make a random miscorrection into a valid enrol link effectively
+        // impossible. Erasure-path decodes ("conf"/"logo") are more willing to manufacture a consistent-
+        // but-wrong payload, so those still require the two-frame confirmation downstream.
+        val cleanDecode = QrMatrixDecode.lastPath == "clean"
+        ScanDiag.last = "v$ver $align ${QrMatrixDecode.lastPath} ${text.length}ch"
+
         when (val r = EnrollLink.parseResult(text)) {
-            is EnrollLink.Result.Ok -> ScanResult.Enrol(r.link, overlay)
+            is EnrollLink.Result.Ok -> ScanResult.Enrol(r.link, overlay, cleanDecode)
             is EnrollLink.Result.Outdated -> ScanResult.NotForUs(
                 com.localghost.app.qr.QrGuess(
                     "a newer box",
@@ -481,12 +1010,9 @@ private fun tryDecode(proxy: ImageProxy): ScanResult {
             )
         }
     } catch (t: Throwable) {
-        // Decode failed. Catches Throwable, not just Exception, ON PURPOSE: a poisoned QR is
-        // adversarial input to a hand-rolled decoder, and the failure modes include Errors (an
-        // OutOfMemoryError from a pathological allocation, a StackOverflowError from deep recursion),
-        // not only Exceptions. A scanned code must never be able to crash the app, so any throwable
-        // here becomes "no readable QR" and the person keeps scanning or types the values. A bad scan
-        // can never enrol anyway, because the fingerprint pin must still match.
+        // A scanned code must never crash the app. Any throwable becomes "no readable QR" and the
+        // person keeps scanning or types the values. A bad scan can never enrol anyway, because the
+        // fingerprint pin must still match.
         ScanDiag.last = "frame error: ${t.message ?: t.javaClass.simpleName}"
         ScanResult.Nothing
     }

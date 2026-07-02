@@ -71,6 +71,20 @@ server {
     ssl_client_certificate /etc/ghost/ca/devices-ca.pem;  # the box CA bundle
     ssl_verify_client      optional;                      # required is enforced per-location
 
+    # APPEARS-DOWN: a genuinely-down ghost.secd (connect failure -> 502) and a deliberate 502 from
+    # ghost.secd (wrong/expired session token, or a muted notification poll) must look IDENTICAL, so
+    # an observer cannot tell "the app is down" from "wrong PIN" or "notifications muted". Intercept
+    # upstream errors and render ONE fixed generic response for all of them. Set at the server level
+    # so it covers every location below.
+    proxy_intercept_errors on;
+    error_page 502 503 504 = @down;
+
+    location @down {
+        # generic, unbranded, looks like any unavailable service. No LocalGhost hint.
+        add_header Content-Type text/plain always;
+        return 503 "service unavailable\n";
+    }
+
     # Enrolment bootstrap: no client cert yet (the device is getting one). Still TLS, still pinned by
     # the phone, still gated by the one-time pairing code inside ghost.secd.
     location = /v1/enroll {

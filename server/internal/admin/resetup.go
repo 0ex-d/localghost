@@ -10,29 +10,23 @@ import (
 // rotate-in-place; a PIN reset IS a slot wipe. So resetup is reachable ONLY from the box over a
 // local-network session (RequireLocal), never from the app, so no coerced phone can trigger it.
 //
-// Commands name the slot explicitly , resetup-main / resetup-decoy / resetup-wipe , and touch ONLY
-// that slot. No relative roles, no cross-slot indirection.
+// Commands name the slot explicitly , resetup-main / resetup-wipe , and touch ONLY that slot. No
+// relative roles, no cross-slot indirection.
 
 // Slot is the named target. The mapping to physical slot index is fixed and absolute here (this is
-// the box console, not the app), which is what keeps "resetup-decoy" from ever resolving to main.
-// The roles match profile/setup.go's 3-slot policy: slot 0 main, slot 1 a plain decoy, slot 2 a
-// duress decoy (opens believable data and wipes the main on unlock).
+// the box console, not the app). The single-account model has one data slot: slot 0, the main
+// account. (The wipe PIN is not a data slot , it triggers a global crypto-erase, handled in the
+// wipe package, not here.)
 type Slot int
 
 const (
-	SlotMain   Slot = 0 // your real data
-	SlotDecoy  Slot = 1 // plain decoy, no wipe
-	SlotDuress Slot = 2 // duress decoy: opens believable data, wipes main on unlock
+	SlotMain Slot = 0 // your real data
 )
 
 func (s Slot) String() string {
 	switch s {
 	case SlotMain:
 		return "main"
-	case SlotDecoy:
-		return "decoy"
-	case SlotDuress:
-		return "duress"
 	default:
 		return "unknown"
 	}

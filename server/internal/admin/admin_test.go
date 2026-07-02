@@ -87,10 +87,10 @@ func TestResetupDestroysOnlyAfterConfirm(t *testing.T) {
 func TestPrepareRefusesNonLocalAndTouchesNothing(t *testing.T) {
 	b := &fakeBackend{}
 	r := NewResetup(b)
-	if _, err := r.Prepare(SlotDecoy, "8.8.8.8:22", ""); err != ErrNotLocal {
+	if _, err := r.Prepare(SlotMain, "8.8.8.8:22", ""); err != ErrNotLocal {
 		t.Fatal("prepare from non-local must refuse")
 	}
-	w, err := r.Prepare(SlotDecoy, "192.168.1.5:22", "")
+	w, err := r.Prepare(SlotMain, "192.168.1.5:22", "")
 	if err != nil || w.SizeBytes == 0 {
 		t.Fatalf("prepare local must return the warning with size: %v", err)
 	}

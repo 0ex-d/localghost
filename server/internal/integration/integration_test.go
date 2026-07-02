@@ -3,7 +3,7 @@ package integration
 import "testing"
 
 func TestAddStartsPaused(t *testing.T) {
-	s := NewSet(0, false)
+	s := NewSet(0)
 	it, err := s.Add("monzo", Bank, "Monzo", []byte("tok"))
 	if err != nil {
 		t.Fatal(err)
@@ -13,55 +13,43 @@ func TestAddStartsPaused(t *testing.T) {
 	}
 }
 
-func TestEnableOnMain(t *testing.T) {
-	s := NewSet(0, false)
+func TestEnableMakesActive(t *testing.T) {
+	s := NewSet(0)
 	s.Add("monzo", Bank, "Monzo", []byte("tok"))
 	if err := s.Enable("monzo"); err != nil {
-		t.Fatalf("enable on main should work: %v", err)
+		t.Fatalf("enable should work: %v", err)
 	}
 	if len(s.Active()) != 1 {
-		t.Fatal("enabled connector should be active")
+		t.Fatal("an enabled connector should be active")
 	}
 }
 
-func TestDecoyStaysPaused(t *testing.T) {
-	s := NewSet(1, true) // decoy
-	s.Add("fakebank", Bank, "Some Bank", []byte("tok"))
-	if err := s.Enable("fakebank"); err != ErrDecoyStaysPaused {
-		t.Fatalf("decoy enable must be refused, got %v", err)
+func TestDisablePauses(t *testing.T) {
+	s := NewSet(0)
+	s.Add("monzo", Bank, "Monzo", []byte("tok"))
+	s.Enable("monzo")
+	if err := s.Disable("monzo"); err != nil {
+		t.Fatalf("disable should work: %v", err)
 	}
 	if len(s.Active()) != 0 {
-		t.Fatal("a decoy must have no active (polling) integrations")
+		t.Fatal("a disabled connector must not be active")
 	}
 }
 
-func TestDecoyNeverLoadsEnabled(t *testing.T) {
-	// Even if the stored blob claims Enabled, a decoy loads everything Paused.
-	main := NewSet(0, false)
-	main.Add("monzo", Bank, "Monzo", []byte("tok"))
-	main.Enable("monzo")
-	blob, err := main.Save()
+func TestSaveLoadRoundTrip(t *testing.T) {
+	s := NewSet(0)
+	s.Add("monzo", Bank, "Monzo", []byte("tok"))
+	s.Enable("monzo")
+	blob, err := s.Save()
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Load the SAME blob as if into a decoy slot.
-	decoy, err := Load(1, blob)
+	loaded, err := Load(0, blob)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, it := range decoy.All() {
-		if it.State != Paused {
-			t.Fatal("a decoy must force every integration to paused on load")
-		}
-	}
-}
-
-func TestMainSlotIsNotDecoy(t *testing.T) {
-	s, err := Load(0, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if s.IsDecoy() {
-		t.Fatal("slot 0 must be the main, not a decoy")
+	all := loaded.All()
+	if len(all) != 1 || all[0].ID != "monzo" || all[0].State != Enabled {
+		t.Fatalf("round-trip should preserve the integration and its state: %+v", all)
 	}
 }

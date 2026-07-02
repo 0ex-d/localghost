@@ -15,10 +15,7 @@ func TestRegistrySaveLoadRoundTrip(t *testing.T) {
 	if err := s.SetMain("1111"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AddDecoy("2222", false); err != nil { // plain decoy
-		t.Fatal(err)
-	}
-	if err := s.AddDecoy("3333", true); err != nil { // duress decoy, wipes main
+	if err := s.SetWipe("3333"); err != nil { // wipe PIN, crypto-erases everything
 		t.Fatal(err)
 	}
 	reg, err := s.Finalize()
@@ -42,8 +39,7 @@ func TestRegistrySaveLoadRoundTrip(t *testing.T) {
 		wantOpen  int
 	}{
 		{"1111", true, MainSlot},
-		{"2222", true, 1},
-		{"3333", true, 2},
+		{"3333", true, NoSlot}, // wipe PIN opens nothing
 		{"9999", false, NoSlot},
 	} {
 		r := loaded.Resolve(tc.pin)
@@ -52,19 +48,22 @@ func TestRegistrySaveLoadRoundTrip(t *testing.T) {
 				tc.pin, r.Valid, r.Open, tc.wantValid, tc.wantOpen)
 		}
 	}
-	// The duress PIN must still carry its wipe-main behaviour.
-	if r := loaded.Resolve("3333"); r.Wipe != MainSlot {
-		t.Fatalf("duress PIN lost its wipe target after round-trip: %d", r.Wipe)
+	// The wipe PIN must still carry its WipeAll behaviour after a round-trip.
+	if r := loaded.Resolve("3333"); r.Wipe != WipeAll {
+		t.Fatalf("wipe PIN lost its WipeAll action after round-trip: %d", r.Wipe)
 	}
 }
 
 func TestRegistryFileIsFixedSizeRegardlessOfRealCount(t *testing.T) {
 	salt := []byte("box-salt-1234567")
-	size := func(realPins int) int64 {
+	// size(withWipe) builds a registry with a main PIN, optionally a wipe PIN, saves it, returns
+	// the file size. The on-disk size must be identical whether or not a wipe PIN exists, so the
+	// stored form never reveals that a wipe PIN is present.
+	size := func(withWipe bool) int64 {
 		s, _ := NewSetup(salt)
 		_ = s.SetMain("0000")
-		for i := 1; i < realPins; i++ {
-			_ = s.AddDecoy(string(rune('1'+i)), false)
+		if withWipe {
+			_ = s.SetWipe("9999")
 		}
 		reg, _ := s.Finalize()
 		p := filepath.Join(t.TempDir(), "r.blob")
@@ -72,8 +71,7 @@ func TestRegistryFileIsFixedSizeRegardlessOfRealCount(t *testing.T) {
 		fi, _ := os.Stat(p)
 		return fi.Size()
 	}
-	// The on-disk size must not reveal how many real PINs exist (count-hiding deniability).
-	if size(1) != size(3) {
-		t.Fatal("registry file size leaks the real PIN count")
+	if size(false) != size(true) {
+		t.Fatal("registry file size leaks whether a wipe PIN exists")
 	}
 }

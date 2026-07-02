@@ -2,7 +2,7 @@ package wipe
 
 import "errors"
 
-// Wiper performs the targeted, forensically-robust account wipe triggered by a duress PIN. It
+// Wiper performs the forensically-robust account crypto-erase triggered by the wipe PIN. It
 // destroys ONE account's key, so the main account's data dies while every other PIN keeps opening
 // its profile and nothing looks different. A global panic wipe is also available.
 //
@@ -21,7 +21,7 @@ func NewWiper(vault *KeyVault, hw HardwareEraser, scrub func(slot int) error) *W
 }
 
 // WipeAccount crypto-erases one slot. Idempotent: re-running on an already-wiped slot is a no-op, so
-// a coerced re-entry of the duress PIN does nothing suspicious. It keeps going on individual errors
+// a re-entry of the wipe PIN does nothing suspicious. It keeps going on individual errors
 // (a wipe must be aggressive) and reports the combined result. After the hardware step the account
 // is cryptographically gone.
 func (w *Wiper) WipeAccount(slot int) error {
@@ -51,8 +51,8 @@ func (w *Wiper) WipeAccount(slot int) error {
 	return errors.Join(errs...)
 }
 
-// PanicWipe destroys every account at once (a separate, deliberate global wipe, not the duress
-// path). Use for "burn it all" rather than the targeted duress wipe.
+// PanicWipe destroys everything at once: the global crypto-erase the wipe PIN triggers. Use for
+// "burn it all".
 func (w *Wiper) PanicWipe(slots []int) error {
 	var errs []error
 	for _, s := range slots {

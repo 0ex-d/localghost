@@ -13,7 +13,7 @@ import (
 )
 
 // This is the REAL unlock backend, compiled with `-tags tpm` on the box. It wires:
-//   - profile.Accounts   PIN resolution (real / decoy / duress-wipe / reject), rate-limited
+//   - profile.Accounts   PIN resolution (main / wipe / reject), rate-limited
 //   - hw.TPMSealedKey     per-slot key seal/unseal against /dev/tpmrm0 (Intel PTT on xyntai)
 //   - hw.DMCryptMounter   LUKS map + filesystem mount of the slot's container
 //   - hw.DataStore        per-account Postgres + Redis inside the mounted volume
@@ -40,7 +40,7 @@ func newDefaultBackend(cfg Config) UnlockBackend {
 	keyFor := func(slot int, pin string) ([]byte, error) {
 		return hw.NewTPMSealedKey(tpmDevice, slot).Unseal(pin)
 	}
-	mounter := hw.NewDMCryptMounter(cfg.StateDir, keyFor)
+	mounter := hw.NewDMCryptMounter(cfg.StateDir, cfg.Disk, keyFor)
 	store := hw.NewDataStore(func(slot int) string { return mounter.MountPath(slot) })
 
 	// The account registry + rate-limit gate + wiper. The registry is loaded from the box's
@@ -63,13 +63,14 @@ func newDefaultBackend(cfg Config) UnlockBackend {
 
 func (b *tpmBackend) Resolve(pin string) (int, bool, error) {
 	// "device" id for the rate limiter is the box itself here; the real per-device id comes from the
-	// client cert at the HTTP layer. Resolve performs any duress crypto-erase internally.
+	// client cert at the HTTP layer. The wipe is a two-part sequence handled inside Unlock: the wipe
+	// PIN arms (and looks like a reject), the main PIN then confirms and crypto-erases.
 	d := b.accounts.Unlock("box", pin)
 	switch d.Outcome {
 	case profile.Open:
-		return d.OpenSlot, d.MainWiped, nil
+		return d.OpenSlot, d.Wiped, nil
 	default:
-		return profile.NoSlot, d.MainWiped, nil
+		return profile.NoSlot, d.Wiped, nil
 	}
 }
 
@@ -79,7 +80,7 @@ func (b *tpmBackend) Unseal(slot int, pin string) ([]byte, error) {
 
 func (b *tpmBackend) Mount(slot int, key []byte) error {
 	// Map the LUKS volume with the key the Unseal stage already produced (no second unseal), then
-	// grow the filesystem to fill the equal-size container so a decoy looks full to its owner.
+	// grow the filesystem to fill the container.
 	if _, err := b.mounter.MapWithKey(slot, key); err != nil {
 		return err
 	}
@@ -108,7 +109,7 @@ func (tpmEraser) EraseAccount(slot int) error {
 	return hw.NewTPMSealedKey(tpmDevice, slot).Evict()
 }
 func (tpmEraser) EraseAll() error {
-	for slot := 0; slot < profile.TotalSlots; slot++ {
+	for _, slot := range []int{profile.MainSlot} {
 		if err := hw.NewTPMSealedKey(tpmDevice, slot).Evict(); err != nil {
 			return err
 		}

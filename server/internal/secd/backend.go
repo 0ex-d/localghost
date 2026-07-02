@@ -8,19 +8,19 @@ import "github.com/LocalGhostDao/localghost/server/internal/profile"
 // wires the real TPM + dm-crypt + per-account Postgres/Redis path.
 //
 // The flow mirrors the unlock stages exactly:
-//   Resolve  decide what the PIN means (real account, decoy, duress-wipe, or reject)
+//   Resolve  decide what the PIN means (main account, wipe, or reject)
 //   Unseal   ask the TPM to release the account's master key for the resolved slot (PIN-bound; the
 //            TPM enforces its own lockout, so a wrong PIN is punished in hardware)
 //   Mount    dm-crypt map + filesystem mount of that slot's container with the unsealed key
 //   StartDB  bring up the account's Postgres inside the mounted volume
 //   StartCache bring up the account's Redis inside the mounted volume
 //
-// A duress PIN resolves to a decoy slot AND triggers the main account's crypto-erase; the backend
-// performs the erase during Resolve so the stage timing is identical to a normal unlock (an onlooker
-// cannot tell a duress unlock from a real one).
+// The wipe PIN triggers a global crypto-erase and then resolves to a reject; the backend performs
+// the erase during Resolve so the timing and response are identical to a wrong PIN (an onlooker
+// cannot tell a wipe from a failed unlock).
 type UnlockBackend interface {
 	// Resolve maps the PIN to an outcome. It returns the slot to open (or NoSlot on reject) and
-	// whether the main account was wiped (duress). It must run in constant-ish time regardless of
+	// whether the account was wiped (the wipe PIN). It must run in constant-ish time regardless of
 	// outcome so timing does not leak which PIN was entered.
 	Resolve(pin string) (openSlot int, mainWiped bool, err error)
 
@@ -75,16 +75,28 @@ func runUnlock(b UnlockBackend, pin string, emit func(profile.Progress)) (openSl
 		return nil
 	}
 
-	// UNSEAL (always runs even when warm, but cheap; the key is needed only for a cold mount)
-	emit(profile.Progress{Stage: profile.StageUnseal, State: profile.Running})
-	key, uerr := b.Unseal(slot, pin)
-	if uerr != nil {
-		emit(profile.Progress{Stage: profile.StageUnseal, State: profile.Errored})
-		return profile.NoSlot, uerr
+	// UNSEAL. Hybrid verification: on the COLD path (first unlock since boot) we must unseal to get
+	// the key for the mount, and that unseal is the TPM hardware-lockout-protected PIN check. On the
+	// WARM path (already mounted, a later app-open) the volume key is already resident, so we do NOT
+	// need the key and we do NOT hit the TPM again , Resolve above already verified the PIN against the
+	// registry hash in constant time. Re-unsealing every app-open would add TPM wear and complicate the
+	// DA lockout counter for no security gain (the key is already in the kernel). So skip it when warm.
+	var key []byte
+	if !warm {
+		emit(profile.Progress{Stage: profile.StageUnseal, State: profile.Running})
+		k, uerr := b.Unseal(slot, pin)
+		if uerr != nil {
+			emit(profile.Progress{Stage: profile.StageUnseal, State: profile.Errored})
+			return profile.NoSlot, uerr
+		}
+		emit(profile.Progress{Stage: profile.StageUnseal, State: profile.Complete})
+		key = k
+	} else {
+		emit(profile.Progress{Stage: profile.StageUnseal, State: profile.Skipped})
 	}
-	emit(profile.Progress{Stage: profile.StageUnseal, State: profile.Complete})
 
-	// MOUNT (consumes + zeroises the key)
+	// MOUNT (consumes + zeroises the key). Skipped when warm (heavy() emits Skipped and the do() never
+	// runs, so the nil key on the warm path is never used).
 	if err := heavy(profile.StageMount, func() error { return b.Mount(slot, key) }); err != nil {
 		zeroise(key)
 		return profile.NoSlot, err

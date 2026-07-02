@@ -13,17 +13,16 @@ func newReg(t *testing.T) *Registry {
 	return r
 }
 
-func TestProfileAndDuressResolve(t *testing.T) {
+func TestMainAndWipeResolve(t *testing.T) {
 	r := newReg(t)
-	must(t, r.AddProfile("1111", 0)) // main in slot 0
-	must(t, r.AddProfile("2222", 1)) // decoy in slot 1
-	must(t, r.AddDuress("8888", 1, 0)) // open decoy 1, wipe main 0
+	must(t, r.AddProfile("1111", 0)) // main account in slot 0
+	must(t, r.SetWipePin("8888"))    // wipe PIN: opens nothing, erases everything
 
 	if got := r.Resolve("1111"); !got.Valid || got.Open != 0 || got.Wipe != NoSlot {
-		t.Fatalf("main: %+v", got)
+		t.Fatalf("main should open slot 0 and not wipe: %+v", got)
 	}
-	if got := r.Resolve("8888"); !got.Valid || got.Open != 1 || got.Wipe != 0 {
-		t.Fatalf("duress should open decoy 1 and wipe main 0: %+v", got)
+	if got := r.Resolve("8888"); !got.Valid || got.Open != NoSlot || got.Wipe != WipeAll {
+		t.Fatalf("wipe PIN should open nothing and signal WipeAll: %+v", got)
 	}
 	if got := r.Resolve("0000"); got.Valid {
 		t.Fatalf("unknown PIN must be invalid: %+v", got)
@@ -45,8 +44,8 @@ func TestCountIsHidden(t *testing.T) {
 func TestPinReuseRejected(t *testing.T) {
 	r := newReg(t)
 	must(t, r.AddProfile("1111", 0))
-	if err := r.AddProfile("1111", 1); err != ErrPinReused {
-		t.Fatalf("PIN reuse must be rejected, got %v", err)
+	if err := r.SetWipePin("1111"); err != ErrPinReused {
+		t.Fatalf("reusing the main PIN as the wipe PIN must be rejected, got %v", err)
 	}
 }
 

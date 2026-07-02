@@ -24,6 +24,48 @@ internal object ReedSolomon {
         return correctErrata(block, synd, positions)
     }
 
+    /**
+     * Erasure-aware decode. When we already KNOW where the damage is , for a QR with a centre logo, the
+     * modules under the logo , we pass those codeword positions as erasures. Reed-Solomon corrects up to
+     * `nsym` erasures, versus only `nsym/2` unknown errors, because an erasure's location is free and
+     * only its value must be solved. So a logo that is hopeless as "errors" (too many) becomes
+     * recoverable as "erasures". Capacity rule enforced: 2*errors + erasures <= nsym. Returns null if it
+     * cannot correct (the safe outcome on the trust-anchor path).
+     */
+    fun decode(block: IntArray, nsym: Int, erasures: IntArray): IntArray? {
+        if (erasures.isEmpty()) return decode(block, nsym)
+        if (erasures.size > nsym) return null
+        val msg = block.copyOf()
+        for (e in erasures) if (e in msg.indices) msg[e] = 0
+        val synd = calcSyndromes(msg, nsym)
+        if (synd.max() == 0) return msg
+        val fsynd = forneySyndromes(synd, erasures, msg.size)
+        val errLoc = findErrorLocator(fsynd, nsym, erasures.size)
+        val errPos = findErrors(errLoc.reversedArray(), msg.size) ?: return null
+        if (2 * errPos.size + erasures.size > nsym) return null   // beyond capacity
+        val all = (erasures.toList() + errPos.toList()).toIntArray()
+        val corrected = correctErrata(msg, synd, all) ?: return null
+        if (calcSyndromes(corrected, nsym).max() != 0) return null
+        return corrected
+    }
+
+    // Forney syndromes: fold the known erasure locations out of the syndromes so plain Berlekamp-Massey
+    // can then find the remaining unknown errors. synd has a leading 0 (length nsym+1); drop it.
+    private fun forneySyndromes(synd: IntArray, erasures: IntArray, nmess: Int): IntArray {
+        val fsynd = IntArray(synd.size - 1) { synd[it + 1] }
+        for (p in erasures) {
+            val x = gf.pow(2, nmess - 1 - p)
+            for (j in 0 until fsynd.size - 1) fsynd[j] = gf.mul(fsynd[j], x) xor fsynd[j + 1]
+        }
+        return fsynd
+    }
+
+    /** Number of non-zero syndromes: a rough lower bound on how corrupt a block is, for diagnostics. */
+    fun syndromeErrorCount(block: IntArray, nsym: Int): Int {
+        val synd = calcSyndromes(block, nsym)
+        return synd.count { it != 0 }
+    }
+
     // synd has length nsym+1 with a leading 0, matching the reference.
     private fun calcSyndromes(msg: IntArray, nsym: Int): IntArray {
         val out = IntArray(nsym + 1)
@@ -53,11 +95,11 @@ internal object ReedSolomon {
         return r
     }
 
-    private fun findErrorLocator(synd: IntArray, nsym: Int): IntArray {
+    private fun findErrorLocator(synd: IntArray, nsym: Int, eraseCount: Int = 0): IntArray {
         var errLoc = intArrayOf(1)
         var oldLoc = intArrayOf(1)
         val syndShift = if (synd.size > nsym) synd.size - nsym else 0
-        for (i in 0 until nsym) {
+        for (i in 0 until (nsym - eraseCount)) {
             val k = i + syndShift
             var delta = synd[k]
             for (j in 1 until errLoc.size) {

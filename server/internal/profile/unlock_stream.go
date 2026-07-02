@@ -4,7 +4,7 @@ package profile
 // account's Postgres and Redis start against the decrypted store. ghost.secd streams its progress
 // through these stages so the app can show a real loading state.
 //
-// The stream is IDENTICAL for every account. A duress unlock emits the exact same stages in the same
+// The stream is IDENTICAL for every unlock. A wipe-PIN entry emits the exact same stages in the same
 // order with the same labels as a real one, so the progress itself reveals nothing about which
 // account is opening. The only legitimate variation is warmth: an already-mounted (hot) account
 // reports the mount/DB stages as Skipped because they are genuinely already done, and a cold account

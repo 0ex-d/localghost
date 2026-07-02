@@ -1,28 +1,37 @@
 package profile
 
 import (
+	"sync"
+	"time"
+
 	"github.com/LocalGhostDao/localghost/server/internal/auth"
 	"github.com/LocalGhostDao/localghost/server/internal/wipe"
 )
 
-// Outcome is what an unlock attempt resulted in. Open looks identical to the user whether it is the
-// main account or a decoy, so a coercer cannot tell which they got.
+// wipeArmWindow is how long a wipe stays armed after the wipe PIN is entered, waiting for the main
+// PIN to confirm it. Long enough to deliberately type the second PIN, short enough that an
+// accidental arming lapses on its own. The wipe is a TWO-PART action , wipe PIN then main PIN , so a
+// single stray entry of either PIN destroys nothing.
+const wipeArmWindow = 2 * time.Minute
+
+// Outcome is what an unlock attempt resulted in. A wipe looks identical to a wrong PIN, so an
+// onlooker cannot tell the difference between a failed unlock and a deliberate erase.
 type Outcome int
 
 const (
-	Reject    Outcome = iota // invalid PIN, rate-limited; show "wrong PIN"
-	Open                     // open OpenSlot's account (main or decoy)
+	Reject    Outcome = iota // invalid PIN (or wipe PIN), rate-limited; show "wrong PIN"
+	Open                     // open the account (slot 0)
 	Throttled                // refused by the rate limiter (locked out / too soon)
 )
 
-// Decision is returned by Unlock. For Open, mount OpenSlot's container. MainWiped is true when this
-// unlock was a duress decoy that crypto-erased the main account (for internal audit only; it must
-// not change what the user sees).
+// Decision is returned by Unlock. For Open, mount OpenSlot's container. Wiped is true when this
+// unlock CONFIRMED and executed the wipe (for internal audit only; it must not change what the user
+// sees , a wipe is presented exactly like a wrong PIN).
 type Decision struct {
-	Outcome   Outcome
-	OpenSlot  int
-	MainWiped bool
-	Err       error // for Throttled: ErrLockedOut / ErrTooSoon
+	Outcome  Outcome
+	OpenSlot int
+	Wiped    bool
+	Err      error // for Throttled: ErrLockedOut / ErrTooSoon
 }
 
 // Accounts ties the registry, rate limiter, and wiper together. Unlock is the single entry point the
@@ -31,16 +40,38 @@ type Accounts struct {
 	reg   *Registry
 	gate  *auth.Gate
 	wiper *wipe.Wiper
+
+	// armed tracks a pending wipe per device: deviceID -> expiry. Entering the wipe PIN arms; the
+	// main PIN within the window confirms and erases. Per device so the confirming PIN must come from
+	// the same device that armed, and a stray entry elsewhere cannot complete the sequence.
+	mu    sync.Mutex
+	armed map[string]time.Time
+	now   func() time.Time // injectable for tests
 }
 
 func NewAccounts(reg *Registry, gate *auth.Gate, wiper *wipe.Wiper) *Accounts {
-	return &Accounts{reg: reg, gate: gate, wiper: wiper}
+	return &Accounts{
+		reg:   reg,
+		gate:  gate,
+		wiper: wiper,
+		armed: make(map[string]time.Time),
+		now:   time.Now,
+	}
 }
 
-// Unlock evaluates one PIN attempt from device id. Order: rate-limit gate, resolve, act. A valid PIN
-// resets the limiter; an invalid one is recorded so brute force escalates and locks out. A duress
-// decoy fires the main-account wipe here, before anything is returned, then opens its decoy exactly
-// like a normal account so the result is indistinguishable.
+// Unlock evaluates one PIN attempt from device id. Order: rate-limit gate, resolve, act.
+//
+// The wipe is deliberately a TWO-PART sequence so it cannot fire by accident or be triggered by
+// someone who only knows one PIN:
+//   - the WIPE PIN alone does NOT erase. It arms a pending wipe (for this device, for wipeArmWindow)
+//     and returns exactly a wrong-PIN reject , a single stray entry destroys nothing and shows nothing.
+//   - the MAIN PIN, when a wipe is armed and still live on this device, CONFIRMS the wipe: it
+//     crypto-erases everything and returns the same wrong-PIN reject, rather than opening.
+//   - the MAIN PIN with nothing armed opens slot 0 as normal.
+//   - any WRONG PIN cancels a pending wipe (fail safe) and is rejected.
+//
+// Every path returns Reject or Open , the armed state is never observable, so this adds no oracle to
+// the appears-down model.
 func (a *Accounts) Unlock(id, pin string) Decision {
 	if err := a.gate.CheckAllowed(id); err != nil {
 		return Decision{Outcome: Throttled, Err: err}
@@ -49,31 +80,54 @@ func (a *Accounts) Unlock(id, pin string) Decision {
 	res := a.reg.Resolve(pin)
 	if !res.Valid {
 		a.gate.RecordFailure(id)
+		a.disarm(id) // a wrong PIN cancels any pending wipe
 		return Decision{Outcome: Reject}
 	}
 	a.gate.RecordSuccess(id)
 
-	wiped := false
-	switch {
-	case res.Wipe == WipeAll:
-		// Global wipe PIN (if one is configured): destroy every account, then look like a wrong PIN
-		// so an onlooker sees nothing. The 3-slot default policy does not set one, but the registry
-		// supports it, so handle it here rather than letting WipeAll fall through to a normal open.
-		_ = a.wiper.PanicWipe(allSlots())
-		return Decision{Outcome: Reject, MainWiped: true}
-	case res.Wipe >= 0:
-		// Duress decoy: crypto-erase the main account, then open the decoy normally.
-		_ = a.wiper.WipeAccount(res.Wipe)
-		wiped = true
+	if res.Wipe == WipeAll {
+		// Wipe PIN: ARM, do not erase. Looks exactly like a wrong PIN.
+		a.arm(id)
+		return Decision{Outcome: Reject}
 	}
-	return Decision{Outcome: Open, OpenSlot: res.Open, MainWiped: wiped}
+
+	// Main PIN. If a wipe is armed and still live on this device, the main PIN confirms it.
+	if a.consumeArmed(id) {
+		_ = a.wiper.PanicWipe(allSlots())
+		return Decision{Outcome: Reject, Wiped: true}
+	}
+	return Decision{Outcome: Open, OpenSlot: res.Open}
 }
 
-// allSlots is the set of data slots a global wipe erases.
-func allSlots() []int {
-	out := make([]int, TotalSlots)
-	for i := range out {
-		out[i] = i
+// arm sets (or refreshes) a pending wipe for a device.
+func (a *Accounts) arm(id string) {
+	a.mu.Lock()
+	a.armed[id] = a.now().Add(wipeArmWindow)
+	a.mu.Unlock()
+}
+
+// disarm clears any pending wipe for a device.
+func (a *Accounts) disarm(id string) {
+	a.mu.Lock()
+	delete(a.armed, id)
+	a.mu.Unlock()
+}
+
+// consumeArmed reports whether a live armed wipe exists for the device and, if so, clears it (the
+// confirmation is single-use). An expired arm is treated as absent and cleaned up.
+func (a *Accounts) consumeArmed(id string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	exp, ok := a.armed[id]
+	if !ok {
+		return false
 	}
-	return out
+	delete(a.armed, id)
+	return a.now().Before(exp)
+}
+
+// allSlots is the set of data slots a wipe erases. The model is single-account, so this is just the
+// one real slot; it stays a slice so the wiper interface (which takes a set) is unchanged.
+func allSlots() []int {
+	return []int{MainSlot}
 }

@@ -127,7 +127,7 @@ func (g *Gate) Throttle(id string) error {
 	}
 	// Count every attempt the same way. There is no success that resets it here; instead the
 	// caller resets via Allow() after a genuine, infrequent checkpoint if desired. Uniformity is
-	// the point: real and decoy attempts are indistinguishable.
+	// the point: a wipe-PIN attempt and a wrong-PIN attempt are indistinguishable.
 	st.Failed++
 	st.LastAttempt = now
 	if st.Failed >= g.policy.MaxAttempts {

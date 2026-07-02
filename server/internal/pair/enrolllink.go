@@ -9,10 +9,15 @@ import (
 // EnrollLink is the box-side counterpart to the app's EnrollLink. The string it produces is what
 // the QR carries and what EnrollLink.parse on the phone consumes, so the format is a contract:
 //
-//	localghost://enroll?host=...&port=...&code=...&fp=...&name=...
+//	localghost://enroll?v=1&host=...&port=...&code=...&fp=...&name=...
 //
 // host, code and fp are mandatory. Without the fingerprint the phone refuses the link, since the
 // fingerprint is the trust anchor (no server vouches for the box).
+//
+// v is the format version. It MUST match the app's EnrollLink.CURRENT_VERSION. The app treats an
+// absent v as 1 (older boxes shipped without it), so emitting it is backward-compatible, and it lets
+// a newer box tell an older app to update rather than mis-parsing. Bump CurrentVersion here in lockstep
+// with the app whenever the link format changes.
 type EnrollLink struct {
 	Host        string
 	Port        int
@@ -21,8 +26,13 @@ type EnrollLink struct {
 	BoxName     string
 }
 
+// CurrentVersion is the enrol-link format version this box emits. Keep equal to the app's
+// EnrollLink.CURRENT_VERSION.
+const CurrentVersion = 1
+
 func (e EnrollLink) String() string {
 	q := url.Values{}
+	q.Set("v", fmt.Sprintf("%d", CurrentVersion))
 	q.Set("host", e.Host)
 	q.Set("port", fmt.Sprintf("%d", e.Port))
 	q.Set("code", e.Code)

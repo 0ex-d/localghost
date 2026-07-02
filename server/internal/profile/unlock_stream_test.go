@@ -26,10 +26,10 @@ func TestHotSkipsHeavyStages(t *testing.T) {
 	}
 }
 
-func TestColdRealAndColdDuressEmitIdenticalStream(t *testing.T) {
-	// The stream is presentation only; it does not know or encode whether the account is real or a
-	// decoy. Two cold unlocks must therefore be byte-identical, which is what makes the loading
-	// state safe to narrate under duress.
+func TestColdUnlocksEmitIdenticalStream(t *testing.T) {
+	// The stream is presentation only; it does not encode what the PIN did. Two cold unlocks must
+	// therefore be byte-identical, which is what keeps a wipe-PIN entry indistinguishable from a
+	// normal failed unlock at the presentation layer.
 	a := collect(func(Stage) bool { return false })
 	b := collect(func(Stage) bool { return false })
 	if len(a) != len(b) {

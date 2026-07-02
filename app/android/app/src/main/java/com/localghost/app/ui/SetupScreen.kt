@@ -19,13 +19,11 @@ import androidx.compose.ui.unit.dp
 import com.localghost.app.ui.theme.*
 
 /**
- * First-run enrollment. Collects the box address, a one-time pairing code, and a device name,
- * then enrolls against the box. On success the caller persists the returned token via BoxConfig
- * and moves to the lock gate. The box address can be typed or filled from a scanned QR.
- *
- * onScanQr is invoked when the user taps SCAN; the host wires it to the scanner and calls back
- * with the decoded box URL (and optionally a code). Until the scanner is built, the typed path is
- * fully functional.
+ * First-run enrollment. The box's QR carries everything the phone needs , address, fingerprint, and
+ * the one-time pairing code , so the normal path is: scan, name the device, enrol. The pairing code
+ * is never a field here; it is not typed, not shown, and consumed straight from the scan (the code is
+ * a secret, and the only secret you ever type is your PIN, later, on the lock screen). Address and
+ * fingerprint stay editable for the rare typed/DDNS case, and the fingerprint is the pinned identity.
  */
 @Composable
 fun SetupScreen(
@@ -33,13 +31,15 @@ fun SetupScreen(
     error: String?,
     prefilledUrl: String = "",
     prefilledCode: String = "",
+    prefilledName: String = "",
     onScanQr: () -> Unit,
     onEnroll: (url: String, code: String, deviceName: String, fingerprint: String) -> Unit,
     prefilledFingerprint: String = "",
 ) {
     var url by remember(prefilledUrl) { mutableStateOf(prefilledUrl) }
-    var code by remember(prefilledCode) { mutableStateOf(prefilledCode) }
-    var name by remember { mutableStateOf("") }
+    // The pairing code rides in from the scan and is never surfaced as a field.
+    val code = prefilledCode
+    var name by remember(prefilledName) { mutableStateOf(prefilledName) }
     var fingerprint by remember(prefilledFingerprint) { mutableStateOf(prefilledFingerprint) }
 
     val canSubmit = url.isNotBlank() && code.isNotBlank() && name.isNotBlank() &&
@@ -53,37 +53,26 @@ fun SetupScreen(
             Spacer(Modifier.height(8.dp))
             SectionLabel("CONNECT TO YOUR BOX")
             Spacer(Modifier.height(8.dp))
-            Text("This phone is a limb of your box. Enrol it once, the box mounts a persona for the " +
-                 "pairing code you enter, and nothing of your life is stored here.",
+            Text("Scan the box's QR to enrol this device. Nothing of your life is stored here.",
                  color = GhostTextDim, style = MaterialTheme.typography.bodyMedium)
 
-            Spacer(Modifier.height(24.dp))
-
-            Field("BOX ADDRESS", url, { url = it }, "https://your-box.local:8443",
-                keyboard = KeyboardType.Uri)
-            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(20.dp))
             GhostButton("SCAN QR FROM THE BOX", onScanQr, modifier = Modifier.fillMaxWidth())
 
             Spacer(Modifier.height(20.dp))
-            Field("PAIRING CODE", code, { code = it }, "one-time code shown on the box",
-                keyboard = KeyboardType.Password)
+            Field("BOX ADDRESS", url, { url = it }, "https://your-box.local:8443",
+                keyboard = KeyboardType.Uri)
 
             Spacer(Modifier.height(20.dp))
             Field("DEVICE NAME", name, { name = it }, "e.g. Vlad's S26")
 
             Spacer(Modifier.height(20.dp))
             Field("BOX FINGERPRINT", fingerprint, { fingerprint = it },
-                "SHA-256 shown on the box (or scan the QR)", keyboard = KeyboardType.Ascii)
-            if (fingerprint.isNotBlank()) {
-                Spacer(Modifier.height(6.dp))
-                Text("This is the box identity your phone will pin. It must match exactly, or the " +
-                     "connection is refused.", color = TerminalDim,
-                    style = MaterialTheme.typography.labelMedium)
-            }
+                "SHA-256 (from the QR)", keyboard = KeyboardType.Ascii)
 
             if (error != null) {
                 Spacer(Modifier.height(16.dp))
-                Text(error, color = Warning, style = MaterialTheme.typography.bodyMedium)
+                ErrorBanner(error)
             }
 
             Spacer(Modifier.height(28.dp))
@@ -99,6 +88,23 @@ fun SetupScreen(
                 style = MaterialTheme.typography.labelMedium,
                 textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
         }
+    }
+}
+
+/** A compact, legible error surface: a bordered card so a failure stands out from the form without a
+ *  wall of red text. The message itself should be short , the caller keeps enrol errors terse. */
+@Composable
+private fun ErrorBanner(message: String) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .background(Warning.copy(alpha = 0.10f), RoundedCornerShape(12.dp))
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("!", color = Warning, style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.width(10.dp))
+        Text(message, color = Warning, style = MaterialTheme.typography.bodyMedium)
     }
 }
 

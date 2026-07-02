@@ -24,6 +24,7 @@ func main() {
 	stateDir := flag.String("state", "/var/lib/ghost", "unencrypted state dir (certs, models, enrollment)")
 	caDir := flag.String("ca", "/etc/ghost/ca", "box CA + cert directory")
 	host := flag.String("host", "", "box host/IP the server cert is valid for (for issuing device certs)")
+	disk := flag.String("disk", os.Getenv("GHOST_DISK"), "the raw LUKS data disk to mount on unlock (e.g. /dev/nvme1n1); defaults to $GHOST_DISK")
 	flag.Parse()
 
 	// The one-time pairing code comes from the environment (GHOST_PAIRING_CODE), not a flag, so that
@@ -31,7 +32,7 @@ func main() {
 	// without any dangling argument. Empty means "not armed".
 	pairingCode := os.Getenv("GHOST_PAIRING_CODE")
 
-	srv, err := secd.New(secd.Config{StateDir: *stateDir})
+	srv, err := secd.New(secd.Config{StateDir: *stateDir, Disk: *disk})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ghost.secd: init failed:", err)
 		os.Exit(1)

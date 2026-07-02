@@ -28,9 +28,9 @@ func TestMountedRoutesToLoopback(t *testing.T) {
 	}
 }
 
-func TestDecoyAccountAlsoRoutes(t *testing.T) {
-	// A mounted decoy (slot 2) routes to the same daemons, serving the decoy's own data.
-	if _, err := router().Resolve(2, "voiced"); err != nil {
-		t.Fatalf("a mounted decoy must route too: %v", err)
+func TestMountedAccountRoutes(t *testing.T) {
+	// The mounted account (slot 0) routes to its daemons.
+	if _, err := router().Resolve(0, "voiced"); err != nil {
+		t.Fatalf("the mounted account must route: %v", err)
 	}
 }

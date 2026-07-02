@@ -1,6 +1,8 @@
 package hw
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -77,8 +79,10 @@ func (d *DataStore) Stop(slot int) error {
 
 func (d *DataStore) startPostgres(slot int) error {
 	data := d.pgData(slot)
+	firstRun := false
 	// initdb on first run (the data dir lives in the encrypted volume).
 	if _, err := os.Stat(filepath.Join(data, "PG_VERSION")); os.IsNotExist(err) {
+		firstRun = true
 		if err := os.MkdirAll(data, 0o700); err != nil {
 			return err
 		}
@@ -91,6 +95,87 @@ func (d *DataStore) startPostgres(slot int) error {
 	cmd := exec.Command("pg_ctl", "-D", data, "-o", opts, "-w", "-t", "30", "start")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("pg_ctl start slot %d: %v: %s", slot, err, strings.TrimSpace(string(out)))
+	}
+	// On first run only: set a random DB password (stored inside the volume) and lay down the app
+	// config schema (settings, notification prefs, the mute flag). This runs AFTER start because it
+	// needs a live server to apply SQL. It is idempotent-guarded by firstRun so re-mounts skip it.
+	if firstRun {
+		if err := d.initPostgresAuthAndSchema(slot); err != nil {
+			_ = d.stopPostgres(slot)
+			return fmt.Errorf("init db auth/schema slot %d: %w", slot, err)
+		}
+	}
+	return nil
+}
+
+// initPostgresAuthAndSchema generates a random DB password (like the AMK: random, never PIN-derived,
+// stored only inside the encrypted volume), sets it on the ghost role, and creates the app config
+// schema. Called once at first start, while the volume is mounted.
+func (d *DataStore) initPostgresAuthAndSchema(slot int) error {
+	data := d.pgData(slot)
+	port := fmt.Sprint(pgPort(slot))
+
+	// random password, 32 bytes hex (printable, safe to embed in SQL + env). Stored in the volume.
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return fmt.Errorf("password entropy: %w", err)
+	}
+	password := hex.EncodeToString(raw)
+
+	// create a 'ghost' role with the password and a 'ghost' database it owns. psql over the loopback
+	// socket in the volume. We use the trust-auth socket to apply this, THEN the password gates TCP.
+	stmts := []string{
+		fmt.Sprintf("CREATE ROLE ghost LOGIN PASSWORD '%s';", password),
+		"CREATE DATABASE ghost OWNER ghost;",
+	}
+	for _, s := range stmts {
+		if out, err := exec.Command("psql", "-h", data, "-p", port, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", s).CombinedOutput(); err != nil {
+			return fmt.Errorf("psql %q: %v: %s", s, err, strings.TrimSpace(string(out)))
+		}
+	}
+
+	// app config schema, in the ghost database. Tables: settings (k/v), and the notification mute.
+	schema := `
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+-- notification mute, per scope. scope '*' is the global mute (overrides everything); scope
+-- 'ghost.synthd' etc. is a per-service mute. muted_until: a timestamp the mute is active until;
+-- a far-future value means "forever". A row's absence (or muted_until in the past) = not muted.
+CREATE TABLE IF NOT EXISTS notification_mute (
+  scope       TEXT PRIMARY KEY,
+  muted_until TIMESTAMPTZ NOT NULL
+);
+-- notifications: always produced by the daemons (mute only affects push, not storage). Durable
+-- history with a seen flag; deletable forever. The Redis last-100 list is the hot push cache.
+CREATE TABLE IF NOT EXISTS notifications (
+  id       BIGSERIAL PRIMARY KEY,
+  service  TEXT NOT NULL,
+  kind     TEXT NOT NULL DEFAULT 'message',
+  title    TEXT NOT NULL DEFAULT '',
+  body     TEXT NOT NULL DEFAULT '',
+  seen     BOOLEAN NOT NULL DEFAULT FALSE,
+  -- An "ask" is a notification the user can answer (ghost.cued nominations, confirmations). options
+  -- is a JSON array of choices; empty means this is a passive notification (telling, not asking).
+  -- answer is the chosen option once picked; answered is when. A pending ask has answer='' answered NULL.
+  options  TEXT NOT NULL DEFAULT '',
+  answer   TEXT NOT NULL DEFAULT '',
+  answered TIMESTAMPTZ,
+  created  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS notifications_id_desc ON notifications (id DESC);
+`
+	if out, err := exec.Command("psql", "-h", data, "-p", port, "-d", "ghost", "-v", "ON_ERROR_STOP=1", "-c", schema).CombinedOutput(); err != nil {
+		return fmt.Errorf("apply schema: %v: %s", err, strings.TrimSpace(string(out)))
+	}
+
+	// store the password inside the volume so ghost.secd can read it after unlock to connect over TCP.
+	// 0600, inside the encrypted mount: protected at rest with everything else.
+	credPath := filepath.Join(d.mountPathFor(slot), "db-credentials.env")
+	cred := fmt.Sprintf("GHOST_DB_USER=ghost\nGHOST_DB_PASSWORD=%s\nGHOST_DB_NAME=ghost\nGHOST_DB_PORT=%d\n", password, pgPort(slot))
+	if err := os.WriteFile(credPath, []byte(cred), 0o600); err != nil {
+		return fmt.Errorf("write db credentials: %w", err)
 	}
 	return nil
 }

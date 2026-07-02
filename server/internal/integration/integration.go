@@ -5,15 +5,12 @@ import "errors"
 // An integration is a per-account connector: a bank link, a calendar, an email account. Its config
 // and secrets (OAuth tokens, refresh tokens, API keys) are part of THAT account's encrypted store,
 // so they decrypt only when the account is mounted and are sealed under the account's own key. They
-// are never global. A decoy account literally cannot reach the main account's bank tokens, because
-// they are wrapped under the main's AMK + PIN, which the decoy does not have. That isolation is the
-// financial-data boundary, enforced by where the bytes live, not by a policy to remember.
+// are never global. The isolation is the financial-data boundary, enforced by where the bytes live,
+// not by a policy to remember.
 //
-// State matters for deniability. An ENABLED integration usually means a live token that refreshes
-// and a daemon polling on a schedule, which is observable behaviour a stale account would not show.
-// So decoys hold integrations as PAUSED: present and configured, but not polling, which reads as a
-// set-up-but-unused account. New integrations on a decoy default to Paused; on the main you enable
-// them explicitly.
+// State controls live behaviour. An ENABLED integration means a live token that refreshes and a
+// daemon polling on a schedule. New integrations default to PAUSED (present and configured, but not
+// polling); you Enable them explicitly, so nothing starts live background work by accident.
 type State int
 
 const (
@@ -50,11 +47,10 @@ type Integration struct {
 }
 
 // Polls reports whether this integration should be doing live background work. Only Enabled
-// integrations poll; a Paused one (the decoy default) sits silent.
+// integrations poll; a Paused one sits silent.
 func (i Integration) Polls() bool { return i.State == Enabled }
 
 var (
 	ErrNotFound          = errors.New("integration not found")
 	ErrExists            = errors.New("integration already exists")
-	ErrDecoyStaysPaused  = errors.New("decoy integrations stay paused; a live connector on a decoy is a behavioural tell")
 )

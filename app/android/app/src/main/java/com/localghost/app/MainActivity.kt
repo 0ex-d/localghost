@@ -22,6 +22,8 @@ import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -35,6 +37,7 @@ import com.localghost.app.chat.Attachment
 import com.localghost.app.chat.Message
 import com.localghost.app.debug.CrashHandler
 import com.localghost.app.net.BoxClient
+import com.localghost.app.net.EnrollLink
 import com.localghost.app.net.DaemonStatus
 import com.localghost.app.net.LifeContext
 import com.localghost.app.net.MemoryEntry
@@ -95,6 +98,11 @@ class MainActivity : ComponentActivity() {
     private var busy by mutableStateOf(false)
     private var unlockProgress by mutableStateOf<UnlockSnapshot?>(null)
     private var error by mutableStateOf<String?>(null)
+    // After a QR scan we keep the decoded link here so the Setup screen can prefill its fields (and keep
+    // them if the box rejects us), and track the background enrol's outcome: null = still in flight, true
+    // = enrolled, false = failed. These drive the post-animation routing without cutting the success short.
+    private var scannedLink by mutableStateOf<EnrollLink?>(null)
+    private var scanEnrolOk by mutableStateOf<Boolean?>(null)
     private var sync by mutableStateOf(SyncUiState())
 
     private val messages = mutableStateListOf<Message>()
@@ -189,22 +197,40 @@ class MainActivity : ComponentActivity() {
         )
         setContent {
             LocalGhostTheme {
+                // Computed once: the phone's own name, used to prefill the device-name field at enrolment.
+                val phoneDefault = remember { phoneName() }
+                // If the box is slow, the background enrol from a scan can still be running when the 2s
+                // success animation ends and we land on Setup. Promote to the gate the moment it succeeds;
+                // a failure just leaves the person on Setup with the fields still filled and the error shown.
+                LaunchedEffect(scanEnrolOk, screen) {
+                    if (screen is Screen.Setup && scanEnrolOk == true) {
+                        scannedLink = null; scanEnrolOk = null; screen = Screen.Gate
+                    }
+                }
                 when (val s = screen) {
                     is Screen.Crash -> CrashScreen(s.report) { CrashHandler.clear(this); screen = Screen.Gate }
                     Screen.Setup -> SetupScreen(
                         busy = busy,
                         error = error,
-                        onScanQr = { screen = Screen.Scan },
+                        prefilledUrl = scannedLink?.baseUrl() ?: "",
+                        prefilledCode = scannedLink?.code ?: "",
+                        prefilledName = phoneDefault,
+                        prefilledFingerprint = scannedLink?.certFingerprint ?: "",
+                        onScanQr = { scannedLink = null; error = null; scanEnrolOk = null; screen = Screen.Scan },
                         onEnroll = { url, code, name, fp -> enroll(url, code, name, fp) },
                     )
                     Screen.Scan -> QrScanScreen(
-                        onLink = { link ->
-                            // A scanned enrol link gives us the box address, one-time code and the
-                            // pinned fingerprint. Enrol straight away, exactly like the typed path.
-                            screen = Screen.Setup
-                            enroll(link.baseUrl(), link.code, link.boxName.ifBlank { "phone" }, link.certFingerprint)
+                        // Fires the instant a valid enrol code is confirmed: start the network enrol NOW so it
+                        // overlaps the success animation, and stash the link so Setup can prefill from it.
+                        onScanned = { link -> scannedLink = link; enrollFromScan(link) },
+                        // Fires only after the full 2s success animation. If the box already answered OK we
+                        // skip straight to the gate; otherwise we show Setup (prefilled), where the outcome
+                        // watcher above promotes on success or the error surfaces on failure.
+                        onProceed = {
+                            if (scanEnrolOk == true) { scannedLink = null; scanEnrolOk = null; screen = Screen.Gate }
+                            else screen = Screen.Setup
                         },
-                        onCancel = { screen = Screen.Setup },
+                        onCancel = { scannedLink = null; error = null; scanEnrolOk = null; screen = Screen.Setup },
                     )
                     Screen.Gate -> LockScreen(error, unlocking = false, progress = null) { passBiometric() }
                     Screen.Pin -> PinScreen(busy, error, unlockProgress) { submit(it) }
@@ -289,6 +315,10 @@ class MainActivity : ComponentActivity() {
 
     // --- chat ---
     private fun sendChat(text: String) {
+        // Invariant: one generator at a time. The UI gates sending while streaming, but this is the
+        // last line of defence for any path that reaches here anyway , overwriting chatJob without
+        // cancelling would leave the old generator appending to the transcript alongside the new one.
+        chatJob?.cancel()
         val atts = pendingAttachments
         messages.add(Message(Message.Role.USER, text, attachments = atts))
         pendingAttachments = emptyList()
@@ -668,31 +698,58 @@ class MainActivity : ComponentActivity() {
                 })
     }
 
+    // A friendly default for THIS phone's device name at enrolment: the name the user gave the phone
+    // (Settings > About > Device name , the same one Bluetooth and the hotspot use) if it is set, else
+    // the hardware make/model. This is a read-only global setting: no permission, and nothing account-
+    // or identity-related is touched, so it stays consistent with the local-first, no-surveillance premise.
+    private fun phoneName(): String {
+        val set = android.provider.Settings.Global.getString(contentResolver, android.provider.Settings.Global.DEVICE_NAME)
+        if (!set.isNullOrBlank()) return set.trim()
+        val make = android.os.Build.MANUFACTURER?.trim().orEmpty().replaceFirstChar { it.uppercase() }
+        val model = android.os.Build.MODEL?.trim().orEmpty()
+        val combo = if (make.isBlank() || model.startsWith(make, ignoreCase = true)) model else "$make $model"
+        return combo.ifBlank { "phone" }
+    }
+
+    // Shared enrol core. Runs the network enrol and, on success, stores the device cert/key (needed for
+    // mTLS on every later call , nginx checks it at the handshake) and writes the box config. Returns null
+    // on success, or a human error string on failure. Navigation is left to the caller.
+    private suspend fun doEnroll(url: String, code: String, name: String, fingerprint: String): String? {
+        val result = BoxClient.enroll(url, code, name, fingerprint)
+        if (!result.ok) return result.error ?: "enrolment failed"
+        val certPem = result.deviceCertPem
+        val keyPem = result.deviceKeyPem
+        if (certPem.isNullOrBlank() || keyPem.isNullOrBlank())
+            return "the box did not return a device certificate; enrolment incomplete"
+        DeviceCert.store(this, certPem, keyPem)
+        BoxConfig.write(this, BoxConfig.Config(
+            baseUrl = url, deviceToken = result.deviceToken,
+            deviceName = name, certFingerprint = fingerprint))
+        return null
+    }
+
+    // Typed path: enrol and, on success, go straight to the gate to authenticate.
     private fun enroll(url: String, code: String, name: String, fingerprint: String) {
         busy = true; error = null
         lifecycleScope.launch {
-            val result = BoxClient.enroll(url, code, name, fingerprint)
+            val err = doEnroll(url, code, name, fingerprint)
             busy = false
-            if (result.ok) {
-                // The box issued this device its client cert + key during enrolment. Store them so
-                // every later call presents the device cert for mTLS (nginx checks it at the
-                // handshake). Without this the phone could reach the box but be rejected at the TLS
-                // layer on every authenticated route.
-                val certPem = result.deviceCertPem
-                val keyPem = result.deviceKeyPem
-                if (certPem.isNullOrBlank() || keyPem.isNullOrBlank()) {
-                    error = "the box did not return a device certificate; enrolment incomplete"
-                    return@launch
-                }
-                DeviceCert.store(this@MainActivity, certPem, keyPem)
-                BoxConfig.write(this@MainActivity, BoxConfig.Config(
-                    baseUrl = url, deviceToken = result.deviceToken,
-                    deviceName = name, certFingerprint = fingerprint))
-                error = null
-                screen = Screen.Gate          // enrolled; now authenticate to enter
-            } else {
-                error = result.error ?: "enrolment failed"
-            }
+            error = err
+            if (err == null) { scannedLink = null; scanEnrolOk = null; screen = Screen.Gate }
+        }
+    }
+
+    // Scan path: enrol in the background while the 2s success animation plays. Deliberately does NOT
+    // navigate , it records the outcome in scanEnrolOk so the celebration is never cut short. onProceed
+    // (after the animation) and the Setup watcher route on it: success -> gate, failure -> stay on Setup
+    // with the fields prefilled and the error shown.
+    private fun enrollFromScan(link: EnrollLink) {
+        busy = true; error = null; scanEnrolOk = null
+        lifecycleScope.launch {
+            val err = doEnroll(link.baseUrl(), link.code, phoneName(), link.certFingerprint)
+            busy = false
+            error = err
+            scanEnrolOk = (err == null)
         }
     }
 
