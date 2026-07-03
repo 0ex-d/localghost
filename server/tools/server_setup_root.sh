@@ -180,7 +180,11 @@ RUN "install -d -o '$SVC_USER' -g '$SVC_USER' -m 0700 '$STATE_DIR'"
 PGBIN_DIR="$(dirname "$(command -v pg_ctl 2>/dev/null || echo /usr/local/bin/pg_ctl)")"
 # Only write if absent, so re-running root setup doesn't clobber a host/addr you've customised.
 if [ -f /etc/ghost/ghost.env ]; then
-    echo "  /etc/ghost/ghost.env exists, leaving it (edit by hand to change host/addr)"
+    echo "  /etc/ghost/ghost.env exists, leaving contents (edit by hand to change host/addr)"
+    # Ownership is enforced even on the exists path: the NEXT steps say "as ghost, edit
+    # ghost.env", so a root-owned file here is the script contradicting its own instructions.
+    RUN "chown $SVC_USER:$SVC_USER /etc/ghost/ghost.env"
+    RUN "chmod 0640 /etc/ghost/ghost.env"
 elif [ "$DRY" = 1 ]; then
     echo "  [would] write /etc/ghost/ghost.env with GHOST_ADDR=127.0.0.1:8443, GHOST_STATE_DIR=$STATE_DIR,"
     echo "          GHOST_CA_DIR=/etc/ghost/ca, GHOST_SERVICE_USER=$SVC_USER, PATH including $PGBIN_DIR"
@@ -197,8 +201,12 @@ GHOST_SERVICE_USER=$SVC_USER
 # postgres server binaries (initdb/pg_ctl) must be on the daemon's PATH:
 PATH=$PGBIN_DIR:/usr/local/bin:/usr/bin:/bin
 EOF
-    chmod 0644 /etc/ghost/ghost.env
-    echo "  wrote /etc/ghost/ghost.env  (set GHOST_HOST to the box IP/hostname before provisioning)"
+    # ghost-owned: the daemons read it and the setup instructions have ghost edit it. 0640,
+    # not 0644 , nothing in it is secret today, but a config the service user owns should not
+    # invite every local user to read the box layout either.
+    chown "$SVC_USER:$SVC_USER" /etc/ghost/ghost.env
+    chmod 0640 /etc/ghost/ghost.env
+    echo "  wrote /etc/ghost/ghost.env owned by $SVC_USER (set GHOST_HOST before provisioning)"
 fi
 
 echo
