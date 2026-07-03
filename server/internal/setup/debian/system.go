@@ -1,6 +1,7 @@
 package debian
 
 import (
+	"crypto/sha256"
 	"bytes"
 	"crypto/rand"
 	"fmt"
@@ -33,6 +34,7 @@ type System struct {
 	StateDir  string // /var/lib/ghost
 	TPMDevice string // e.g. /dev/tpmrm0, where the AMK is sealed
 	MainPIN   string // chosen at setup; seals the AMK and opens the container
+	InsecureSim bool // sim build only: allow PIN-derived-key provisioning (no TPM, not secure)
 	WipePIN   string // chosen at setup; crypto-erases everything (optional, "" to skip)
 
 	// Confirm asks the operator a yes/no question during setup. It is used by the TPM sole-tenant
@@ -303,4 +305,12 @@ func (s *System) HardenConsole() error {
 	// Best-effort; the operator's console policy is theirs, we just remove an obvious autologin.
 	_ = os.Remove("/etc/systemd/system/getty@tty1.service.d/autologin.conf")
 	return nil
+}
+
+// pinAuthBytes is the PIN reduced to a fixed 32 bytes, identical to the tpm build's pinAuth (which
+// lives under //go:build tpm and is not linkable here). Both builds MUST agree on this so a container
+// keyed in one is openable by the matching unlock path. SHA-256 over the same domain-separated input.
+func pinAuthBytes(pin string) []byte {
+	h := sha256.Sum256([]byte("localghost/pin/" + pin))
+	return h[:]
 }
