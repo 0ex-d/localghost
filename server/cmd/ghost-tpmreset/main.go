@@ -1,5 +1,3 @@
-//go:build tpm
-
 // ghost-tpmreset resets the TPM lockout hierarchy auth back to empty using the known pinAuth(PIN),
 // so a stalled provisioning run can proceed. Needed when SetupLockout was run more than once with
 // differing PINs and drove the lockout hierarchy into DA lockout, and the platform tpm2_clear build

@@ -34,7 +34,7 @@ type System struct {
 	StateDir  string // /var/lib/ghost
 	TPMDevice string // e.g. /dev/tpmrm0, where the AMK is sealed
 	MainPIN   string // chosen at setup; seals the AMK and opens the container
-	InsecureSim bool // sim build only: allow PIN-derived-key provisioning (no TPM, not secure)
+	SealMode  string // "tpm" (default) or "software"; which seal tier to provision
 	WipePIN   string // chosen at setup; crypto-erases everything (optional, "" to skip)
 
 	// Confirm asks the operator a yes/no question during setup. It is used by the TPM sole-tenant
@@ -121,7 +121,7 @@ func (s *System) CreatePartitions() error {
 
 // FormatContainers generates the AMK, seals it in the TPM under the main PIN, and LUKS-formats the
 // raw disk with it. This is the destructive, one-time provisioning of the encrypted store. The
-// TPM-sealing step lives in a build-tagged helper (sealAndFormat): the real seal under -tags tpm, a
+// seal step lives in sealAndFormat (seal.go), which selects the TPM or software tier at runtime
 // refusal in the simulation build (you cannot really provision encrypted storage without a TPM).
 func (s *System) FormatContainers() error {
 	if !have("cryptsetup") {
@@ -307,7 +307,7 @@ func (s *System) HardenConsole() error {
 	return nil
 }
 
-// pinAuthBytes is the PIN reduced to a fixed 32 bytes, identical to the tpm build's pinAuth (which
+// pinAuthBytes is the PIN reduced to a fixed 32 bytes, identical to hw's pinAuth (which
 // lives under //go:build tpm and is not linkable here). Both builds MUST agree on this so a container
 // keyed in one is openable by the matching unlock path. SHA-256 over the same domain-separated input.
 func pinAuthBytes(pin string) []byte {

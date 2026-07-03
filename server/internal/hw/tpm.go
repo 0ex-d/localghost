@@ -1,5 +1,3 @@
-//go:build tpm
-
 package hw
 
 import (
@@ -28,7 +26,7 @@ import (
 // window (mlock, zeroise, no swap), we do not close it.
 //
 // This is NOT validated in CI here (no TPM in the build env). It is built against the go-tpm API and
-// must be exercised on the box: go test -tags tpm ./hw against /dev/tpmrm0.
+// must be exercised on the box: go test ./internal/hw against /dev/tpmrm0.
 
 type TPMSealedKey struct {
 	device  string // /dev/tpmrm0
@@ -204,3 +202,29 @@ func randomKey() ([]byte, error) {
 	_, err := rand.Read(b)
 	return b, err
 }
+
+// --- Sealer interface conformance ---
+// TPMSealedKey predates the Sealer interface (its methods are Reseal/Unseal/Evict). These thin
+// adapters make it satisfy Sealer so the runtime tier selection (SelectSealer) can return it
+// alongside SoftwareSealer without the caller knowing which tier it holds.
+
+// Seal wraps the AMK in the TPM under the PIN (interface name for Reseal).
+func (t *TPMSealedKey) Seal(pin string, amk []byte) error { return t.Reseal(pin, amk) }
+
+// ReKey re-seals the SAME key under a new PIN. Unseal with old, reseal with new; the AMK is
+// unchanged so the LUKS container is untouched , matches the software tier's ReKey semantics.
+func (t *TPMSealedKey) ReKey(oldPin, newPin string) error {
+	amk, err := t.Unseal(oldPin)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		for i := range amk {
+			amk[i] = 0
+		}
+	}()
+	return t.Reseal(newPin, amk)
+}
+
+// Destroy evicts the sealed object (interface name for Evict).
+func (t *TPMSealedKey) Destroy() error { return t.Evict() }

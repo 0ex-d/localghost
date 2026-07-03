@@ -55,7 +55,7 @@ func New(cfg Config) (*Server, error) {
 	// Wire the notification mute store. The mute lives in the in-volume Postgres/Redis, per scope
 	// (global "*" + per-service). The mount path for a slot is <stateDir>/mnt/slot<N> (matching
 	// DMCryptMounter) and the pg socket is its "postgres" subdir. The handlers read it on the
-	// notification poll and the settings control. Built in both sim and tpm builds (hw is not
+	// notification poll and the settings control. (hw is not
 	// tpm-tagged except tpm.go); harmless in sim (no DBs -> the poller is "down" via the
 	// locked/mounted check before the mute is consulted).
 	s.mute = hw.NewMuteStore(func(slot int) string {
@@ -66,8 +66,8 @@ func New(cfg Config) (*Server, error) {
 		mnt := filepath.Join(cfg.StateDir, "mnt", fmt.Sprintf("slot%d", slot))
 		return hw.SocketForMount(mnt)
 	})
-	// newDefaultBackend is build-tag-selected: the simulation in the default build, the real TPM +
-	// dm-crypt + Postgres/Redis backend with -tags tpm. This is the seam where unlock meets hardware.
+	// newDefaultBackend builds the one runtime-tier-selected backend (TPM or software per seal.env);
+	// dm-crypt + Postgres/Redis backend, tier selected at runtime. Seam where unlock meets hardware.
 	s.unlock = newUnlockService(newDefaultBackend(cfg))
 	return s, nil
 }

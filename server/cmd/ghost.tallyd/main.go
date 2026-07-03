@@ -1,4 +1,4 @@
-// ghost.framed , STUB. Binds its loopback health port and reports OK so ghost.secd's supervisor can
+// ghost.tallyd , STUB. Binds its loopback health port and reports OK so ghost.secd's supervisor can
 // manage it (poll, restart, stop-before-unmount) before the real logic exists. The daemon's actual
 // job is described in this directory's README; this binary is the honest placeholder , it does
 // nothing but stay alive and answer health, so the supervisor and the app's Ghost Status screen work
@@ -20,7 +20,7 @@ import (
 	"github.com/LocalGhostDao/localghost/server/internal/ghosthealth"
 )
 
-const service = "ghost.framed"
+const service = "ghost.tallyd"
 
 func main() {
 	port := flag.Int("health-port", envPort("GHOST_HEALTH_PORT"), "loopback health/status port (required)")

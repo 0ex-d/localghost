@@ -1,5 +1,3 @@
-//go:build tpm
-
 package hw
 
 // Dictionary-attack lockout is the REAL anti-brute-force wall on the first-unlock-per-boot unseal
@@ -20,7 +18,7 @@ package hw
 //
 // NOT validated in CI here (no TPM in the build env). Built against the go-tpm command API; the
 // exact capability-response field names must be confirmed against the pinned go-tpm on the box:
-// go test -tags tpm ./internal/hw against /dev/tpmrm0.
+// go test ./internal/hw against /dev/tpmrm0.
 
 import (
 	"fmt"

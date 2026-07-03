@@ -147,7 +147,7 @@ func pickDisk() (string, error) {
 func main() {
 	disk := flag.String("disk", "", "disk to provision, e.g. /dev/nvme0n1 (DESTRUCTIVE, whole disk)")
 	svcUser := flag.String("user", "ghost", "unprivileged user the daemons run as (must exist; server_setup_root.sh --user <name> prepares it)")
-	insecureSim := flag.Bool("insecure-sim", false, "SIM BUILD ONLY: provision a PIN-derived-key LUKS container, no TPM, no hardware lockout (development, NOT secure)")
+	sealMode := flag.String("seal", "tpm", "seal tier: 'tpm' (hardware-sealed key, default) or 'software' (PIN-derived key, no hardware lockout , for machines without a TPM)")
 	host := flag.String("host", "", "box LAN IP/hostname the phone connects to")
 	domain := flag.String("domain", "", "optional public domain (omit for the zero-server QR default)")
 	caDir := flag.String("ca", "/etc/ghost/ca", "box CA + cert directory")
@@ -225,7 +225,7 @@ func main() {
 	}
 
 	sys := debian.NewSystem(diskVal, *caDir, hostVal, *execDir, *stateDir, *tpmDevice, mainPIN, wipePIN)
-	sys.InsecureSim = *insecureSim
+	sys.SealMode = *sealMode
 
 	// Wire the sole-tenant confirmation to a tty y/N. Without this the check fails closed on a
 	// shared TPM (which is what happened the first time: the box already held owner-hierarchy

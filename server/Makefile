@@ -13,22 +13,22 @@ GO      ?= go
 BINDIR  := bin
 TAGS    ?=
 
-# all builds every binary under cmd/ into bin/, each named for its dir. The TPM-tagged build (box)
-# is separate because the daemons need -tags tpm to link the real hardware backend.
+# all builds every binary under cmd/ into bin/, each named for its dir. There is ONE build now: the
+# seal tier (TPM or software) is selected at RUNTIME from seal.env, not a build tag, so a box can
+# change hardware without recompiling. go-tpm is always linked (pure Go, no device access at init).
 .PHONY: all
 all:
 	$(GO) build -o $(BINDIR)/ ./cmd/...
 
-# box: the real hardware build , links the TPM/dm-crypt/datastore backend (needs go-tpm in the
-# module). -tags tpm applies to everything; the tools ignore it harmlessly.
+# box is kept as an alias of all so existing muscle-memory / docs still work; there is no separate
+# hardware build any more.
 .PHONY: box
-box:
-	$(GO) build -tags tpm -o $(BINDIR)/ ./cmd/...
+box: all
 
-# Individual targets, handy during development. `go build -o bin/` drops the binary named for the dir.
+# Individual targets, handy during development.
 .PHONY: secd
 secd:
-	$(GO) build -tags '$(TAGS)' -o $(BINDIR)/ ./cmd/ghost.secd
+	$(GO) build -o $(BINDIR)/ ./cmd/ghost.secd
 
 .PHONY: setup
 setup:
