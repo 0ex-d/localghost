@@ -18,7 +18,35 @@ note() { printf '  %-26s %s\n' "$1" "$2"; }
 ok()   { note "$1" "OK    $2"; }
 bad()  { note "$1" "FAIL  $2"; problems=1; }
 warn() { note "$1" "WARN  $2"; }
-have() { command -v "$1" >/dev/null 2>&1; }
+# A non-root PATH on Debian lacks /usr/sbin and /sbin, where cryptsetup and nginx live. The
+# daemons get sbin via ghost.env; this check must look there too, or it reports FAIL for
+# binaries that are present and that the root script just verified.
+have() { command -v "$1" >/dev/null 2>&1 || [ -x "/usr/sbin/$1" ] || [ -x "/sbin/$1" ]; }
+
+# --host <value> sets GHOST_HOST in /etc/ghost/ghost.env before the checks run, so "one command"
+# is true. Requires the env file to be owned by this user (root setup does that); if it is not
+# writable, say so plainly instead of failing halfway through a sed.
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --host)
+            HOST_VAL="${2:?--host needs a value}"; shift 2
+            ENV=/etc/ghost/ghost.env
+            if [ ! -f "$ENV" ]; then echo "no $ENV yet , run server_setup_root.sh first"; exit 1; fi
+            if [ ! -w "$ENV" ]; then echo "$ENV not writable by $(whoami) , re-run root setup (it chowns to the service user)"; exit 1; fi
+            # sed -i needs write access to the DIRECTORY (it creates its temp file there), which
+            # /etc/ghost does not grant. We own the FILE, so rewrite via a home temp and truncate
+            # in place , same inode, same ownership, no directory writes.
+            tmp="$(mktemp)"
+            if sed "s|^GHOST_HOST=.*|GHOST_HOST=$HOST_VAL|" "$ENV" > "$tmp" && cat "$tmp" > "$ENV"; then
+                echo "set GHOST_HOST=$HOST_VAL in $ENV"
+            else
+                echo "FAILED to update $ENV"; rm -f "$tmp"; exit 1
+            fi
+            rm -f "$tmp"
+            ;;
+        *) echo "unknown arg: $1"; exit 2;;
+    esac
+done
 
 # resolve_ips <host-or-ip> : print the IPs it resolves to (one per line), via nsswitch (files+DNS).
 # Works for a DNS name, a .local name, or an IP literal (which resolves to itself).
@@ -79,7 +107,7 @@ if [ -f /etc/ghost/ghost.env ]; then
             if tls_reachable "$host" "$pubport"; then
                 ok "GHOST_HOST" "($host:$pubport reachable , resolves ($rip_flat), port forwards, a listener is up)"
             else
-                bad "GHOST_HOST" "($host:$pubport NOT reachable , resolves ($rip_flat) but nothing is listening/forwarding there)"
+                warn "GHOST_HOST" "($host:$pubport not reachable yet , resolves ($rip_flat); expected BEFORE provisioning. After ghost-setup --apply and the router forward, re-run and this should pass)"
             fi
         fi
     fi

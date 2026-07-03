@@ -20,10 +20,12 @@ set -uo pipefail
 
 # --- args ---
 SVC_USER="ghost"
+GHOST_HOST_VAL=""
 DRY=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --user) SVC_USER="${2:?--user needs a value}"; shift 2;;
+        --host) GHOST_HOST_VAL="${2:?--host needs a value}"; shift 2;;
         --dry-run|-n) DRY=1; shift;;
         *) echo "unknown arg: $1"; exit 2;;
     esac
@@ -193,13 +195,14 @@ else
     cat > /etc/ghost/ghost.env <<EOF
 # LocalGhost box runtime config. Box-specific, NOT committed to the repo. Read by the systemd units.
 # Per-account Postgres/Redis ports are derived in code (6000+slot / 6100+slot); not configured here.
-GHOST_HOST=
+GHOST_HOST=$GHOST_HOST_VAL
 GHOST_ADDR=127.0.0.1:8443
 GHOST_STATE_DIR=$STATE_DIR
 GHOST_CA_DIR=/etc/ghost/ca
 GHOST_SERVICE_USER=$SVC_USER
 # postgres server binaries (initdb/pg_ctl) must be on the daemon's PATH:
-PATH=$PGBIN_DIR:/usr/local/bin:/usr/bin:/bin
+# /usr/sbin and /sbin are REQUIRED: cryptsetup (the unlock path) and nginx live there on Debian.
+PATH=$PGBIN_DIR:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 EOF
     # ghost-owned: the daemons read it and the setup instructions have ghost edit it. 0640,
     # not 0644 , nothing in it is secret today, but a config the service user owns should not
