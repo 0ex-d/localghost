@@ -27,8 +27,9 @@ type System interface {
 	CAExists() (bool, error)
 	CreateCA() error           // box CA
 	IssueServerCert() error    // box's own https server cert, signed by the box CA
-	IssueDeviceCert() error    // the phone's client cert, delivered via the QR
 	ServerCertFingerprint() (string, error) // pinned by the phone
+	// Device certs are NOT part of the provisioning plan: the identity is minted keyless-on-disk
+	// when the enrolment QR is rendered (pair.Run via PKI.IssueDeviceCertDER) and delivered in it.
 
 	// nginx edge.
 	NginxInstalled() (bool, error)
@@ -101,16 +102,11 @@ func DefaultPlan(sys System, withDomain bool, dnsCheck func() error, nginxConf s
 			Describe: func() (string, error) { return "issue the box https server cert from the box CA", nil },
 			Do:       sys.IssueServerCert,
 		},
-		{
-			Name:     "device cert capability",
-			Check:    func() (bool, error) { return sys.CAExists() },
-			Describe: func() (string, error) {
-				return "confirm the box CA can issue device certs; the actual phone cert is issued " +
-					"on demand during enrolment, the QR carries only the trust anchor (fingerprint) " +
-					"and the one-time code", nil
-			},
-			Do: sys.IssueDeviceCert, // issues a baseline device cert; enrolment issues per-device certs
-		},
+		// NOTE deliberately absent: no device cert is issued at provision time. Earlier revisions
+		// minted a "baseline" device identity here, key on disk , which contradicts the QR-delivery
+		// model, where the device key exists only in the QR and on the phone (see
+		// PKI.IssueDeviceCertDER). The identity is minted when the enrolment QR is rendered, and the
+		// server-cert step above already proves the CA can sign.
 		{
 			Name:     "nginx installed",
 			Check:    sys.NginxInstalled,

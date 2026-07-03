@@ -218,11 +218,10 @@ class MainActivity : ComponentActivity() {
                         busy = busy,
                         error = error,
                         prefilledUrl = scannedLink?.baseUrl() ?: "",
-                        prefilledCode = scannedLink?.code ?: "",
                         prefilledName = phoneDefault,
                         prefilledFingerprint = scannedLink?.certFingerprint ?: "",
                         onScanQr = { scannedLink = null; error = null; scanEnrolOk = null; screen = Screen.Scan },
-                        onEnroll = { url, code, name, fp -> enroll(url, code, name, fp) },
+                        onEnroll = { url, name, fp -> enroll(url, name, fp) },
                         onLocalOnly = ::enterLocalOnly,
                     )
                     Screen.Scan -> QrScanScreen(
@@ -616,6 +615,9 @@ class MainActivity : ComponentActivity() {
             tearDownCache()
         }
     }
+
+    // Reset every piece of in-memory account state so the next unlock starts from a clean slate.
+    private fun tearDownCache() {
         messages.clear()
         pendingAttachments = emptyList()
         lifeContext = null
@@ -753,11 +755,11 @@ class MainActivity : ComponentActivity() {
     // have been edited on the setup screen (e.g. a DDNS host); the cert, key, and fingerprint come from
     // the scanned link. Returns null on success, or a human error string. Navigation is the caller's.
     private suspend fun doEnrollFromLink(link: EnrollLink, url: String, name: String): String? {
-        val certPem = link.deviceCertPem
-        val keyPem = link.deviceKeyPem
-        if (certPem.isNullOrBlank() || keyPem.isNullOrBlank())
+        val certDer = link.deviceCertDer
+        val keyDer = link.deviceKeyDer
+        if (certDer == null || certDer.isEmpty() || keyDer == null || keyDer.isEmpty())
             return "this QR carries no device certificate , regenerate the enrolment QR on the box"
-        DeviceCert.store(this, certPem, keyPem)
+        DeviceCert.store(this, certDer, keyDer)
         BoxConfig.write(this, BoxConfig.Config(
             baseUrl = url, deviceToken = "", // no session yet; a token is issued on first PIN unlock
             deviceName = name, certFingerprint = link.certFingerprint))
@@ -766,7 +768,7 @@ class MainActivity : ComponentActivity() {
 
     // Typed/confirm path: the cert/key are only ever in the scanned QR, so this enrols from the last
     // scanned link (with any edited url/name), or asks the user to scan if there is none.
-    private fun enroll(url: String, code: String, name: String, fingerprint: String) {
+    private fun enroll(url: String, name: String, fingerprint: String) {
         val link = scannedLink
         if (link == null) {
             error = "scan the box QR to enrol , the certificate is delivered in the QR, not entered"

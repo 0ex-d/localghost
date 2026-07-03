@@ -6,7 +6,7 @@ import (
 )
 
 // AttemptState is the per-identity brute-force state. "Identity" is whatever you rate-limit on,
-// typically (persona, device) or the pairing code during enrollment.
+// typically (persona, device).
 type AttemptState struct {
 	Failed      int       // consecutive failures since the last success
 	LastAttempt time.Time // when the last attempt was evaluated

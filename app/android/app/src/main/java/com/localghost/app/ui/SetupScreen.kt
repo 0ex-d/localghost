@@ -20,30 +20,27 @@ import com.localghost.app.ui.theme.*
 
 /**
  * First-run enrollment. The box's QR carries everything the phone needs , address, fingerprint, and
- * the one-time pairing code , so the normal path is: scan, name the device, enrol. The pairing code
- * is never a field here; it is not typed, not shown, and consumed straight from the scan (the code is
- * a secret, and the only secret you ever type is your PIN, later, on the lock screen). Address and
- * fingerprint stay editable for the rare typed/DDNS case, and the fingerprint is the pinned identity.
+ * the device identity itself (cert + key) , so the normal path is: scan, name the device, enrol.
+ * There is no pairing code anywhere any more: scanning IS enrolment, and the only secret you ever
+ * type is your PIN, later, on the lock screen. Address and fingerprint stay editable for the rare
+ * typed/DDNS case, and the fingerprint is the pinned identity.
  */
 @Composable
 fun SetupScreen(
     busy: Boolean,
     error: String?,
     prefilledUrl: String = "",
-    prefilledCode: String = "",
     prefilledName: String = "",
     onScanQr: () -> Unit,
-    onEnroll: (url: String, code: String, deviceName: String, fingerprint: String) -> Unit,
+    onEnroll: (url: String, deviceName: String, fingerprint: String) -> Unit,
     prefilledFingerprint: String = "",
     onLocalOnly: () -> Unit = {},
 ) {
     var url by remember(prefilledUrl) { mutableStateOf(prefilledUrl) }
-    // The pairing code rides in from the scan and is never surfaced as a field.
-    val code = prefilledCode
     var name by remember(prefilledName) { mutableStateOf(prefilledName) }
     var fingerprint by remember(prefilledFingerprint) { mutableStateOf(prefilledFingerprint) }
 
-    val canSubmit = url.isNotBlank() && code.isNotBlank() && name.isNotBlank() &&
+    val canSubmit = url.isNotBlank() && name.isNotBlank() &&
         fingerprint.isNotBlank() && !busy
 
     GhostScaffold { pad ->
@@ -79,7 +76,7 @@ fun SetupScreen(
             Spacer(Modifier.height(28.dp))
             GhostButton(
                 if (busy) "ENROLLING..." else "ENROL THIS DEVICE",
-                { if (canSubmit) onEnroll(url.trim(), code.trim(), name.trim(), fingerprint.trim()) },
+                { if (canSubmit) onEnroll(url.trim(), name.trim(), fingerprint.trim()) },
                 modifier = Modifier.fillMaxWidth(),
                 enabled = canSubmit,
             )

@@ -38,6 +38,22 @@ object DeviceCert {
         BoxConfig.writeSecret(ctx, "$ALIAS.key", keyPkcs8Pem)
     }
 
+    /**
+     * Store the identity from raw DER (the enrol link carries DER, not PEM , base64url over PEM was
+     * ~1.78x the bytes and blew the QR budget). At-rest format stays PEM: wrap here so load(),
+     * parseCert/parseKey, and the key manager are untouched, and a stored blob is inspectable text
+     * either way.
+     */
+    fun store(ctx: Context, certDer: ByteArray, keyPkcs8Der: ByteArray) =
+        store(ctx, toPem(certDer, "CERTIFICATE"), toPem(keyPkcs8Der, "PRIVATE KEY"))
+
+    /** The exact inverse of pemBody: base64 (RFC 4648 standard alphabet, 64-char lines) in armour. */
+    private fun toPem(der: ByteArray, label: String): String {
+        val b64 = Base64.encodeToString(der, Base64.NO_WRAP)
+        val body = b64.chunked(64).joinToString("\n")
+        return "-----BEGIN $label-----\n$body\n-----END $label-----\n"
+    }
+
     fun isEnrolled(ctx: Context): Boolean =
         BoxConfig.readSecret(ctx, "$ALIAS.cert") != null && BoxConfig.readSecret(ctx, "$ALIAS.key") != null
 

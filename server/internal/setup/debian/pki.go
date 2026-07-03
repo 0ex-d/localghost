@@ -56,9 +56,13 @@ func (p PKI) CreateCA() error {
 	if err != nil {
 		return err
 	}
+	// The CA's subject becomes the ISSUER field of the server cert presented to every TLS client ,
+	// including every internet scanner. Appears-down at the HTTP layer is worthless if the
+	// certificate announces the product in the handshake, so the name is deliberately generic:
+	// "ca" looks like any of a million homelab and appliance CAs and identifies nothing.
 	tmpl := &x509.Certificate{
 		SerialNumber:          serial(),
-		Subject:               pkix.Name{CommonName: "LocalGhost Box CA"},
+		Subject:               pkix.Name{CommonName: "ca"},
 		NotBefore:             time.Now().Add(-time.Hour),
 		NotAfter:              time.Now().AddDate(20, 0, 0), // long-lived; the box owns it
 		IsCA:                  true,
@@ -112,39 +116,45 @@ func (p PKI) IssueServerCert() error {
 	return writeKeyPEM(p.serverKeyPath(), key)
 }
 
-// IssueDeviceCert signs a client cert for a device and returns the cert + key PEM, which the box
-// delivers to the phone via the QR (the box-generates model). It is also written to disk for record.
-func (p PKI) IssueDeviceCert(name string) (certPEM, keyPEM string, err error) {
+// IssueDeviceCertDER signs a client cert and returns the cert + PKCS8 key as raw DER, for delivery
+// inside the enrolment QR. The private key is NEVER written to disk: in the QR-delivery model the
+// phone holds the only durable copy, and "the box wipes its copy" has to be true on the filesystem,
+// not just in prose. The CERT is recorded (public material) at device-issued.pem, overwritten on
+// each issuance , the record shows the LATEST identity, which is the rotation model: render a new
+// QR, get a fresh identity, the phone overwrites its stored one on enrol. Stated plainly: there is
+// no CRL, so an OLD issued cert stays TLS-valid until the CA itself is rotated; the second gate
+// (PIN, rate-limited) is what an old credential still runs into. No name parameter: the server does
+// not care which phone this is , naming is app-side metadata , and a fixed tiny CN keeps DER bytes
+// out of the QR budget.
+func (p PKI) IssueDeviceCertDER() (certDER, keyDER []byte, err error) {
 	ca, caKey, err := p.loadCA()
 	if err != nil {
-		return "", "", err
+		return nil, nil, err
 	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return "", "", err
+		return nil, nil, err
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: serial(),
-		Subject:      pkix.Name{CommonName: "device:" + name},
+		Subject:      pkix.Name{CommonName: "device"},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().AddDate(10, 0, 0),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca, &key.PublicKey, caKey)
+	certDER, err = x509.CreateCertificate(rand.Reader, tmpl, ca, &key.PublicKey, caKey)
 	if err != nil {
-		return "", "", err
+		return nil, nil, err
 	}
-	certPEM = string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
-	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	keyDER, err = x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
-		return "", "", err
+		return nil, nil, err
 	}
-	keyPEM = string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))
-	// record on disk
-	_ = writeCertPEM(filepath.Join(p.caDir, "device-"+name+".pem"), der)
-	_ = os.WriteFile(filepath.Join(p.caDir, "device-"+name+"-key.pem"), []byte(keyPEM), 0o600)
-	return certPEM, keyPEM, nil
+	// Record the CERT only. No key file: grep this directory after setup and you will find no
+	// device key for QR-issued identities , that absence is the design, not an omission.
+	_ = writeCertPEM(filepath.Join(p.caDir, "device-issued.pem"), certDER)
+	return certDER, keyDER, nil
 }
 
 // ServerFingerprint returns the SHA-256 of the server cert DER as uppercase colon-hex, the value the

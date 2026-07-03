@@ -15,17 +15,20 @@ import (
 )
 
 // Server is the ghost.secd HTTP surface the phone talks to. It wires the library packages into the
-// handlers the app's BoxClient calls: enroll, unlock (streamed), info, and the model catalogue.
+// handlers the app's BoxClient calls: unlock (streamed), info, and the model catalogue. There is NO
+// enrolment endpoint: enrolment is the QR scan itself (the QR carries the box-issued device cert +
+// key), so no certless call ever needs to exist.
 //
-// Auth model recap, enforced by the layers around this: nginx terminates TLS and rejects any client
-// without a box-issued device cert at the handshake (the access key), so every request that reaches
-// here is already from an enrolled device. The PIN (account selection) is then proven at /unlock.
+// Auth model recap, enforced by the layers around this: nginx keeps client-cert verification
+// OPTIONAL at the TLS layer (a handshake reject would itself be a tell) and collapses every request
+// without a VERIFIED box-issued device cert to the same plain 503 as a down box , see
+// setup/domain.go. So every request that reaches here is already from an enrolled device. The PIN
+// (account selection) is then proven at /unlock.
 type Server struct {
 	cfg      Config
 	models   *models.Registry
 	mu       sync.Mutex
 	mounted  int // currently mounted slot, -1 if locked
-	enroll   *enrollService
 	unlock   *unlockService
 	session  *sessionManager // the one live session token (foreground + poller share it)
 	mute     *hw.MuteStore   // notification mute read/write (in-volume Postgres/Redis), per scope
@@ -33,7 +36,7 @@ type Server struct {
 }
 
 type Config struct {
-	StateDir string // unencrypted: /var/lib/ghost (certs, models, enrollment records)
+	StateDir string // unencrypted: /var/lib/ghost (certs, models)
 	Disk     string // the raw LUKS-formatted data disk, e.g. /dev/nvme1n1 (used by the TPM backend)
 }
 
@@ -49,7 +52,6 @@ func New(cfg Config) (*Server, error) {
 		models:  models.NewRegistry(filepath.Join(cfg.StateDir, "models")),
 		mounted: -1,
 	}
-	s.enroll = newEnrollService(cfg.StateDir)
 	s.session = newSessionManager(12 * time.Hour)
 	// Wire the notification mute store. The mute lives in the in-volume Postgres/Redis, per scope
 	// (global "*" + per-service). The mount path for a slot is <stateDir>/mnt/slot<N> (matching
@@ -71,23 +73,18 @@ func New(cfg Config) (*Server, error) {
 	return s, nil
 }
 
-// Handler returns the routed mux. Routes match what the app's BoxClient calls.
+// Handler returns the routed mux, built from the route table in openapi.go , the single source of
+// truth for both routing and the OpenAPI document, so the two structurally cannot drift.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/health", s.handleHealth)
-	mux.HandleFunc("/v1/enroll", s.handleEnroll)
-	mux.HandleFunc("/v1/unlock", s.handleUnlockStart)
-	mux.HandleFunc("/v1/unlock/poll", s.handleUnlockPoll)
-	mux.HandleFunc("/v1/lock", s.handleLock)
-	mux.HandleFunc("/v1/info", s.handleInfo)
-	mux.HandleFunc("/v1/notifications", s.handleNotifications)
-	mux.HandleFunc("/v1/notifications/mute", s.handleMute)
-	mux.HandleFunc("/v1/notifications/list", s.handleNotificationList)
-	mux.HandleFunc("/v1/notifications/seen", s.handleNotificationSeen)
-	mux.HandleFunc("/v1/notifications/delete", s.handleNotificationDelete)
-	mux.HandleFunc("/v1/notifications/answer", s.handleNotificationAnswer)
-	mux.HandleFunc("/v1/models", s.handleModels)
-	mux.HandleFunc("/v1/models/", s.handleModelBytes) // /v1/models/{id}
+	seen := map[string]bool{}
+	for _, rt := range s.routes() {
+		if seen[rt.Path] {
+			continue // one handler serves all methods on a path; the spec lists them separately
+		}
+		seen[rt.Path] = true
+		mux.HandleFunc(rt.Path, rt.Handler)
+	}
 	return logRequests(mux)
 }
 
@@ -163,10 +160,6 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, map[string]any{"error": msg})
 }
 
-// SetDeviceIssuer wires the box PKI so enrolment can mint device certs. Called by the daemon once
-// the CA exists.
-func (s *Server) SetDeviceIssuer(i DeviceIssuer) { s.enroll.SetIssuer(i) }
-
-// ArmEnrollment sets the one-time pairing code that the QR carries, enabling enrolment. Setup calls
-// this (via the daemon) after issuing the QR; it is cleared after one successful enrol.
-func (s *Server) ArmEnrollment(pairingCode string) { s.enroll.SetPairingCode(pairingCode) }
+// Enrolment plumbing (DeviceIssuer, ArmEnrollment, the /v1/enroll handler and its pairing-code
+// gate) is deliberately gone: the QR delivers the device identity itself, so there is nothing to
+// exchange, nothing to arm, and no certless endpoint to defend.

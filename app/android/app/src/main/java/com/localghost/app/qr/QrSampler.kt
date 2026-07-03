@@ -587,10 +587,20 @@ object QrSampler {
         // real finder (centre 2.5-3.5x), and keeping the arms near-equal rejects ragged data coincidences.
         val arm = (r[0] + r[1] + r[3] + r[4]) / 4.0
         if (arm < 1.0) return false
+        // Scale-aware tolerance. A v15 symbol (77 modules, the cert-bearing enroll code) has finder
+        // arms of ~3-5px at the same scan distance where a v9's were 6-9px, and at that size the
+        // binariser's edge placement alone shifts a run by +-1px , which on a 3px arm is 33%, already
+        // over the proportional 0.6*arm band. Give every run an absolute quantisation allowance of
+        // 1.5px on top of the proportional one; at large arms the proportional term dominates and
+        // nothing changes, so the small-symbol relaxation costs nothing where detection already worked.
+        val slack = maxOf(0.6 * arm, 1.5)
         for (v in intArrayOf(r[0], r[1], r[3], r[4])) {
-            if (abs(v - arm) > 0.6 * arm) return false      // arms must be roughly equal
+            if (abs(v - arm) > slack) return false          // arms must be roughly equal
         }
-        if (r[2] < 2.0 * arm || r[2] > 4.5 * arm) return false   // centre must be a real wide bar
+        // Centre band widened by the same +-1px quantisation at each edge. The alignment-pattern
+        // impostor (centre == arm) stays rejected at every scale: even at arm=2 the lower bound is
+        // 2*2-1 = 3 > 2, and it only grows from there.
+        if (r[2] < 2.0 * arm - 1.0 || r[2] > 4.5 * arm + 1.0) return false   // centre must be a real wide bar
         return true
     }
 

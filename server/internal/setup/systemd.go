@@ -69,12 +69,11 @@ func renderUnit(name, execDir string, cfg DaemonConfig) string {
 	fmt.Fprintf(&b, "\n[Service]\n")
 	fmt.Fprintf(&b, "Type=notify\n")
 	if isSecd {
-		// ghost.secd needs the box identity (to issue device certs) and reads a one-time pairing
-		// code from an environment file that setup writes and clears after first enrolment, so no
-		// secret is baked into the unit. GHOST_PAIRING_CODE is empty/absent in normal operation.
-		fmt.Fprintf(&b, "EnvironmentFile=-%s/enroll.env\n", cfg.StateDir)
-		fmt.Fprintf(&b, "ExecStart=%s/%s --host %s --ca %s --state %s --disk %s --addr 127.0.0.1:%d\n",
-			execDir, name, cfg.Host, cfg.CaDir, cfg.StateDir, cfg.Disk, cfg.Port)
+		// No EnvironmentFile, no pairing code, no --host/--ca: the daemon has no enrolment wiring
+		// and never issues device certs (the QR carries the identity, minted at render time by
+		// ghost-setup). The unit therefore contains nothing secret and nothing identity-related.
+		fmt.Fprintf(&b, "ExecStart=%s/%s --state %s --disk %s --addr 127.0.0.1:%d\n",
+			execDir, name, cfg.StateDir, cfg.Disk, cfg.Port)
 	} else {
 		fmt.Fprintf(&b, "ExecStart=%s/%s\n", execDir, name)
 	}

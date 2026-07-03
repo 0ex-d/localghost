@@ -220,17 +220,10 @@ func (s *System) CreateCA() error                    { return s.pki.CreateCA() }
 func (s *System) IssueServerCert() error             { return s.pki.IssueServerCert() }
 func (s *System) ServerCertFingerprint() (string, error) { return s.pki.ServerFingerprint() }
 
-// IssueDeviceCert issues the first device cert; the cert/key PEM are returned via DeviceIdentity for
-// the QR. The plan calls this; the daemon reads the PEM to embed in the enroll QR.
-func (s *System) IssueDeviceCert() error {
-	_, _, err := s.pki.IssueDeviceCert("primary")
-	return err
-}
-
-// DeviceIdentity issues (or re-issues) a named device cert and returns the PEM for the QR payload.
-func (s *System) DeviceIdentity(name string) (certPEM, keyPEM string, err error) {
-	return s.pki.IssueDeviceCert(name)
-}
+// Device identity issuance is intentionally NOT on System: the QR path mints through
+// PKI.IssueDeviceCertDER (key never on disk) when pair.Run renders the enrolment QR. The old
+// provision-time "primary" identity and the DeviceIdentity adapter minted keys onto the disk,
+// which the QR-delivery model forbids.
 
 // --- nginx ---
 

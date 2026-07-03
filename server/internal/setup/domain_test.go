@@ -46,17 +46,20 @@ func TestNginxMentionsDomainAndGhostSecd(t *testing.T) {
 	if !contains(out, "vlad.localghost.ai") || !contains(out, "127.0.0.1:8443") {
 		t.Fatal("nginx config must reference the domain and the ghost.secd address")
 	}
-	// The enrol bootstrap must be reachable without a client cert (the device is getting one), so
-	// verification is optional at the server and the enrol location does not require it.
+	// Verification stays OPTIONAL at the TLS layer for appears-down, not for any bootstrap: a
+	// handshake reject is a tell, so a certless client completes the handshake and the decision
+	// collapses to the uniform 503 inside.
 	if !contains(out, "ssl_verify_client      optional") {
-		t.Fatal("client cert verification must be optional so enrolment can bootstrap")
+		t.Fatal("client cert verification must be optional , a handshake reject is a tell")
 	}
-	if !contains(out, "location = /v1/enroll") {
-		t.Fatal("enrolment must have its own no-cert location")
+	// There is NO enrolment endpoint anywhere: the QR carries the device identity, so no certless
+	// location may exist. This assertion is the tripwire against one creeping back in.
+	if contains(out, "/v1/enroll") {
+		t.Fatal("no enrolment location may exist , enrolment is the QR scan itself")
 	}
-	// Every other route must reject an unverified client cert at the edge.
+	// Every route must reject an unverified client cert inside, with the uniform 503.
 	if !contains(out, "$ssl_client_verify != SUCCESS") {
-		t.Fatal("non-enrol routes must require a verified device cert")
+		t.Fatal("all routes must require a verified device cert")
 	}
 }
 
