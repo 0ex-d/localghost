@@ -84,33 +84,30 @@ func TestApplyStopsAtFirstFailure(t *testing.T) {
 
 func TestSystemdUnitsHardenedAndOrdered(t *testing.T) {
 	units := SystemdUnits("/usr/local/bin", DaemonConfig{Host: "192.168.1.50", CaDir: "/etc/ghost/ca", StateDir: "/var/lib/ghost", Port: 8443})
-	if len(units) != len(GhostDaemons) {
-		t.Fatalf("a unit per daemon: %d vs %d", len(units), len(GhostDaemons))
+	// Exactly ONE unit now: ghost.secd. The ghost.*d daemons are supervised by ghost.secd on the
+	// encrypted volume, not by systemd, so they get no boot-time units (they cannot start before the
+	// volume is mounted at unlock).
+	if len(units) != 1 {
+		t.Fatalf("expected exactly one systemd unit (ghost.secd), got %d", len(units))
 	}
-	var secd, other SystemdUnit
-	for _, u := range units {
-		if u.Name == "ghost.secd" {
-			secd = u
-		}
-		if u.Name == "ghost.tallyd" {
-			other = u
-		}
+	secd := units[0]
+	if secd.Name != "ghost.secd" {
+		t.Fatalf("the one unit must be ghost.secd, got %s", secd.Name)
 	}
-	// All units run as ghost and are hardened.
-	for _, u := range units {
-		if !strings.Contains(u.Unit, "User=ghost") || !strings.Contains(u.Unit, "NoNewPrivileges=yes") {
-			t.Fatalf("%s must run as ghost and be hardened", u.Name)
-		}
+	// It runs as ghost and is hardened.
+	if !strings.Contains(secd.Unit, "User=ghost") || !strings.Contains(secd.Unit, "NoNewPrivileges=yes") {
+		t.Fatal("ghost.secd must run as ghost and be hardened")
 	}
-	// Backing daemons depend on ghost.secd; ghost.secd does not depend on itself.
-	if !strings.Contains(other.Unit, "Requires=ghost.secd.service") {
-		t.Fatal("backing daemons must require ghost.secd")
-	}
+	// ghost.secd does not depend on itself.
 	if strings.Contains(secd.Unit, "Requires=ghost.secd.service") {
 		t.Fatal("ghost.secd must not require itself")
 	}
-	// Only ghost.secd gets TPM access.
-	if !strings.Contains(secd.Unit, "/dev/tpmrm0") || strings.Contains(other.Unit, "/dev/tpmrm0") {
-		t.Fatal("only ghost.secd should have TPM device access")
+	// ghost.secd gets TPM access (it does the unseal) and must NOT have a private /dev (it needs the
+	// real disk + dm-crypt to mount).
+	if !strings.Contains(secd.Unit, "/dev/tpmrm0") {
+		t.Fatal("ghost.secd must have TPM device access")
+	}
+	if strings.Contains(secd.Unit, "PrivateDevices=yes") {
+		t.Fatal("ghost.secd must NOT have PrivateDevices=yes , it needs the real disk and dm-crypt")
 	}
 }

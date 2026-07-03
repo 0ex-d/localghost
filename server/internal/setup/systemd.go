@@ -7,6 +7,9 @@ import (
 
 // The daemons that run on a box. ghost.secd is the front door; the rest bind loopback only and sit
 // behind it. Setup renders a hardened systemd unit for each.
+// GhostDaemons is the full roster of LocalGhost processes. Only ghost.secd gets a systemd unit
+// (see SystemdUnits); the rest are supervised by ghost.secd on the encrypted volume. Kept here as
+// the canonical list and referenced by the installer to know which daemon binaries to place.
 var GhostDaemons = []string{
 	"ghost.secd",    // front door / trust boundary (this service)
 	"ghost.noted",   // notes
@@ -28,7 +31,6 @@ type DaemonConfig struct {
 	StateDir string // /var/lib/ghost
 	Disk     string // the raw LUKS data disk ghost.secd mounts on unlock, e.g. /dev/nvme1n1
 	Port     int    // mTLS port behind nginx
-	SvcUser  string // the unprivileged user the daemons run as; empty means "ghost"
 }
 
 // SystemdUnits renders a unit per daemon. ghost.secd is the only one that binds a public-facing
@@ -38,11 +40,12 @@ type DaemonConfig struct {
 //
 // DaemonConfig supplies ghost.secd's flags.
 func SystemdUnits(execDir string, cfg DaemonConfig) []SystemdUnit {
-	units := make([]SystemdUnit, 0, len(GhostDaemons))
-	for _, name := range GhostDaemons {
-		units = append(units, SystemdUnit{Name: name, Unit: renderUnit(name, execDir, cfg)})
+	// Exactly ONE unit: ghost.secd. The ghost.*d daemons live on the encrypted volume and are
+	// supervised by ghost.secd after unlock (internal/secd/supervisor.go), NOT by systemd , a boot
+	// unit would try to start them against an unmounted volume and fail.
+	return []SystemdUnit{
+		{Name: "ghost.secd", Unit: renderUnit("ghost.secd", execDir, cfg)},
 	}
-	return units
 }
 
 func renderUnit(name, execDir string, cfg DaemonConfig) string {
@@ -69,27 +72,21 @@ func renderUnit(name, execDir string, cfg DaemonConfig) string {
 
 	fmt.Fprintf(&b, "\n[Service]\n")
 	fmt.Fprintf(&b, "Type=notify\n")
-	if isSecd {
-		// No EnvironmentFile, no pairing code, no --host/--ca: the daemon has no enrolment wiring
-		// and never issues device certs (the QR carries the identity, minted at render time by
-		// ghost-setup). The unit therefore contains nothing secret and nothing identity-related.
-		fmt.Fprintf(&b, "ExecStart=%s/%s --state %s --disk %s --addr 127.0.0.1:%d\n",
-			execDir, name, cfg.StateDir, cfg.Disk, cfg.Port)
-	} else {
-		fmt.Fprintf(&b, "ExecStart=%s/%s\n", execDir, name)
-	}
-	svc := cfg.SvcUser
-	if svc == "" {
-		svc = "ghost" // the production default; --user on ghost-setup overrides for dev boxes
-	}
-	fmt.Fprintf(&b, "User=%s\nGroup=%s\n", svc, svc)
+	// ghost.secd's flags: box identity + state + the raw disk it mounts on unlock. No enrolment env
+	// , the QR carries the device cert directly, so there is no pairing code or enroll.env. (This is
+	// the only unit now; the ghost.*d daemons are supervised by ghost.secd, not systemd.)
+	fmt.Fprintf(&b, "ExecStart=%s/%s --host %s --ca %s --state %s --disk %s --addr 127.0.0.1:%d\n",
+		execDir, name, cfg.Host, cfg.CaDir, cfg.StateDir, cfg.Disk, cfg.Port)
+	fmt.Fprintf(&b, "User=ghost\nGroup=ghost\n")
 	fmt.Fprintf(&b, "Restart=on-failure\nRestartSec=2\n")
 	// Hardening , a compromised daemon should not be able to roam.
 	fmt.Fprintf(&b, "NoNewPrivileges=yes\n")
 	fmt.Fprintf(&b, "ProtectSystem=strict\n")
 	fmt.Fprintf(&b, "ProtectHome=yes\n")
 	fmt.Fprintf(&b, "PrivateTmp=yes\n")
-	fmt.Fprintf(&b, "PrivateDevices=yes\n")
+	// ghost.secd needs REAL device nodes (TPM, the raw disk, dm-crypt) to unseal and mount, so it
+	// cannot have a private /dev. DeviceAllow below scopes what it may touch.
+	fmt.Fprintf(&b, "PrivateDevices=no\n")
 	fmt.Fprintf(&b, "ProtectKernelTunables=yes\n")
 	fmt.Fprintf(&b, "ProtectControlGroups=yes\n")
 	fmt.Fprintf(&b, "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX\n")

@@ -1,8 +1,6 @@
 package hw
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -37,7 +35,34 @@ func NewDataStore(mountPathFor func(slot int) string) *DataStore {
 	return &DataStore{mountPathFor: mountPathFor}
 }
 
-// ports are derived from the slot so the three accounts never collide. Loopback only.
+// cfg reads services.conf from the slot's mounted volume. Ports and passwords are the file's, not
+// derived , the file is the single source of truth (see services_config.go). An unreadable config on
+// a mounted volume is a real error surfaced to the caller, not a silent default.
+func (d *DataStore) cfg(slot int) (ServicesConfig, error) {
+	return LoadServicesConfig(d.mountPathFor(slot))
+}
+
+func (d *DataStore) pgPortCfg(slot int) (int, error) {
+	c, err := d.cfg(slot)
+	if err != nil {
+		return 0, err
+	}
+	return c.Postgres.Port, nil
+}
+func (d *DataStore) redisPortCfg(slot int) (int, error) {
+	c, err := d.cfg(slot)
+	if err != nil {
+		return 0, err
+	}
+	return c.Redis.Port, nil
+}
+
+// pgPort / redisPort are the DEFAULT loopback ports, used by the notification + mute stores which
+// connect to the already-running databases. They match ServicesConfig's defaults (6000/6100). NOTE
+// (honest limit): if a box overrides these in services.conf, these two stores would still use the
+// defaults , they do not read the config, because they run in hot paths without the mount handle.
+// Today provision always writes the defaults, so they agree. If per-box port override becomes real,
+// these stores must be threaded with the config port like DataStore was. Tracked, not hidden.
 func pgPort(slot int) int    { return 6000 + slot }
 func redisPort(slot int) int { return 6100 + slot }
 
@@ -52,25 +77,32 @@ func (d *DataStore) redisDir(slot int) string {
 // returns the endpoints for ghost.secd to route to. Called during the unlock StartDB/StartCache
 // stages, AFTER the container is mounted (so the data dirs are inside the decrypted volume).
 func (d *DataStore) Start(slot int) (Endpoints, error) {
-	if err := d.startPostgres(slot); err != nil {
+	c, err := d.cfg(slot)
+	if err != nil {
 		return Endpoints{}, err
 	}
-	if err := d.startRedis(slot); err != nil {
-		// roll back postgres so we do not leave a half-started account
-		_ = d.stopPostgres(slot)
+	if err := d.startPostgres(slot, c); err != nil {
+		return Endpoints{}, err
+	}
+	if err := d.startRedis(slot, c); err != nil {
+		_ = d.stopPostgres(slot, c)
 		return Endpoints{}, err
 	}
 	return Endpoints{
-		PostgresPort: pgPort(slot),
-		RedisPort:    redisPort(slot),
+		PostgresPort: c.Postgres.Port,
+		RedisPort:    c.Redis.Port,
 		Socket:       d.pgData(slot),
 	}, nil
 }
 
 // Stop tears both down on lock/unmount, so nothing holds the volume open when we close it.
 func (d *DataStore) Stop(slot int) error {
-	rerr := d.stopRedis(slot)
-	perr := d.stopPostgres(slot)
+	c, err := d.cfg(slot)
+	if err != nil {
+		return err
+	}
+	rerr := d.stopRedis(slot, c)
+	perr := d.stopPostgres(slot, c)
 	if perr != nil {
 		return perr
 	}
@@ -78,12 +110,24 @@ func (d *DataStore) Stop(slot int) error {
 }
 
 // StopCache stops this slot's Redis. Split out so the lock teardown can report it as its own step.
-func (d *DataStore) StopCache(slot int) error { return d.stopRedis(slot) }
+func (d *DataStore) StopCache(slot int) error {
+	c, err := d.cfg(slot)
+	if err != nil {
+		return err
+	}
+	return d.stopRedis(slot, c)
+}
 
 // StopDB stops this slot's Postgres. Split out so the lock teardown can report it as its own step.
-func (d *DataStore) StopDB(slot int) error { return d.stopPostgres(slot) }
+func (d *DataStore) StopDB(slot int) error {
+	c, err := d.cfg(slot)
+	if err != nil {
+		return err
+	}
+	return d.stopPostgres(slot, c)
+}
 
-func (d *DataStore) startPostgres(slot int) error {
+func (d *DataStore) startPostgres(slot int, c ServicesConfig) error {
 	data := d.pgData(slot)
 	firstRun := false
 	// initdb on first run (the data dir lives in the encrypted volume).
@@ -96,43 +140,36 @@ func (d *DataStore) startPostgres(slot int) error {
 			return fmt.Errorf("initdb slot %d: %v: %s", slot, err, strings.TrimSpace(string(out)))
 		}
 	}
-	// start, bound to loopback on the slot's port, socket inside the volume.
-	opts := fmt.Sprintf("-p %d -k %s -c listen_addresses=127.0.0.1", pgPort(slot), data)
+	// start, bound to loopback on the config's port, socket inside the volume.
+	opts := fmt.Sprintf("-p %d -k %s -c listen_addresses=127.0.0.1", c.Postgres.Port, data)
 	cmd := exec.Command("pg_ctl", "-D", data, "-o", opts, "-w", "-t", "30", "start")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("pg_ctl start slot %d: %v: %s", slot, err, strings.TrimSpace(string(out)))
 	}
-	// On first run only: set a random DB password (stored inside the volume) and lay down the app
-	// config schema (settings, notification prefs, the mute flag). This runs AFTER start because it
-	// needs a live server to apply SQL. It is idempotent-guarded by firstRun so re-mounts skip it.
+	// On first run only: apply the provisioned password to the ghost role and lay down the app config
+	// schema. Runs AFTER start (needs a live server) and is idempotent-guarded by firstRun.
 	if firstRun {
-		if err := d.initPostgresAuthAndSchema(slot); err != nil {
-			_ = d.stopPostgres(slot)
+		if err := d.initPostgresAuthAndSchema(slot, c); err != nil {
+			_ = d.stopPostgres(slot, c)
 			return fmt.Errorf("init db auth/schema slot %d: %w", slot, err)
 		}
 	}
 	return nil
 }
 
-// initPostgresAuthAndSchema generates a random DB password (like the AMK: random, never PIN-derived,
-// stored only inside the encrypted volume), sets it on the ghost role, and creates the app config
-// schema. Called once at first start, while the volume is mounted.
-func (d *DataStore) initPostgresAuthAndSchema(slot int) error {
+// initPostgresAuthAndSchema applies the PROVISIONED password (from services.conf) to the ghost role
+// and creates the app config schema. Called once at first start, while the volume is mounted. The
+// password is generated at provision, not here, so services.conf remains the single source of truth.
+func (d *DataStore) initPostgresAuthAndSchema(slot int, c ServicesConfig) error {
 	data := d.pgData(slot)
-	port := fmt.Sprint(pgPort(slot))
+	port := fmt.Sprint(c.Postgres.Port)
 
-	// random password, 32 bytes hex (printable, safe to embed in SQL + env). Stored in the volume.
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		return fmt.Errorf("password entropy: %w", err)
-	}
-	password := hex.EncodeToString(raw)
-
-	// create a 'ghost' role with the password and a 'ghost' database it owns. psql over the loopback
-	// socket in the volume. We use the trust-auth socket to apply this, THEN the password gates TCP.
+	// The password is PROVISIONED in services.conf (generated at setup), not made up here , that file
+	// is the single credential store, and it must match what gates TCP. Apply it to the ghost role
+	// over the trust-auth loopback socket.
 	stmts := []string{
-		fmt.Sprintf("CREATE ROLE ghost LOGIN PASSWORD '%s';", password),
-		"CREATE DATABASE ghost OWNER ghost;",
+		fmt.Sprintf("CREATE ROLE %s LOGIN PASSWORD '%s';", c.Postgres.User, c.Postgres.Password),
+		fmt.Sprintf("CREATE DATABASE %s OWNER %s;", c.Postgres.Name, c.Postgres.User),
 	}
 	for _, s := range stmts {
 		if out, err := exec.Command("psql", "-h", data, "-p", port, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", s).CombinedOutput(); err != nil {
@@ -172,21 +209,17 @@ CREATE TABLE IF NOT EXISTS notifications (
 );
 CREATE INDEX IF NOT EXISTS notifications_id_desc ON notifications (id DESC);
 `
-	if out, err := exec.Command("psql", "-h", data, "-p", port, "-d", "ghost", "-v", "ON_ERROR_STOP=1", "-c", schema).CombinedOutput(); err != nil {
+	if out, err := exec.Command("psql", "-h", data, "-p", port, "-d", c.Postgres.Name, "-v", "ON_ERROR_STOP=1", "-c", schema).CombinedOutput(); err != nil {
 		return fmt.Errorf("apply schema: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 
-	// store the password inside the volume so ghost.secd can read it after unlock to connect over TCP.
-	// 0600, inside the encrypted mount: protected at rest with everything else.
-	credPath := filepath.Join(d.mountPathFor(slot), "db-credentials.env")
-	cred := fmt.Sprintf("GHOST_DB_USER=ghost\nGHOST_DB_PASSWORD=%s\nGHOST_DB_NAME=ghost\nGHOST_DB_PORT=%d\n", password, pgPort(slot))
-	if err := os.WriteFile(credPath, []byte(cred), 0o600); err != nil {
-		return fmt.Errorf("write db credentials: %w", err)
-	}
+	// No separate credential file , services.conf (written at provision) is the single credential
+	// store, read by DataStore and anything else that needs to connect. The password was applied to
+	// the role above; ghost.secd reads it from services.conf to connect over TCP.
 	return nil
 }
 
-func (d *DataStore) stopPostgres(slot int) error {
+func (d *DataStore) stopPostgres(slot int, _ ServicesConfig) error {
 	data := d.pgData(slot)
 	if _, err := os.Stat(filepath.Join(data, "postmaster.pid")); os.IsNotExist(err) {
 		return nil // not running
@@ -198,26 +231,30 @@ func (d *DataStore) stopPostgres(slot int) error {
 	return nil
 }
 
-func (d *DataStore) startRedis(slot int) error {
+func (d *DataStore) startRedis(slot int, c ServicesConfig) error {
 	dir := d.redisDir(slot)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	pidFile := filepath.Join(dir, "redis.pid")
+	// requirepass from services.conf: even loopback-only, an unauthenticated Redis lets any local
+	// process read the cache. The password gates it, matching Postgres. The readiness ping below must
+	// authenticate too (-a), so a wrong/missing password reads as not-ready, not silently open.
 	cmd := exec.Command("redis-server",
-		"--port", fmt.Sprint(redisPort(slot)),
+		"--port", fmt.Sprint(c.Redis.Port),
 		"--bind", "127.0.0.1",
 		"--dir", dir,
 		"--daemonize", "yes",
 		"--pidfile", pidFile,
+		"--requirepass", c.Redis.Password,
 		"--save", "60", "1", // persist to the encrypted volume
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("redis start slot %d: %v: %s", slot, err, strings.TrimSpace(string(out)))
 	}
-	// brief readiness wait
+	// brief readiness wait, authenticated
 	for i := 0; i < 30; i++ {
-		if exec.Command("redis-cli", "-p", fmt.Sprint(redisPort(slot)), "ping").Run() == nil {
+		if exec.Command("redis-cli", "-p", fmt.Sprint(c.Redis.Port), "-a", c.Redis.Password, "ping").Run() == nil {
 			return nil
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -225,13 +262,15 @@ func (d *DataStore) startRedis(slot int) error {
 	return fmt.Errorf("redis slot %d did not become ready", slot)
 }
 
-func (d *DataStore) stopRedis(slot int) error {
-	if exec.Command("redis-cli", "-p", fmt.Sprint(redisPort(slot)), "ping").Run() != nil {
-		return nil // not running
+func (d *DataStore) stopRedis(slot int, c ServicesConfig) error {
+	port := fmt.Sprint(c.Redis.Port)
+	pw := c.Redis.Password
+	if exec.Command("redis-cli", "-p", port, "-a", pw, "ping").Run() != nil {
+		return nil // not running (or unreachable) , nothing to stop
 	}
-	out, err := exec.Command("redis-cli", "-p", fmt.Sprint(redisPort(slot)), "shutdown", "nosave").CombinedOutput()
+	out, err := exec.Command("redis-cli", "-p", port, "-a", pw, "shutdown", "nosave").CombinedOutput()
 	// shutdown closes the connection, so an error here is often benign; check it actually stopped.
-	if exec.Command("redis-cli", "-p", fmt.Sprint(redisPort(slot)), "ping").Run() == nil {
+	if exec.Command("redis-cli", "-p", port, "-a", pw, "ping").Run() == nil {
 		return fmt.Errorf("redis slot %d still up after shutdown: %s", slot, strings.TrimSpace(string(out)))
 	}
 	_ = err

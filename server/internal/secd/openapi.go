@@ -47,6 +47,11 @@ type healthDoc struct {
 	Service string `json:"service"`
 }
 
+type statusDoc struct {
+	Mounted  bool            `json:"mounted"`
+	Services []ServiceStatus `json:"services"`
+}
+
 type infoDoc struct {
 	Locked      bool `json:"locked"`
 	MountedSlot *int `json:"mountedSlot,omitempty"`
@@ -135,6 +140,8 @@ func (s *Server) routes() []route {
 			Auth: true, Response: lockDoc{}, Handler: s.handleLock},
 		{Method: "GET", Path: "/v1/info", Summary: "Box + mounted-account summary for the home screen.",
 			Response: infoDoc{}, Handler: s.handleInfo},
+		{Method: "GET", Path: "/v1/status", Summary: "Per-service supervisor status for the Ghost Status screen.",
+			Auth: true, Response: statusDoc{}, Handler: s.handleStatus},
 		{Method: "GET", Path: "/v1/notifications", Summary: "Poll pending notifications for the mounted account.",
 			Auth: true, Response: looseList{}, Handler: s.handleNotifications},
 		{Method: "GET", Path: "/v1/notifications/mute", Summary: "Current notification mutes per scope.",

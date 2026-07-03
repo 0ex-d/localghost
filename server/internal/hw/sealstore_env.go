@@ -131,6 +131,18 @@ func (e *EnvSealStore) DeleteWrapped(slot int) error {
 	return e.write(m)
 }
 
+// DeleteSalt removes the software tier's salt. Used by migrate-to-tpm cleanup, after the mode flip:
+// with mode=tpm the salt is dead weight, and leaving it invites "why is there a salt on a tpm box"
+// confusion when inspecting the file.
+func (e *EnvSealStore) DeleteSalt() error {
+	m, err := e.read()
+	if err != nil {
+		return err
+	}
+	delete(m, keySalt)
+	return e.write(m)
+}
+
 // Mode reads GHOST_SEAL_MODE (tpm|software|""). The daemon uses it to pick the Sealer at unlock.
 func (e *EnvSealStore) Mode() (string, error) {
 	m, err := e.read()

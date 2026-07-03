@@ -10,6 +10,8 @@ package secd
 // documented go-tpm + cryptsetup interfaces and exercised on the box.
 
 import (
+	"context"
+	"fmt"
 	"path/filepath"
 
 	"github.com/LocalGhostDao/localghost/server/internal/auth"
@@ -26,6 +28,7 @@ type backend struct {
 	store    *hw.DataStore
 	sealerAt func(slot int) (hw.Sealer, error) // resolves the slot's Sealer per the provisioned tier
 	stateDir string
+	sup      *Supervisor // supervises the ghost.*d daemons while mounted; nil until StartCache
 }
 
 func newDefaultBackend(cfg Config) UnlockBackend {
@@ -98,7 +101,40 @@ func (b *backend) StartDB(slot int) error {
 	return err
 }
 
-func (b *backend) StartCache(int) error { return nil }
+// StartCache is the last cold-unlock stage before DAEMONS. DataStore.Start already brought up Redis
+// (StartDB), so there is no cache work here; instead this is where the supervisor starts the ghost.*d
+// daemons, AFTER Postgres + Redis are up (they depend on both). On the warm path this is Skipped by
+// runUnlock, so the daemons from the original cold unlock keep running , exactly right.
+func (b *backend) StartCache(slot int) error {
+	daemons := supervisedDaemons(b.mounter.MountPath(slot))
+	sup := NewSupervisor()
+	for name, port := range daemons {
+		port := port
+		sup.Register(SupervisedService{
+			Name:       name,
+			Critical:   criticalServices[name],
+			HealthPort: port,
+			Start:      spawnDaemon(filepath.Join(daemonBinDir, name), port),
+			Stop:       func() error { return nil }, // SIGTERM via killProc handles shutdown
+		})
+	}
+	// A critical daemon failing to start returns an error; the unlock stage marks Errored and the box
+	// serves with that capability erroring , it does NOT block the mount or lock the box.
+	if err := sup.Start(context.Background()); err != nil {
+		b.sup = sup // keep it so Lock can still tear down whatever DID start
+		return fmt.Errorf("supervisor: %w", err)
+	}
+	b.sup = sup
+	return nil
+}
+
+// Supervisor exposes the running supervisor for /v1/status (nil when cold).
+func (b *backend) SupervisorStatus() []ServiceStatus {
+	if b.sup == nil {
+		return nil
+	}
+	return b.sup.Status()
+}
 
 func (b *backend) Warm(slot int) bool { return b.mounter.IsMounted(slot) }
 
@@ -113,7 +149,17 @@ func (b *backend) Lock(slot int, emit func(profile.Progress)) error {
 		}
 		return err
 	}
-	_ = step(profile.StageStopServices, func() error { return nil })
+	// Stop the ghost.*d daemons FIRST and confirm every one is dead before we touch the volume. This
+	// is the anti-wedge ordering: a daemon still holding the mount open would block Unmount. Teardown
+	// returns only after every supervised process is reaped.
+	_ = step(profile.StageStopServices, func() error {
+		if b.sup == nil {
+			return nil
+		}
+		err := b.sup.Teardown()
+		b.sup = nil
+		return err
+	})
 	_ = step(profile.StageStopCache, func() error { return b.store.StopCache(slot) })
 	_ = step(profile.StageStopDB, func() error { return b.store.StopDB(slot) })
 	if err := step(profile.StageUnmount, func() error { return b.mounter.Unmount(slot) }); err != nil {

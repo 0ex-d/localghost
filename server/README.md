@@ -55,13 +55,10 @@ Two independent gates, in this order:
 
 1. **Device cert (the key).** The box is its own CA and is always HTTPS. At setup it mints a client
    certificate for the phone; the phone receives it by scanning the QR (the box generates the key,
-   the phone does not). Scanning IS enrolment: the QR carries the signed device certificate and its
-   key, so there is no pairing code and no enrolment endpoint , nothing certless to call, ever. At
-   the edge, client-cert verification is OPTIONAL at the TLS layer on purpose (a handshake reject is
-   itself a tell that something cert-gated lives here); the certless or wrong-cert client completes
-   the handshake and then every route collapses to the same plain 503 a down box returns (see
-   setup/domain.go). A scanner hitting the public IP sees a generic unavailable service and learns
-   nothing. Reachability is not access.
+   the phone does not). nginx is configured with `ssl_verify_client on` against the box CA, so any
+   connection without a box-issued cert is rejected at the TLS handshake , before it reaches
+   ghost.secd, before any account or PIN. A scanner hitting the public IP gets a handshake failure
+   and learns nothing. Reachability is not access.
 2. **Account PIN.** Only once the device is trusted does ghost.secd care which account, proven by the
    PIN, with the wipe logic.
 

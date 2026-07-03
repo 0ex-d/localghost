@@ -258,20 +258,64 @@ object BoxClient {
             lastUpdated = "just now")
     }
 
-    suspend fun daemonStatuses(@Suppress("UNUSED_PARAMETER") ctx: Context): List<DaemonStatus> {
-        delay(120)
-        return listOf(
-            DaemonStatus("ghost.framed", "extracts moments from photos & video",
-                DaemonStatus.State.WORKING, "8,421 photos · 142 videos", "now"),
-            DaemonStatus("ghost.voiced", "captures & transcribes voice notes",
-                DaemonStatus.State.LISTENING, "63 notes transcribed", "2m ago"),
-            DaemonStatus("ghost.cued", "surfaces reflections from your life",
-                DaemonStatus.State.IDLE, "next sweep in 12m", "12m ago"),
-            DaemonStatus("ghost.shadowd", "watches for manipulation in messages",
-                DaemonStatus.State.IDLE, "nothing flagged", "1h ago"),
-            DaemonStatus("ghost.watchd", "keeps the fleet honest",
-                DaemonStatus.State.WORKING, "all daemons healthy", "now"),
-        )
+    // Static role copy: what each daemon is FOR. The server's /v1/status reports live health per
+    // service but not this human description, so it lives app-side and is merged with the live state.
+    private val daemonRoles = mapOf(
+        "ghost.framed" to "extracts moments from photos & video",
+        "ghost.voiced" to "captures & transcribes voice notes",
+        "ghost.noted" to "keeps your notes and writing",
+        "ghost.cued" to "surfaces reflections from your life",
+        "ghost.synthd" to "builds the life-model from what the box sees",
+        "ghost.tallyd" to "keeps count of what matters",
+        "ghost.shadowd" to "watches for manipulation in messages",
+        "ghost.watchd" to "keeps the fleet honest",
+    )
+
+    // daemonStatuses reads the REAL supervisor status from /v1/status and maps each service onto the
+    // UI's DaemonStatus. The server owns state (up/degraded/failed), restart count and last error;
+    // the role text is merged from daemonRoles. A service the server reports that we have no role for
+    // still shows, with its name as the role, so a new daemon is never invisible.
+    suspend fun daemonStatuses(ctx: Context): List<DaemonStatus> {
+        val resp = BoxHttp.getJson(ctx, "/v1/status")
+        val services = resp.optJSONArray("services") ?: return emptyList()
+        val out = ArrayList<DaemonStatus>(services.length())
+        for (i in 0 until services.length()) {
+            val s = services.getJSONObject(i)
+            val name = s.optString("name")
+            val code = s.optInt("code", 0)
+            val state = s.optString("state", "")           // up / restarting / backoff / down
+            val restarts = s.optInt("restarts", 0)
+            val lastErr = s.optString("lastErr", "")
+            out.add(
+                DaemonStatus(
+                    id = name,
+                    role = daemonRoles[name] ?: name,
+                    state = mapDaemonState(code, state),
+                    detail = daemonDetail(code, restarts, lastErr),
+                    lastRun = "",   // watchd sample time will fill this once watchd writes metrics
+                )
+            )
+        }
+        return out
+    }
+
+    // mapDaemonState turns the supervisor's health code + lifecycle state into the UI enum. Code 2
+    // (failed) or a backoff/down lifecycle is ERROR; code 1 (degraded) shows as IDLE (up, but not
+    // fully healthy); code 0 up is WORKING. This is deliberately conservative: anything not clearly
+    // healthy reads as not-WORKING so the screen never over-reassures.
+    private fun mapDaemonState(code: Int, state: String): DaemonStatus.State = when {
+        code >= 2 || state == "backoff" || state == "down" -> DaemonStatus.State.ERROR
+        code == 1 -> DaemonStatus.State.IDLE
+        state == "restarting" -> DaemonStatus.State.IDLE
+        else -> DaemonStatus.State.WORKING
+    }
+
+    private fun daemonDetail(code: Int, restarts: Int, lastErr: String): String {
+        val parts = ArrayList<String>()
+        if (lastErr.isNotBlank()) parts.add(lastErr)
+        if (restarts > 0) parts.add("restarted ${restarts}×")
+        if (parts.isEmpty()) parts.add(if (code == 0) "healthy" else "degraded")
+        return parts.joinToString(" · ")
     }
 
     // --- memories (life-model timeline) ---

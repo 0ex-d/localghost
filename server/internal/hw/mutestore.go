@@ -66,7 +66,7 @@ func (m *MuteStore) IsMuted(slot int, service string) bool {
 func (m *MuteStore) GlobalMuted(slot int) bool { return m.scopeActive(slot, muteGlobalScope) }
 
 func (m *MuteStore) scopeActive(slot int, scope string) bool {
-	out, err := exec.Command("redis-cli", "-p", strconv.Itoa(redisPort(slot)), "GET", redisMuteKey(scope)).Output()
+	out, err := exec.Command("redis-cli", "-p", strconv.Itoa(redisPort(slot)), "-a", m.redisPass(slot), "GET", redisMuteKey(scope)).Output()
 	if err != nil {
 		return false
 	}
@@ -172,8 +172,18 @@ func (m *MuteStore) deletePostgres(slot int, scope string) error {
 	return nil
 }
 
+// redisPass reads the Redis password from services.conf on the mount (derived from the pg socket
+// path). Empty on failure, so an unauthenticated call fails visibly rather than bypassing auth.
+func (m *MuteStore) redisPass(slot int) string {
+	c, err := LoadServicesConfig(filepath.Dir(m.pgSocketFor(slot)))
+	if err != nil {
+		return ""
+	}
+	return c.Redis.Password
+}
+
 func (m *MuteStore) writeRedis(slot int, args ...string) error {
-	full := append([]string{"-p", strconv.Itoa(redisPort(slot))}, args...)
+	full := append([]string{"-p", strconv.Itoa(redisPort(slot)), "-a", m.redisPass(slot)}, args...)
 	out, err := exec.Command("redis-cli", full...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("mute redis write: %v: %s", err, strings.TrimSpace(string(out)))

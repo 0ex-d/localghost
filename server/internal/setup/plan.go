@@ -27,9 +27,8 @@ type System interface {
 	CAExists() (bool, error)
 	CreateCA() error           // box CA
 	IssueServerCert() error    // box's own https server cert, signed by the box CA
+	IssueDeviceCert() error    // the phone's client cert, delivered via the QR
 	ServerCertFingerprint() (string, error) // pinned by the phone
-	// Device certs are NOT part of the provisioning plan: the identity is minted keyless-on-disk
-	// when the enrolment QR is rendered (pair.Run via PKI.IssueDeviceCertDER) and delivered in it.
 
 	// nginx edge.
 	NginxInstalled() (bool, error)
@@ -102,11 +101,16 @@ func DefaultPlan(sys System, withDomain bool, dnsCheck func() error, nginxConf s
 			Describe: func() (string, error) { return "issue the box https server cert from the box CA", nil },
 			Do:       sys.IssueServerCert,
 		},
-		// NOTE deliberately absent: no device cert is issued at provision time. Earlier revisions
-		// minted a "baseline" device identity here, key on disk , which contradicts the QR-delivery
-		// model, where the device key exists only in the QR and on the phone (see
-		// PKI.IssueDeviceCertDER). The identity is minted when the enrolment QR is rendered, and the
-		// server-cert step above already proves the CA can sign.
+		{
+			Name:     "device cert capability",
+			Check:    func() (bool, error) { return sys.CAExists() },
+			Describe: func() (string, error) {
+				return "issue the phone's device cert from the box CA; it is delivered by the QR " +
+					"(the QR carries the device cert + key directly, so scanning it IS enrolment , " +
+					"there is no separate pairing step or one-time code)", nil
+			},
+			Do: sys.IssueDeviceCert,
+		},
 		{
 			Name:     "nginx installed",
 			Check:    sys.NginxInstalled,
@@ -140,20 +144,29 @@ func DefaultPlan(sys System, withDomain bool, dnsCheck func() error, nginxConf s
 		Step{
 			Name:     "install systemd services",
 			Check:    sys.ServicesInstalled,
-			Describe: func() (string, error) { return fmt.Sprintf("install %d systemd units (ghost.secd + daemons)", len(units)), nil },
+			Describe: func() (string, error) {
+				return fmt.Sprintf("install %d systemd unit (ghost.secd only; the ghost.*d daemons are "+
+					"supervised by ghost.secd on the encrypted volume, not by systemd)", len(units)), nil
+			},
 			Do:       func() error { return sys.InstallServices(units) },
 		},
 		Step{
 			Name:     "enable + start services",
 			Check:    yes,
-			Describe: func() (string, error) { return "enable and start ghost.secd and the ghost.<x>d daemons", nil },
+			Describe: func() (string, error) { return "enable and start ghost.secd (it supervises the daemons itself)", nil },
 			Do:       func() error { return sys.EnableAndStartServices(unitNames(units)) },
 		},
 		Step{
-			Name:     "tpm usable",
-			Check:    sys.TPMUsable,
-			Describe: func() (string, error) { return "check for a usable TPM 2.0 (Intel PTT)", nil },
-			Do:       func() error { return ErrTPMUnusable },
+			// Informational, not a gate. A usable TPM enables the hardware seal tier; its absence is
+			// fine , the box provisions with the software tier (--seal software). The seal step is
+			// where "tpm mode with no TPM" is actually refused, so this step never hard-fails the run.
+			Name:     "tpm check (informational)",
+			Check:    sys.TPMUsable, // already-usable => Check true => step is a no-op
+			Describe: func() (string, error) {
+				return "check for a usable TPM 2.0 (Intel PTT). If absent, provision with --seal " +
+					"software , the disk is still encrypted, without the hardware lockout", nil
+			},
+			Do: func() error { return nil }, // never blocks; tier choice is enforced at the seal step
 		},
 		Step{
 			Name:     "clear setup artifacts (the QR carried a key)",

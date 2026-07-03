@@ -7,48 +7,41 @@ import java.net.URLDecoder
  * discovery or trust: the QR carries everything the phone needs to reach the box on the LAN and
  * to pin its identity on first contact.
  *
- *   localghost://enroll?v=1&host=192.168.1.20&port=8443&fp=AB:CD:...&name=xyntai&cert=<b64url>&key=<b64url>
+ *   localghost://enroll?v=2&host=192.168.1.20&port=8443&code=ABCD-1234&fp=AB:CD:...&name=xyntai&cert=<b64url>&key=<b64url>
  *
- * - v     : format version. Absent means 1 (a hand-typed link may omit it). The phone understands up
+ * - v     : format version. Absent means 1 (the original code-only links). The phone understands up
  *           to CURRENT_VERSION; a higher number means the box is newer than the app, and parse
- *           returns a Result.Outdated so the scanner can say "update the app". cert+key are part of
- *           v1: this is the first published format, nothing older exists in the wild.
+ *           returns a Result.Outdated so the scanner can say "update the app". v2 adds cert+key.
  * - host  : LAN address or .local name the phone can route to right now.
  * - port  : the box's mTLS port.
+ * - code  : one-time pairing code the box is showing (the box marks the QR consumed after first use).
  * - fp    : the box's certificate SHA-256 fingerprint. The trust anchor the phone pins on first
  *           contact, so enrollment is safe even over a hostile network. This fingerprint IS the vouch.
  * - name  : optional human label for the box (prefills the suggested device/box name).
- * - cert  : the DEVICE certificate (client cert) the box issued for this phone, raw DER, base64url-
- *           encoded. DER rather than PEM: PEM is base64 already, so base64url over PEM cost ~1.78x
- *           the DER and pushed a real identity past what the box's QR encoder can hold; DER-direct
- *           is ~1.33x and fits. DeviceCert consumed DER anyway (its PEM path stripped the armour
- *           before parsing), so nothing of value was lost.
- * - key   : that cert's PKCS8 PRIVATE KEY, raw DER, base64url-encoded. The box generates the keypair
- *           (the phone does not) and delivers both here, screen-to-camera , so enrollment is one scan
- *           with NO network call. The box never writes the key to its disk and zeroes its in-memory
- *           copy after rendering the QR; the phone imports these into its encrypted store
- *           (DeviceCert) and presents the cert on every later call. base64url (RFC 4648, URL-safe
- *           alphabet) so the binary survives the query string untouched.
+ * - cert  : the DEVICE certificate (client cert) the box issued for this phone, PEM, base64url-encoded.
+ * - key   : that cert's PKCS8 PRIVATE KEY, PEM, base64url-encoded. The box generates the keypair (the
+ *           phone does not) and delivers both here, screen-to-camera , so enrollment is one scan with
+ *           NO network call. The box wipes its copy after showing the QR; the phone imports these into
+ *           its encrypted store (DeviceCert) and presents the cert on every later call. base64url
+ *           (RFC 4648, URL-safe alphabet) so the PEM survives the query string untouched.
  *
  * Remote access (away from home) is out of scope for the QR: the user types their own DDNS or VPN
  * host into the setup screen. The QR is the LAN/first-contact path.
  *
  * Parsing is pure (no android.net.Uri) so it can be unit-tested. cert/key are OPTIONAL at parse time
- * (a hand-typed link lacks them) but REQUIRED to actually enrol , the enrol flow rejects a link without
- * them, so a code-only link cannot silently half-enrol.
+ * (a v1 link still parses) but REQUIRED to actually enrol , the enrol flow rejects a link without
+ * them, so old code-only links cannot silently half-enrol.
  */
 data class EnrollLink(
     val host: String,
     val port: Int,
+    val code: String,
     val certFingerprint: String,
     val boxName: String = "",
     val version: Int = CURRENT_VERSION,
-    // The box-issued device cert + its private key, raw DER, delivered in the QR. Null when the
-    // link carried neither (hand-typed path); the enrol flow requires both. Note: ByteArray fields
-    // make the data-class equals/hashCode compare these by REFERENCE; nothing compares EnrollLinks
-    // for equality today, and content comparison belongs to tests (assertArrayEquals).
-    val deviceCertDer: ByteArray? = null,
-    val deviceKeyDer: ByteArray? = null,
+    // v2: the box-issued device cert + its private key, delivered in the QR. Null for a v1 link.
+    val deviceCertPem: String? = null,
+    val deviceKeyPem: String? = null,
 ) {
     /** The base URL the phone will store and connect to. */
     fun baseUrl(): String = "https://$host:$port"
@@ -66,9 +59,8 @@ data class EnrollLink(
 
     companion object {
         const val PREFIX = "localghost://enroll?"
-        /** The newest enrol-link version this app understands. Bump when the format changes. v1 is
-         *  the first published format and includes cert+key. */
-        const val CURRENT_VERSION = 1
+        /** The newest enrol-link version this app understands. Bump when the format changes. v2 = +cert/key. */
+        const val CURRENT_VERSION = 2
 
         /**
          * Parse a scanned/typed payload, keeping the version distinction. Use this where the caller
@@ -86,22 +78,23 @@ data class EnrollLink(
             if (version > CURRENT_VERSION) return Result.Outdated(version)
 
             val host = params["host"]?.trim().orEmpty()
+            val code = params["code"]?.trim().orEmpty()
             val fp = params["fp"]?.trim().orEmpty()
             val port = params["port"]?.trim()?.toIntOrNull() ?: 8443
             val name = params["name"]?.trim().orEmpty()
-            // The device cert + key, base64url-encoded DER. Optional at parse time (hand-typed links
-            // lack them); the enrol flow requires them. Malformed base64 -> treated as absent, not a hard fail.
-            val certDer = decodeB64Url(params["cert"]?.trim().orEmpty())
-            val keyDer = decodeB64Url(params["key"]?.trim().orEmpty())
+            // v2: the device cert + key, base64url-encoded PEM. Optional at parse time (v1 links lack
+            // them); the enrol flow requires them. Malformed base64 -> treated as absent, not a hard fail.
+            val certPem = decodeB64Url(params["cert"]?.trim().orEmpty())
+            val keyPem = decodeB64Url(params["key"]?.trim().orEmpty())
 
-            if (host.isEmpty() || fp.isEmpty()) return Result.Malformed
+            if (host.isEmpty() || code.isEmpty() || fp.isEmpty()) return Result.Malformed
             if (port !in 1..65535) return Result.Malformed
 
             return Result.Ok(
                 EnrollLink(
-                    host = host, port = port,
+                    host = host, port = port, code = code,
                     certFingerprint = normaliseFp(fp), boxName = name, version = version,
-                    deviceCertDer = certDer, deviceKeyDer = keyDer,
+                    deviceCertPem = certPem, deviceKeyPem = keyPem,
                 )
             )
         }
@@ -126,13 +119,12 @@ data class EnrollLink(
             fp.uppercase().filter { it.isLetterOrDigit() }
                 .chunked(2).joinToString(":")
 
-        /** Decode a base64url (RFC 4648, URL-safe, optional padding) value to its raw bytes , DER is
-         *  binary, so NO UTF-8 step (that would corrupt it) , or null if empty/invalid. Pure JVM
-         *  (java.util.Base64) so it stays unit-testable. */
-        private fun decodeB64Url(v: String): ByteArray? {
+        /** Decode a base64url (RFC 4648, URL-safe, optional padding) value to its UTF-8 string, or null
+         *  if empty/invalid. Pure JVM (java.util.Base64) so it stays unit-testable. */
+        private fun decodeB64Url(v: String): String? {
             if (v.isEmpty()) return null
             return runCatching {
-                java.util.Base64.getUrlDecoder().decode(v.trimEnd('='))
+                String(java.util.Base64.getUrlDecoder().decode(v.trimEnd('=')), Charsets.UTF_8)
             }.getOrNull()
         }
     }

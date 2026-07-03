@@ -1,10 +1,9 @@
 // ghost-setup provisions the box: it runs the setup plan (partition, CA, certs, nginx, systemd),
-// then renders the enrolment QR. The QR carries the device identity itself, so scanning it IS
-// enrolment , there is no pairing code and nothing to arm on the daemon.
+// then renders the enrolment QR and prints the one-time pairing code to start ghost.secd with.
 //
 // Flow:
-//	ghost-setup --disk /dev/nvme0n1 --host 192.168.1.50             # dry run (the default), shows what it will do
-//	ghost-setup --disk /dev/nvme0n1 --host 192.168.1.50 --apply     # provisions, then prints the QR
+//	ghost-setup --disk /dev/nvme0n1 --host 192.168.1.50 --plan      # dry run, shows what it will do
+//	ghost-setup --disk /dev/nvme0n1 --host 192.168.1.50 --apply     # provisions, then prints QR+code
 //
 // After --apply it prints the exact command to launch the daemon with enrolment armed.
 package main
@@ -146,8 +145,6 @@ func pickDisk() (string, error) {
 
 func main() {
 	disk := flag.String("disk", "", "disk to provision, e.g. /dev/nvme0n1 (DESTRUCTIVE, whole disk)")
-	svcUser := flag.String("user", "ghost", "unprivileged user the daemons run as (must exist; server_setup_root.sh --user <name> prepares it)")
-	sealMode := flag.String("seal", "tpm", "seal tier: 'tpm' (hardware-sealed key, default) or 'software' (PIN-derived key, no hardware lockout , for machines without a TPM)")
 	host := flag.String("host", "", "box LAN IP/hostname the phone connects to")
 	domain := flag.String("domain", "", "optional public domain (omit for the zero-server QR default)")
 	caDir := flag.String("ca", "/etc/ghost/ca", "box CA + cert directory")
@@ -225,25 +222,6 @@ func main() {
 	}
 
 	sys := debian.NewSystem(diskVal, *caDir, hostVal, *execDir, *stateDir, *tpmDevice, mainPIN, wipePIN)
-	sys.SealMode = *sealMode
-
-	// Wire the sole-tenant confirmation to a tty y/N. Without this the check fails closed on a
-	// shared TPM (which is what happened the first time: the box already held owner-hierarchy
-	// objects at 0x81000001/2, an existing SRK/EK). Answering y accepts that LocalGhost's GLOBAL
-	// DA lockout will also govern those objects and that a later resetup's `tpm2 clear` destroys
-	// them. Default is No: a bare Enter, EOF, or non-terminal stdin declines rather than proceeds.
-	sys.Confirm = func(prompt string) (bool, error) {
-		if !term.IsTerminal(int(os.Stdin.Fd())) {
-			return false, nil // no human to ask -> decline, never auto-accept a destructive share
-		}
-		fmt.Print(prompt)
-		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-		if err != nil {
-			return false, nil
-		}
-		a := strings.ToLower(strings.TrimSpace(line))
-		return a == "y" || a == "yes", nil
-	}
 
 	// nginx config + systemd units the plan installs.
 	ghostSecdAddr := fmt.Sprintf("127.0.0.1:%d", *port)
@@ -254,7 +232,6 @@ func main() {
 	}
 	units := setup.SystemdUnits(*execDir, setup.DaemonConfig{
 		Host: hostVal, CaDir: *caDir, StateDir: *stateDir, Disk: diskVal, Port: *port,
-		SvcUser: *svcUser,
 	})
 
 	plan := setup.DefaultPlan(sys, withDomain, nil, nginxConf, units)
@@ -329,25 +306,40 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Provisioned. Render the enrolment QR. IssueDevice makes the QR
-	// carry the device identity (cert + key, DER), so enrolment on the phone is one scan with no
-	// network issuance; the private key is never written to disk (see PKI.IssueDeviceCertDER).
+	// Provisioned. Render the enrolment QR and the one-time pairing code.
 	fmt.Println("\nBox provisioned. Enrol your phone:")
-	pki := debian.NewPKI(*caDir, hostVal)
-	if err := pair.Run(os.Stdout, pair.Options{
-		Host:        hostVal,
-		Port:        *port,
-		CertPath:    *caDir + "/box-server.pem",
-		BoxName:     hostVal,
-		IssueDevice: pki.IssueDeviceCertDER,
-	}, pair.EncodeQR); err != nil {
+	code, err := pair.Run(os.Stdout, pair.Options{
+		Host:     hostVal,
+		Port:     *port,
+		CertPath: *caDir + "/box-server.pem",
+		BoxName:  hostVal,
+	}, pair.EncodeQR)
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "could not render enrolment QR:", err)
 		os.Exit(1)
 	}
 
-	// Nothing to arm: the QR carries the device identity itself, so there is no pairing code, no
-	// enroll.env, no daemon restart to pick one up, and no enrolment endpoint waiting for a call.
-	// Scanning IS enrolment. Treat the rendered QR as a credential: it contains the device private
-	// key, so clear the terminal (or close the session) once the phone has scanned it.
-	fmt.Println("Scan the QR above with the LocalGhost app. The QR contains the device key , clear the screen after scanning.")
+	// Write the one-time code where the systemd unit's EnvironmentFile picks it up, so the running
+	// ghost.secd arms enrolment without the code ever living in the unit file. ghost.secd clears it
+	// after a successful enrol.
+	envPath := *stateDir + "/enroll.env"
+	if err := os.WriteFile(envPath, []byte("GHOST_PAIRING_CODE="+code+"\n"), 0o600); err != nil {
+		fmt.Fprintln(os.Stderr, "could not write enrol env:", err)
+		os.Exit(1)
+	}
+
+	// The plan already started ghost.secd, but it came up before this code existed. Restart it now so
+	// it reads enroll.env and arms the first enrolment. We do this here rather than printing a manual
+	// step, because a skipped restart silently breaks enrolment , the QR would scan but the box would
+	// reject the code. If the restart fails (e.g. running setup without systemd), fall back to the
+	// printed instruction.
+	if out, rerr := exec.Command("systemctl", "restart", "ghost.secd").CombinedOutput(); rerr != nil {
+		fmt.Println("\nEnrolment is armed, but the automatic restart failed:",
+			strings.TrimSpace(string(out)))
+		fmt.Println("Restart ghost.secd by hand so it picks up the code:")
+		fmt.Println("  systemctl restart ghost.secd")
+	} else {
+		fmt.Println("\nEnrolment is armed and ghost.secd has picked up the code.")
+	}
+	fmt.Println("Scan the QR above with the LocalGhost app. The code is single use and clears after one enrol.")
 }

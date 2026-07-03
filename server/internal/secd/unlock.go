@@ -24,6 +24,20 @@ type unlockService struct {
 	openSlot int
 }
 
+// statusReporter is optionally implemented by a backend that supervises daemons (the real one does;
+// a test double may not). Kept separate from UnlockBackend so that interface stays about unlock only.
+type statusReporter interface {
+	SupervisorStatus() []ServiceStatus
+}
+
+// SupervisorStatus returns the supervised-service snapshot if the backend provides one, else nil.
+func (u *unlockService) SupervisorStatus() []ServiceStatus {
+	if sr, ok := u.backend.(statusReporter); ok {
+		return sr.SupervisorStatus()
+	}
+	return nil
+}
+
 func newUnlockService(backend UnlockBackend) *unlockService {
 	return &unlockService{
 		backend:  backend,

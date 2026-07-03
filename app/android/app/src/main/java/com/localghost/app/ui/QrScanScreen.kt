@@ -231,7 +231,7 @@ fun QrScanScreen(
                         // safe , connection refused, re-scan). So we latch it at once. An erasure-path decode
                         // ("conf"/"logo", e.g. a logo or blurred code) is more willing to manufacture a
                         // consistent-but-wrong payload, so those still require the same payload on two frames.
-                        val payload = "${result.link.host}:${result.link.port}:${result.link.certFingerprint}"
+                        val payload = "${result.link.host}:${result.link.port}:${result.link.code}:${result.link.certFingerprint}"
                         overlay = result.overlay
                         timing.lastSeenAt = now
                         if (foundLink == null) {

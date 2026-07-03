@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/LocalGhostDao/localghost/server/internal/hw"
 	"github.com/LocalGhostDao/localghost/server/internal/profile"
 	"github.com/LocalGhostDao/localghost/server/internal/setup"
 )
@@ -158,10 +159,42 @@ func (s *System) formatLUKS(amk []byte) error {
 		_ = run("cryptsetup", "close", s.mapperName())
 		return fmt.Errorf("mkfs.ext4: %w", err)
 	}
+	// Write services.conf into the fresh volume: mount it briefly, write the config (ports + generated
+	// pg/redis passwords + daemon health ports), unmount. This is the ONE place the credentials are
+	// generated and persisted , inside the encrypted volume, crypto-erased with the data. Done here
+	// because the mapper is already open from the format above.
+	if err := s.writeServicesConfig(); err != nil {
+		_ = run("cryptsetup", "close", s.mapperName())
+		return fmt.Errorf("write services.conf: %w", err)
+	}
 	if err := run("cryptsetup", "close", s.mapperName()); err != nil {
 		return fmt.Errorf("close container after format: %w", err)
 	}
 	return nil
+}
+
+// writeServicesConfig mounts the freshly-formatted mapper, writes services.conf, and unmounts. The
+// config carries generated Postgres/Redis passwords, so this is the single provision-time credential
+// generation , DataStore later reads the same file to start the databases with these exact values.
+func (s *System) writeServicesConfig() error {
+	tmp, err := os.MkdirTemp("", "ghost-provision-mnt")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
+	if err := run("mount", s.mapperPath(), tmp); err != nil {
+		return fmt.Errorf("mount for services.conf: %w", err)
+	}
+	cfg, cerr := hw.DefaultServicesConfig()
+	if cerr != nil {
+		_ = run("umount", tmp)
+		return cerr
+	}
+	werr := hw.WriteServicesConfig(tmp, cfg)
+	if uerr := run("umount", tmp); uerr != nil && werr == nil {
+		werr = fmt.Errorf("umount after services.conf: %w", uerr)
+	}
+	return werr
 }
 
 // --- PIN registry ---

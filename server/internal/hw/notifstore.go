@@ -1,6 +1,7 @@
 package hw
 
 import (
+	"path/filepath"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -231,7 +232,7 @@ func (s *NotifStore) Delete(slot int, id int64) error {
 // --- helpers ---
 
 func (s *NotifStore) readRecent(slot int) ([]Notification, error) {
-	out, err := exec.Command("redis-cli", "-p", strconv.Itoa(redisPort(slot)), "LRANGE", recentKey, "0", "-1").Output()
+	out, err := exec.Command("redis-cli", "-p", strconv.Itoa(redisPort(slot)), "-a", s.redisPass(slot), "LRANGE", recentKey, "0", "-1").Output()
 	if err != nil {
 		return nil, fmt.Errorf("read recent: %w", err)
 	}
@@ -250,7 +251,7 @@ func (s *NotifStore) readRecent(slot int) ([]Notification, error) {
 }
 
 func (s *NotifStore) getCursor(slot int, device string) (int64, error) {
-	out, err := exec.Command("redis-cli", "-p", strconv.Itoa(redisPort(slot)), "GET", cursorKey(device)).Output()
+	out, err := exec.Command("redis-cli", "-p", strconv.Itoa(redisPort(slot)), "-a", s.redisPass(slot), "GET", cursorKey(device)).Output()
 	if err != nil {
 		return 0, err
 	}
@@ -304,8 +305,20 @@ func (s *NotifStore) insertPostgres(slot int, n Notification) (int64, error) {
 	return id, nil
 }
 
+// redisPass reads the Redis password from services.conf on the mount (derived from the pg socket
+// path, which is <mount>/postgres). Empty string if unreadable , an unauthenticated call then fails
+// against the password-protected server, which is the correct visible failure, not a silent bypass.
+func (s *NotifStore) redisPass(slot int) string {
+	mount := filepath.Dir(s.pgSocketFor(slot))
+	c, err := LoadServicesConfig(mount)
+	if err != nil {
+		return ""
+	}
+	return c.Redis.Password
+}
+
 func (s *NotifStore) redis(slot int, args ...string) error {
-	full := append([]string{"-p", strconv.Itoa(redisPort(slot))}, args...)
+	full := append([]string{"-p", strconv.Itoa(redisPort(slot)), "-a", s.redisPass(slot)}, args...)
 	out, err := exec.Command("redis-cli", full...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("redis %v: %v: %s", args, err, strings.TrimSpace(string(out)))

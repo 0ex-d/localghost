@@ -1,7 +1,6 @@
 package pair
 
 import (
-	"encoding/base64"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -22,9 +21,10 @@ func Parse(raw string) (EnrollLink, error) {
 		return EnrollLink{}, err
 	}
 	host := strings.TrimSpace(q.Get("host"))
+	code := strings.TrimSpace(q.Get("code"))
 	fp := strings.TrimSpace(q.Get("fp"))
-	if host == "" || fp == "" {
-		return EnrollLink{}, fmt.Errorf("link missing host or fingerprint")
+	if host == "" || code == "" || fp == "" {
+		return EnrollLink{}, fmt.Errorf("link missing host, code, or fingerprint")
 	}
 	port := 8443
 	if p := strings.TrimSpace(q.Get("port")); p != "" {
@@ -35,26 +35,10 @@ func Parse(raw string) (EnrollLink, error) {
 		port = n
 	}
 	return EnrollLink{
-		Host:          host,
-		Port:          port,
-		Fingerprint:   normaliseFp(fp),
-		BoxName:       strings.TrimSpace(q.Get("name")),
-		DeviceCertDER: decodeB64URL(q.Get("cert")),
-		DeviceKeyDER:  decodeB64URL(q.Get("key")),
+		Host:        host,
+		Port:        port,
+		Code:        code,
+		Fingerprint: normaliseFp(fp),
+		BoxName:     strings.TrimSpace(q.Get("name")),
 	}, nil
-}
-
-// decodeB64URL decodes an unpadded-or-padded base64url value to its raw bytes (DER is binary, so
-// no UTF-8 step), mirroring the app: empty or malformed input reads as absent rather than failing
-// the whole link, because cert/key are optional at parse time (the enrol flow requires them).
-func decodeB64URL(v string) []byte {
-	v = strings.TrimRight(strings.TrimSpace(v), "=")
-	if v == "" {
-		return nil
-	}
-	b, err := base64.RawURLEncoding.DecodeString(v)
-	if err != nil {
-		return nil
-	}
-	return b
 }

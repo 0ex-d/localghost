@@ -4,16 +4,10 @@ import (
 	"errors"
 )
 
-// From-scratch QR encoder: byte mode, versions 1-20, EC level M with a level-L fallback for
-// payloads above M's ceiling. Replaces rsc.io/qr so LocalGhost
-// carries no third-party encoding code. The enrollment payload was short ASCII; embedding the client
-// certificate in the enroll link pushed it to ~400 bytes, which needs version 15, so the range now
-// runs to version 20 (669 data codewords at M, 666 payload bytes after mode and count bits).
-// Versions 7 and up carry the two 18-module version
-// information blocks the spec requires; earlier revisions of this encoder omitted them, which made
-// every v7-10 symbol non-standard (the app's decoder reserves those modules, so the bit streams
-// misaligned and nothing above v6 scanned). Validated by round-trip against an independently written
-// decoder across payload sizes, plus golden version-information constants taken from the spec.
+// From-scratch QR encoder: byte mode, versions 1-10, EC level M. Replaces rsc.io/qr so LocalGhost
+// carries no third-party encoding code. The enrollment payload is short ASCII, so byte mode and a
+// small version range cover it. Validated by round-trip against an independently written decoder
+// across payload sizes (a spec-correct symbol is one a scanner reads; the round-trip proves it).
 //
 // A bad encoder fails safe at this seam: the QR just will not scan and you fall back to typing the
 // three values. Mask selection uses the full penalty scoring so the symbol is robust, not just
@@ -59,107 +53,30 @@ var versionM = map[int][6]int{
 	8:  {154, 22, 2, 38, 2, 39},
 	9:  {182, 22, 3, 36, 2, 37},
 	10: {216, 26, 4, 43, 1, 44},
-	11: {254, 30, 1, 50, 4, 51},
-	12: {290, 22, 6, 36, 2, 37},
-	13: {334, 22, 8, 37, 1, 38},
-	14: {365, 24, 4, 40, 5, 41},
-	15: {415, 24, 5, 41, 5, 42},
-	16: {453, 28, 7, 45, 3, 46},
-	17: {507, 28, 10, 46, 1, 47},
-	18: {563, 26, 9, 43, 4, 44},
-	19: {627, 26, 3, 44, 11, 45},
-	20: {669, 26, 3, 41, 13, 42},
 }
 
-// versionL[v] = same layout at EC level L. Level M is the default for its stronger correction; L
-// exists ONLY as the fallback for payloads above M's 666-byte ceiling (a DER cert + key + link is
-// ~700-800 bytes). The enrolment QR is terminal-rendered , flat, high-contrast, no logo, no print
-// damage , which is exactly the regime where L's weaker correction costs nothing. Totals verified
-// against symbol codeword counts (e.g. v15: 523 data + 6x22 EC = 655; v20: 861 + 8x28 = 1085).
-var versionL = map[int][6]int{
-	1:  {19, 7, 1, 19, 0, 0},
-	2:  {34, 10, 1, 34, 0, 0},
-	3:  {55, 15, 1, 55, 0, 0},
-	4:  {80, 20, 1, 80, 0, 0},
-	5:  {108, 26, 1, 108, 0, 0},
-	6:  {136, 18, 2, 68, 0, 0},
-	7:  {156, 20, 2, 78, 0, 0},
-	8:  {194, 24, 2, 97, 0, 0},
-	9:  {232, 30, 2, 116, 0, 0},
-	10: {274, 18, 2, 68, 2, 69},
-	11: {324, 20, 4, 81, 0, 0},
-	12: {370, 24, 2, 92, 2, 93},
-	13: {428, 26, 4, 107, 0, 0},
-	14: {461, 30, 3, 115, 1, 116},
-	15: {523, 22, 5, 87, 1, 88},
-	16: {589, 24, 5, 98, 1, 99},
-	17: {647, 28, 1, 107, 5, 108},
-	18: {721, 30, 5, 120, 1, 121},
-	19: {795, 28, 3, 113, 4, 114},
-	20: {861, 28, 3, 107, 5, 108},
-}
-
-// EC levels this encoder emits. The 2-bit values are the format-information encoding from the spec
-// (M=00, L=01); the app's decoder reads the level from the format bits of any standard symbol, so
-// no app change is needed when a symbol arrives at L.
-const (
-	levelM byte = 0b00
-	levelL byte = 0b01
-)
-
-func versionTable(level byte) map[int][6]int {
-	if level == levelL {
-		return versionL
-	}
-	return versionM
-}
-
-// alignCenters computes the alignment-pattern centre coordinates from the spec's placement rule
-// rather than tabulating them, the same derivation the app's decoder uses, so both codebases agree
-// by construction and there is no 40-row table to mistype. Reproduces the previous hand-written
-// table exactly for v2-10 (asserted in tests). The v32 special case is kept for completeness even
-// though this encoder stops at v20.
-func alignCenters(v int) []int {
-	if v == 1 {
-		return nil
-	}
-	count := v/7 + 2
-	step := (v*4 + count*2 + 1) / (2*count - 2) * 2
-	if v == 32 {
-		step = 26
-	}
-	last := 17 + 4*v - 7
-	pos := make([]int, count)
-	pos[0] = 6
-	for j := 1; j < count; j++ {
-		pos[j] = last - (count-1-j)*step
-	}
-	return pos
+var alignCenters = map[int][]int{
+	1: {}, 2: {6, 18}, 3: {6, 22}, 4: {6, 26}, 5: {6, 30}, 6: {6, 34},
+	7: {6, 22, 38}, 8: {6, 24, 42}, 9: {6, 26, 46}, 10: {6, 28, 50},
 }
 
 func qrSide(v int) int { return 17 + 4*v }
 
-var ErrPayloadTooBig = errors.New("payload too big for QR versions 1-20 (666 bytes at level M, 858 at the level-L fallback)")
+var ErrPayloadTooBig = errors.New("payload too big for QR versions 1-10 at EC level M")
 
-// chooseVersion picks the smallest symbol: every payload that fits level M uses M (stronger
-// correction, unchanged behaviour for everything that fit before); only payloads above M's ceiling
-// fall back to level L, whose v20 holds 858 bytes.
-func chooseVersion(nbytes int) (int, byte, error) {
-	for _, level := range []byte{levelM, levelL} {
-		table := versionTable(level)
-		for v := 1; v <= 20; v++ {
-			ccbits := 8
-			if v >= 10 {
-				ccbits = 16
-			}
-			capBits := table[v][0] * 8
-			need := 4 + ccbits + nbytes*8
-			if need <= capBits {
-				return v, level, nil
-			}
+func chooseVersion(nbytes int) (int, error) {
+	for v := 1; v <= 10; v++ {
+		ccbits := 8
+		if v >= 10 {
+			ccbits = 16
+		}
+		capBits := versionM[v][0] * 8
+		need := 4 + ccbits + nbytes*8
+		if need <= capBits {
+			return v, nil
 		}
 	}
-	return 0, 0, ErrPayloadTooBig
+	return 0, ErrPayloadTooBig
 }
 
 func rsGen(n int) []int {
@@ -190,8 +107,8 @@ func rsEC(data []int, n int) []int {
 	return res[len(data):]
 }
 
-func encodeData(text string, v int, level byte) []int {
-	cfg := versionTable(level)[v]
+func encodeData(text string, v int) []int {
+	cfg := versionM[v]
 	total, ecpb, g1b, g1d, g2b, g2d := cfg[0], cfg[1], cfg[2], cfg[3], cfg[4], cfg[5]
 	data := []byte(text)
 	ccbits := 8
@@ -331,7 +248,7 @@ func (g *grid) placeFunctionPatterns(v int) {
 	g.m[4*v+9][8] = 1
 	g.res[4*v+9][8] = true
 	// alignment
-	centers := alignCenters(v)
+	centers := alignCenters[v]
 	for _, r := range centers {
 		for _, c := range centers {
 			if (r <= 8 && c <= 8) || (r <= 8 && c >= n-9) || (r >= n-9 && c <= 8) {
@@ -360,38 +277,6 @@ func (g *grid) placeFunctionPatterns(v int) {
 		g.res[8][n-1-i] = true
 		g.res[n-1-i][8] = true
 	}
-	// Version information (v >= 7): two 18-module blocks carrying the BCH(18,6)-coded version, one
-	// just left of the top-right finder (rows 0..5, cols n-11..n-9) and one just above the bottom-left
-	// finder (rows n-11..n-9, cols 0..5). Bit i (LSB first) sits at (i/3, n-11+i%3) and its transpose.
-	// These are fixed per version, independent of the mask, so they are written once here and reserved;
-	// masked() leaves reserved modules alone. Omitting them (as this encoder originally did) makes a
-	// v7+ symbol non-standard: a spec decoder skips these 36 modules when reading data, so every data
-	// bit after them lands one position off and Reed-Solomon fails on the whole symbol.
-	if v >= 7 {
-		vb := versionBits(v)
-		for i := 0; i < 18; i++ {
-			bit := (vb >> i) & 1
-			r1, c1 := i/3, n-11+i%3
-			g.m[r1][c1] = bit
-			g.res[r1][c1] = true
-			g.m[c1][r1] = bit
-			g.res[c1][r1] = true
-		}
-	}
-}
-
-// versionBits computes the 18-bit version information: the 6-bit version number followed by its
-// 12-bit BCH(18,6) remainder, generator polynomial 0x1F25 (spec Annex D; the worked example there is
-// v7 = 0x07C94, asserted in tests along with the value read from a known-good third-party symbol).
-func versionBits(v int) int {
-	d := v << 12
-	g := 0x1F25
-	for i := 17; i >= 12; i-- {
-		if (d>>i)&1 == 1 {
-			d ^= g << (i - 12)
-		}
-	}
-	return (v << 12) | d
 }
 
 func abs(x int) int {
@@ -569,8 +454,8 @@ func formatBits(ecLevel, mask int) []int {
 	return out
 }
 
-func placeFormat(m [][]int, n, mask int, level byte) {
-	fb := formatBits(int(level), mask) // M = 00, L = 01
+func placeFormat(m [][]int, n, mask int) {
+	fb := formatBits(0b00, mask) // M = 00
 	c1 := [][2]int{{8, 0}, {8, 1}, {8, 2}, {8, 3}, {8, 4}, {8, 5}, {8, 7}, {8, 8}, {7, 8}, {5, 8}, {4, 8}, {3, 8}, {2, 8}, {1, 8}, {0, 8}}
 	for i, rc := range c1 {
 		m[rc[0]][rc[1]] = fb[i]
@@ -591,15 +476,14 @@ type qrMatrix struct {
 func (q qrMatrix) Size() int          { return q.n }
 func (q qrMatrix) Dark(x, y int) bool { return q.m[y][x] == 1 }
 
-// EncodeQR encodes text into a QR symbol (byte mode, versions 1-20, level M or the level-L
-// fallback for payloads above 666 bytes) with full mask selection, returning the Matrix the
-// terminal renderer draws.
+// EncodeQR encodes text into a QR symbol (byte mode, versions 1-10, EC level M) with full mask
+// selection, returning the Matrix the terminal renderer draws.
 func EncodeQR(text string) (Matrix, error) {
-	v, level, err := chooseVersion(len([]byte(text)))
+	v, err := chooseVersion(len([]byte(text)))
 	if err != nil {
 		return nil, err
 	}
-	cws := encodeData(text, v, level)
+	cws := encodeData(text, v)
 	g := newGrid(v)
 	g.placeFunctionPatterns(v)
 	g.placeData(cws)
@@ -607,7 +491,7 @@ func EncodeQR(text string) (Matrix, error) {
 	var best [][]int
 	for mask := 0; mask < 8; mask++ {
 		cand := g.masked(mask)
-		placeFormat(cand, g.n, mask, level)
+		placeFormat(cand, g.n, mask)
 		sc := penalty(cand, g.n)
 		if bestScore < 0 || sc < bestScore {
 			bestScore = sc

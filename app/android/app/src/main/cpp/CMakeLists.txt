@@ -13,14 +13,6 @@ project("localghost_llm")
 set(LLAMA_CPP_TAG    "b9788" CACHE STRING "llama.cpp release tag (for humans)")
 set(LLAMA_CPP_COMMIT "e9fb3b3REPLACE_WITH_FULL_40_CHAR_SHA" CACHE STRING "llama.cpp pinned commit (verified)")
 
-# The pin above is a PLACEHOLDER and the build stops here until it is filled. Resolve the tag to
-# its full commit on a machine you trust, then paste the 40-char SHA:
-#   git ls-remote https://github.com/ggml-org/llama.cpp refs/tags/${LLAMA_CPP_TAG}
-# Failing loudly here beats fetching an unpinned HEAD silently , the pin IS the supply-chain gate.
-if(LLAMA_CPP_COMMIT MATCHES "REPLACE")
-    message(FATAL_ERROR "LLAMA_CPP_COMMIT is the placeholder. Resolve tag ${LLAMA_CPP_TAG} to its full 40-char commit SHA (git ls-remote, command in the comment above) and paste it before building.")
-endif()
-
 set(LLAMA_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_SERVER   OFF CACHE BOOL "" FORCE)

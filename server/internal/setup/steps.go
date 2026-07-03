@@ -67,7 +67,7 @@ type Result struct {
 var (
 	ErrStepFailed   = errors.New("setup step failed")
 	ErrNginxMissing = errors.New("nginx is not installed; install it and re-run setup")
-	ErrTPMUnusable  = errors.New("no usable TPM 2.0; wipe will be best-effort and a short PIN is not safe from offline brute force")
+	ErrTPMUnusable  = errors.New("--seal tpm requires a usable TPM 2.0; none found. Pass --seal software to provision the PIN-derived tier instead (encrypted, but no hardware lockout)")
 	ErrDryRunDirty  = errors.New("dry run found problems; nothing was applied")
 )
 
