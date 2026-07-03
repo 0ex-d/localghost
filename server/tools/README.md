@@ -1,99 +1,105 @@
 # First-time box setup, start to finish
 
-Who runs what, in order. Two users: `root` for anything that touches the system (packages, the
-ghost user, the disk, nginx, systemd) and your normal user (`coder` here) for building and tests.
-The data disk in these examples is `/dev/nvme1n1` , the clean 8TB NVMe with NO partitions in
-lsblk. Setup will destroy whatever is on the disk you pass it. Read the plan output before apply.
+Who runs what, in order. Two users: `root` for anything that touches the system (packages, user
+grants, the disk, nginx, systemd) and the service user , `ghost` by default, `--user coder` for a
+dev box where you want the daemons under your own account. The data disk in these examples is
+`/dev/nvme1n1`, the clean NVMe with NO partitions in lsblk. Setup destroys whatever is on the disk
+you pass it. Read the plan output before apply.
+
+The order matters at one point: build and INSTALL the app on the phone BEFORE ghost-setup renders
+the QR. The QR contains the device certificate and private key , it is a credential , so the right
+flow is scan-immediately-and-clear-the-screen, not leave-it-on-screen-while-gradle-runs.
 
 ## 0. Prerequisites (root, once)
 
-- fTPM enabled in the BIOS (Intel PTT on this board). Verify: `ls /dev/tpm*` shows `/dev/tpmrm0`.
-- The domain's A record pointing at your public IP, and your router forwarding TCP 443 to this
-  box's LAN address, if you want remote access. LAN-only works without either.
+- fTPM enabled in the BIOS (Intel PTT here). Verify: `ls /dev/tpm*` shows `/dev/tpmrm0`.
+- If you want remote access: the domain's A record at your public IP, and the router forwarding
+  TCP 443 to this box. LAN-only works without either.
 - The repo on the box, readable by both users.
 
 ## 1. System prep , root
 
     cd server
-    ./tools/server_setup_root.sh
+    ./tools/server_setup_root.sh --user coder --host lgs.vladcealicu.com
 
-Packages, the `ghost` user, directories. Idempotent; safe to re-run.
+Packages, TPM (tss) grant, scoped ghost.* sudo, and /etc/ghost/ghost.env owned by the service user
+with GHOST_HOST filled in. Idempotent, with one deliberate exception: an EXISTING ghost.env keeps
+its contents (so re-runs never clobber a customised host) , delete it first if you want it
+rewritten. The env PATH includes /usr/sbin, which the unlock path needs (cryptsetup lives there).
 
-## 2. Build + tests , coder
+## 2. Check + build , service user, NEW login
 
-    cd server
-    ./tools/server_setup_user.sh
+Group grants are stamped at login; the session that existed before step 1 does not have tss.
+`exec su - coder` or reconnect, then:
 
-Builds everything into `./bin` and runs the test suite. The real box needs the TPM backend, so if
-the script built the default (sim) binaries, rebuild the daemon explicitly:
+    ./tools/server_setup_user.sh --host lgs.vladcealicu.com   # --host optional if already set
+    make box TAGS=tpm                                          # the REAL backend; sim is default
 
-    go build -tags tpm -o bin ./...
+Expect all OK except a GHOST_HOST reachability WARN , nothing is listening yet, that is the
+timeline, not a fault. The sim/tpm distinction is the one to respect: a sim build on the real box
+means your PINs guard a simulation while the disk sits unsealed.
 
-The sim backend is for development; on the box, an accidental sim build means your PINs guard a
-simulation while the real disk sits unsealed. Check before proceeding.
+## 3. Build + install the app , before any QR exists
 
-## 3. Dry run , root
+One blocker first: the llama.cpp pin in `app/src/main/cpp/CMakeLists.txt` is a placeholder and
+CMake refuses to configure until it is filled. On any trusted machine:
 
-    ./bin/ghost-setup --disk /dev/nvme1n1 --host <LAN-IP> --domain lgs.vladcealicu.com --plan
+    git ls-remote https://github.com/ggml-org/llama.cpp refs/tags/b9788
 
-Prints every step it would take and touches nothing. The one line to read twice is the partition
-step: confirm the device is the empty NVMe (`nvme1n1` here), not the OS disk (`nvme2n1`), not the
-bitcoin SSD (`nvme0n1`), not the ZFS pool members (sda-sdf). There is no undo for picking wrong.
+Paste the full 40-char SHA into LLAMA_CPP_COMMIT. Then build per COMPILE.md , on your dev machine
+with Android Studio/gradle, or on this box after `app/tools/debian_setup.sh`. For bring-up:
 
-`--host` is the LAN address the phone enrols against; `--domain` adds the public nginx config and
-verifies DNS. The server cert is issued for the host, but the app pins the certificate FINGERPRINT,
-not the name, so reaching the same box via the domain later works by design.
+    ./gradlew assembleDebug        # first native build compiles ggml for arm64; it takes a while
+    adb install -r app/build/outputs/apk/debug/app-debug.apk
 
-## 4. Apply , root
+No adb? Serve the APK over the LAN (`python3 -m http.server` in the outputs dir), download on the
+phone, allow the install. For the real thing later, `tools/release.sh` builds the signed release
+and VERIFY.md covers proving the APK matches the source.
 
-    ./bin/ghost-setup --disk /dev/nvme1n1 --host <LAN-IP> --domain lgs.vladcealicu.com --apply
+## 4. Dry run , root
 
-Prompts for the main PIN and the wipe PIN on the tty (no echo, nothing in shell history). Pick them
-now; make them different; the wipe PIN destroys everything and then lies about it, which is the
-point. Apply partitions the disk, creates the CA (issuer CN is a deliberately boring "ca"),
-issues the server cert, writes nginx and the systemd units, starts the daemons, and renders the
-enrolment QR.
+    ./bin/ghost-setup --user coder --disk /dev/nvme1n1 \
+        --host lgs.vladcealicu.com --domain lgs.vladcealicu.com
 
-If the DNS verification fails because the domain resolves to your PUBLIC IP while the box only
-knows its LAN address (NAT), re-run without `--domain`, finish the LAN setup, and add the domain
-config afterwards; the enrolment itself never needed the domain.
+No flag needed: the dry run IS the default , provisioning requires the explicit --apply. Prints
+every step, touches nothing. Read the partition line twice: the empty NVMe, not the OS
+disk, not anything mounted. There is no undo for picking wrong. The app pins the certificate
+FINGERPRINT, not the name, so host-as-domain works on the LAN too (if your router does NAT
+hairpinning; if it does not, use the LAN IP as --host and keep --domain).
 
-## 5. Enrol , phone
+## 5. Apply , root
 
-Scan the QR from step 4 with the app. Scanning IS enrolment: the QR carries the device certificate
-and key, there is no pairing code and nothing to confirm on the box. The QR is therefore a
-credential , clear the terminal (or close the SSH session) once the phone has it. Need a fresh QR
-later? `./bin/ghost-qr --ca /etc/ghost/ca --host <LAN-IP>` as root; each run mints a fresh device
-identity, so always scan the newest one.
+Same command with `--apply`. Prompts for the main PIN and the wipe PIN on the tty (no echo, no
+history). Different values; the wipe PIN destroys everything and then lies about it, which is the
+point. Partitions the disk, mints the CA (issuer is a deliberately boring "ca"), writes nginx and
+the units, starts the daemons, renders the QR.
 
-Then unlock with the main PIN in the app. A wrong PIN looks exactly like a down box; that is not a
-bug report, that is the product.
+If the domain DNS check fails on NAT (public A record vs LAN address), re-run without --domain,
+finish, add the domain config after , enrolment never needed it.
 
-## 6. Models , root
+## 6. Enrol , phone in hand, app installed
 
-    mkdir -p /var/lib/ghost/models
+Scan the QR from step 5. Scanning IS enrolment , no code, no confirmation, no network call. Clear
+the terminal once the phone has it. Fresh QR any time (each mints a fresh identity; scan the
+newest): `./bin/ghost-qr --ca /etc/ghost/ca --host lgs.vladcealicu.com` as root. Then unlock with
+the main PIN. A wrong PIN looks exactly like a down box; that is the product, not a bug.
+
+## 7. Models , root
+
     cp <model>.gguf /var/lib/ghost/models/
     sha256sum /var/lib/ghost/models/<model>.gguf
 
-Add an entry to `/var/lib/ghost/models/catalog.json`:
+Entry in `/var/lib/ghost/models/catalog.json`:
 
     [{"id": "qwen-1.5b", "name": "Qwen 1.5B", "detail": "small local model",
       "sizeBytes": 1234567890, "sha256": "<the hash>"}]
 
-The app's Models screen lists the catalogue; downloads resume across drops (Range requests). The
-box never fetches models from the internet itself , you put them there, deliberately.
-
-## The app
-
-One blocker before it builds: the llama.cpp pin in `app/src/main/cpp/CMakeLists.txt` is a
-placeholder and CMake fails loudly until you fill it. On any trusted machine:
-
-    git ls-remote https://github.com/ggml-org/llama.cpp refs/tags/b9788
-
-Paste the full 40-char SHA into `LLAMA_CPP_COMMIT`, then build per COMPILE.md (first native build
-compiles ggml for arm64 , it takes a while). Install the APK, and you are at step 5.
+Downloads resume across drops (Range). The box never fetches models itself , you put them there,
+deliberately.
 
 ## Undo
 
-`./tools/server_setup_undo.sh` (root) walks the system pieces back. It does not resurrect data on
-the disk you partitioned; nothing does, which is also the product.
+`./tools/server_setup_undo.sh` walks the root-setup pieces back , but note it deletes the tss
+GROUP system-wide, which on a shared box is more housekeeping than you asked for. For a config
+do-over, `rm /etc/ghost/ghost.env` and re-run step 1 is usually all you want. Nothing resurrects
+data on a disk you partitioned; nothing is supposed to.

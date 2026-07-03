@@ -28,6 +28,7 @@ type DaemonConfig struct {
 	StateDir string // /var/lib/ghost
 	Disk     string // the raw LUKS data disk ghost.secd mounts on unlock, e.g. /dev/nvme1n1
 	Port     int    // mTLS port behind nginx
+	SvcUser  string // the unprivileged user the daemons run as; empty means "ghost"
 }
 
 // SystemdUnits renders a unit per daemon. ghost.secd is the only one that binds a public-facing
@@ -77,7 +78,11 @@ func renderUnit(name, execDir string, cfg DaemonConfig) string {
 	} else {
 		fmt.Fprintf(&b, "ExecStart=%s/%s\n", execDir, name)
 	}
-	fmt.Fprintf(&b, "User=ghost\nGroup=ghost\n")
+	svc := cfg.SvcUser
+	if svc == "" {
+		svc = "ghost" // the production default; --user on ghost-setup overrides for dev boxes
+	}
+	fmt.Fprintf(&b, "User=%s\nGroup=%s\n", svc, svc)
 	fmt.Fprintf(&b, "Restart=on-failure\nRestartSec=2\n")
 	// Hardening , a compromised daemon should not be able to roam.
 	fmt.Fprintf(&b, "NoNewPrivileges=yes\n")

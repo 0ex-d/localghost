@@ -3,8 +3,8 @@
 // enrolment , there is no pairing code and nothing to arm on the daemon.
 //
 // Flow:
-//	ghost-setup --disk /dev/nvme0n1 --host 192.168.1.50 --plan      # dry run, shows what it will do
-//	ghost-setup --disk /dev/nvme0n1 --host 192.168.1.50 --apply     # provisions, then prints QR+code
+//	ghost-setup --disk /dev/nvme0n1 --host 192.168.1.50             # dry run (the default), shows what it will do
+//	ghost-setup --disk /dev/nvme0n1 --host 192.168.1.50 --apply     # provisions, then prints the QR
 //
 // After --apply it prints the exact command to launch the daemon with enrolment armed.
 package main
@@ -146,6 +146,7 @@ func pickDisk() (string, error) {
 
 func main() {
 	disk := flag.String("disk", "", "disk to provision, e.g. /dev/nvme0n1 (DESTRUCTIVE, whole disk)")
+	svcUser := flag.String("user", "ghost", "unprivileged user the daemons run as (must exist; server_setup_root.sh --user <name> prepares it)")
 	host := flag.String("host", "", "box LAN IP/hostname the phone connects to")
 	domain := flag.String("domain", "", "optional public domain (omit for the zero-server QR default)")
 	caDir := flag.String("ca", "/etc/ghost/ca", "box CA + cert directory")
@@ -233,6 +234,7 @@ func main() {
 	}
 	units := setup.SystemdUnits(*execDir, setup.DaemonConfig{
 		Host: hostVal, CaDir: *caDir, StateDir: *stateDir, Disk: diskVal, Port: *port,
+		SvcUser: *svcUser,
 	})
 
 	plan := setup.DefaultPlan(sys, withDomain, nil, nginxConf, units)
