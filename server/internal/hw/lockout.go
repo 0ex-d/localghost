@@ -121,17 +121,65 @@ func SetupLockout(device, pin string) error {
 }
 
 // applyDAParams sets maxTries/recovery/lockoutRecovery, authorised by the lockout auth.
+//
+// Hand-rolled wire format, stated plainly: go-tpm's direct API (v0.9.8) has not implemented the
+// TPM2_DictionaryAttackParameters command struct , the compiler, not this comment, is the proof ,
+// and the alternative was importing the whole legacy package for one call. The command is a fixed
+// layout (TPM 2.0 Part 3, section 25.3) with a password session, which is the only session kind
+// this file ever uses, so the auth area below is the complete case, not a simplification:
+//
+//	tag=TPM_ST_SESSIONS | size | cc=0x13A | lockoutHandle |
+//	authSize | [ TPM_RS_PW | nonce(empty) | attrs=continueSession | hmac=lockoutAuth ] |
+//	newMaxTries | newRecoveryTime | lockoutRecovery
+//
+// The response for a parameterless-return command is just the 10-byte header; responseCode 0 is
+// success. Anything else is returned raw in hex , mapping TPM_RC space to prose is the library's
+// job, and the one caller only needs works/does-not.
 func applyDAParams(tpm transport.TPMCloser, lockoutAuth []byte) error {
-	_, err := tpm2.DictionaryAttackParameters{
-		LockHandle: tpm2.AuthHandle{
-			Handle: tpm2.TPMRHLockout,
-			Auth:   tpm2.PasswordAuth(lockoutAuth),
-		},
-		NewMaxTries:     daMaxTries,
-		NewRecoveryTime: daRecoverySec,
-		LockoutRecovery: daLockoutRecoverySec,
-	}.Execute(tpm)
-	return err
+	const (
+		tagSessions   = uint16(0x8002)
+		ccDAParams    = uint32(0x0000013A)
+		rhLockout     = uint32(0x4000000A)
+		rsPW          = uint32(0x40000009)
+		attrsContinue = byte(0x01)
+	)
+	auth := make([]byte, 0, 16+len(lockoutAuth))
+	auth = be32(auth, rsPW)
+	auth = be16(auth, 0) // empty nonce
+	auth = append(auth, attrsContinue)
+	auth = be16(auth, uint16(len(lockoutAuth)))
+	auth = append(auth, lockoutAuth...)
+
+	body := make([]byte, 0, 64)
+	body = be32(body, ccDAParams)
+	body = be32(body, rhLockout)
+	body = be32(body, uint32(len(auth)))
+	body = append(body, auth...)
+	body = be32(body, daMaxTries)
+	body = be32(body, daRecoverySec)
+	body = be32(body, daLockoutRecoverySec)
+
+	cmd := make([]byte, 0, 6+len(body))
+	cmd = be16(cmd, tagSessions)
+	cmd = be32(cmd, uint32(6+len(body)))
+	cmd = append(cmd, body...)
+
+	rsp, err := tpm.Send(cmd)
+	if err != nil {
+		return fmt.Errorf("DictionaryAttackParameters send: %w", err)
+	}
+	if len(rsp) < 10 {
+		return fmt.Errorf("DictionaryAttackParameters: short response (%d bytes)", len(rsp))
+	}
+	if rc := uint32(rsp[6])<<24 | uint32(rsp[7])<<16 | uint32(rsp[8])<<8 | uint32(rsp[9]); rc != 0 {
+		return fmt.Errorf("DictionaryAttackParameters: TPM_RC 0x%08X", rc)
+	}
+	return nil
+}
+
+func be16(b []byte, v uint16) []byte { return append(b, byte(v>>8), byte(v)) }
+func be32(b []byte, v uint32) []byte {
+	return append(b, byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
 }
 
 // ChangeLockoutAuth re-keys the lockout hierarchy from pinAuth(old) to pinAuth(new). Call this from
