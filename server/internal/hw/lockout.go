@@ -38,12 +38,28 @@ const (
 	daLockoutRecoverySec  = 24 * 60 * 60 // after a full lockout, wait this before lockout auth is usable
 )
 
-// Our persisted objects live at 0x81010000+slot (see NewTPMSealedKey); the parent is transient. Any
-// persistent handle outside this window is another tenant's , which the sole-tenant check flags.
+// Our persisted objects live at 0x81010000+slot (see NewTPMSealedKey); the parent is transient.
 const (
 	ourHandleLo uint32 = 0x81010000
 	ourHandleHi uint32 = 0x8101000F
 )
+
+// TCG-reserved provisioning handles. The platform (systemd-cryptenroll, clevis, tpm2-tss FAPI, the
+// kernel RM) places Storage Root Keys here automatically; no application put them there and every
+// TPM user coexists with them. The TCG "TPM v2.0 Provisioning Guidance" reserves 0x81000001 for the
+// RSA SRK and 0x81000002 for the ECC SRK. They are `noda` (exempt from dictionary-attack lockout by
+// construction), so LocalGhost's global DA policy never governs them anyway. Treating them as foreign
+// tenants made a stock Debian box fail the sole-tenant check; they are shared infrastructure.
+//
+// Deliberately NOT excluded: 0x81010001. The TCG guidance also lists it (RSA EK cert handle), but it
+// collides with LocalGhost's OWN window , our sealed keys live at 0x81010000+slot, so slot 1 IS
+// 0x81010001. Excluding it would make the check treat our own slot-1 key as platform infrastructure
+// and skip it. Our window already covers that handle as ours; the EK-address coincidence must not
+// override that, or a real collision would be silently masked.
+var reservedProvisioningHandles = map[uint32]bool{
+	0x81000001: true, // RSA SRK
+	0x81000002: true, // ECC SRK
+}
 
 // ForeignPersistentHandles returns every persistent handle on the TPM that LocalGhost did not
 // create. An empty slice means we are the sole tenant and it is safe to set the GLOBAL DA policy.
@@ -72,6 +88,9 @@ func ForeignPersistentHandles(device string) ([]uint32, error) {
 	var foreign []uint32
 	for _, h := range handles.Handle {
 		v := uint32(h)
+		if reservedProvisioningHandles[v] {
+			continue // platform SRK/EK, shared infrastructure , not a competing tenant
+		}
 		if v < ourHandleLo || v > ourHandleHi {
 			foreign = append(foreign, v)
 		}
