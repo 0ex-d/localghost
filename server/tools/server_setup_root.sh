@@ -96,6 +96,29 @@ else
     fi
 fi
 
+# --- pgvector: the search layer's vector index. Optional at runtime , without it ghost.searchd runs
+# --- in the documented FTS-only degraded mode , but installing it here is a one-liner and the
+# --- alternative is remembering to do it later. Package-based check (pgvector ships no binary).
+echo "> Ensuring pgvector..."
+if ls /usr/share/postgresql/*/extension/vector.control >/dev/null 2>&1; then
+    echo "  pgvector: present"
+else
+    PGVER="$(ls -d /usr/lib/postgresql/*/bin 2>/dev/null | sort -V | tail -1 | sed 's|.*/postgresql/\([0-9][0-9]*\)/bin|\1|')"
+    if [ -n "$PGVER" ]; then
+        [ "$APT_UPDATED" = 0 ] && { RUN "apt-get update -qq"; APT_UPDATED=1; }
+        echo "  pgvector: installing postgresql-$PGVER-pgvector ..."
+        if [ "$DRY" = 1 ]; then
+            printf '  [would] apt-get install -y postgresql-%s-pgvector\n' "$PGVER"
+        else
+            apt-get install -y "postgresql-$PGVER-pgvector" >/dev/null 2>&1 \
+                && echo "  pgvector: installed" \
+                || echo "  pgvector: INSTALL FAILED (search will run FTS-only; install postgresql-$PGVER-pgvector manually)"
+        fi
+    else
+        echo "  pgvector: SKIPPED (postgres version not detected); search runs FTS-only until installed"
+    fi
+fi
+
 # --- dm_crypt module (now + on boot) ---
 echo "> dm_crypt (LUKS) kernel module..."
 if lsmod 2>/dev/null | grep -q '^dm_crypt'; then echo "  already loaded"

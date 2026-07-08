@@ -84,9 +84,9 @@ func TestApplyStopsAtFirstFailure(t *testing.T) {
 
 func TestSystemdUnitsHardenedAndOrdered(t *testing.T) {
 	units := SystemdUnits("/usr/local/bin", DaemonConfig{Host: "192.168.1.50", CaDir: "/etc/ghost/ca", StateDir: "/var/lib/ghost", Port: 8443})
-	// Exactly ONE unit now: ghost.secd. The ghost.*d daemons are supervised by ghost.secd on the
-	// encrypted volume, not by systemd, so they get no boot-time units (they cannot start before the
-	// volume is mounted at unlock).
+	// Exactly ONE unit now: ghost.secd. ghost.secd starts ghost.watchd on the encrypted volume, and
+	// ghost.watchd supervises the ghost.*d daemons , not systemd , so they get no boot-time units (they
+	// cannot start before the volume is mounted at unlock).
 	if len(units) != 1 {
 		t.Fatalf("expected exactly one systemd unit (ghost.secd), got %d", len(units))
 	}

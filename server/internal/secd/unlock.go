@@ -1,6 +1,7 @@
 package secd
 
 import (
+	"time"
 	"encoding/json"
 	"net/http"
 	"sync"
@@ -29,6 +30,13 @@ type unlockService struct {
 type statusReporter interface {
 	SupervisorStatus() []ServiceStatus
 }
+
+// Warm reports whether the slot's volume is already mounted (kernel state that survives a secd
+// restart). Used at startup to adopt an existing mount instead of falsely reporting locked.
+func (u *unlockService) Warm(slot int) bool { return u.backend.Warm(slot) }
+
+// AuthorizesLock passes through to the backend's side-effect-free main-PIN check for the off command.
+func (u *unlockService) AuthorizesLock(pin string) bool { return u.backend.AuthorizesLock(pin) }
 
 // SupervisorStatus returns the supervised-service snapshot if the backend provides one, else nil.
 func (u *unlockService) SupervisorStatus() []ServiceStatus {
@@ -154,6 +162,11 @@ func (s *Server) handleUnlockPoll(w http.ResponseWriter, r *http.Request) {
 			s.mu.Unlock()
 			if tok, err := s.session.Issue(); err == nil {
 				resp["token"] = tok
+				// Hand the app the expiry so it can persist the token and, as the 2-day window
+				// closes, show a "reopen to check notifications" state , the box cannot poll or
+				// notify a session it can no longer authenticate, so the app must prompt a re-unlock.
+				resp["expiresAt"] = s.session.ExpiresAt().UTC().Format(time.RFC3339)
+				resp["ttlSeconds"] = int(SessionTTL.Seconds())
 			}
 		} else {
 			// wrong PIN (or failed unlock): revoke any live token, so the foreground AND the poller

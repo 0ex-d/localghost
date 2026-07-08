@@ -29,6 +29,39 @@ func TestUnlockMain(t *testing.T) {
 	}
 }
 
+// TestAuthorizesLock covers the `off` command's auth: only the main PIN authorizes a lock, and the
+// check has NO side effects , critically, the wipe PIN neither authorizes off NOR arms a wipe.
+func TestAuthorizesLock(t *testing.T) {
+	a := buildAccounts(t)
+
+	if !a.AuthorizesLock("1111") {
+		t.Fatal("main PIN must authorize off")
+	}
+	if a.AuthorizesLock("0000") {
+		t.Fatal("wrong PIN must not authorize off")
+	}
+	if a.AuthorizesLock("3333") {
+		t.Fatal("wipe PIN must not authorize off , off can never wipe")
+	}
+
+	// Side-effect freedom: checking the wipe PIN via AuthorizesLock must NOT have armed a wipe. If it
+	// had, the next main PIN would confirm the wipe instead of opening.
+	_ = a.AuthorizesLock("3333")
+	d := a.Unlock("dev", "1111")
+	if d.Outcome != Open || d.Wiped {
+		t.Fatalf("AuthorizesLock(wipe) must not arm; main PIN should still open, not wipe: %+v", d)
+	}
+
+	// And AuthorizesLock must not record gate failures: many wrong-PIN checks do not throttle a later
+	// real unlock (off is not an unlock oracle).
+	for i := 0; i < 50; i++ {
+		_ = a.AuthorizesLock("9999")
+	}
+	if d := a.Unlock("dev", "1111"); d.Outcome != Open {
+		t.Fatalf("AuthorizesLock must not touch the rate-limit gate: %+v", d)
+	}
+}
+
 func TestWipePinAloneArmsButDoesNotErase(t *testing.T) {
 	a := buildAccounts(t)
 	// The wipe PIN on its own must NOT erase , it only arms. It looks exactly like a wrong PIN.

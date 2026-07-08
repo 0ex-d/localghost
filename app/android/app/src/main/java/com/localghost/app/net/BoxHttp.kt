@@ -2,6 +2,7 @@ package com.localghost.app.net
 
 import android.content.Context
 import com.localghost.app.security.BoxConfig
+import com.localghost.app.security.SessionStore
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.net.HttpURLConnection
@@ -35,9 +36,12 @@ object BoxHttp {
         conn.requestMethod = method
         conn.connectTimeout = 10_000
         conn.readTimeout = 30_000
-        if (cfg.deviceToken.isNotEmpty()) {
-            conn.setRequestProperty("Authorization", "Bearer ${cfg.deviceToken}")
-        }
+        // Bearer is the SESSION token minted at PIN unlock (SessionStore), NOT the enrolment token:
+        // the box validates the session token per request and it expires in 2 days. The device mTLS
+        // client cert (set on the socket factory above) is the separate, durable identity that gates
+        // the channel. No session yet (pre-unlock) -> no bearer; those calls are unauthenticated and
+        // the box answers appears-down, which is correct.
+        SessionStore.read(ctx)?.let { conn.setRequestProperty("Authorization", "Bearer ${it.token}") }
         return conn
     }
 

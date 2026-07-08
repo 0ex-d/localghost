@@ -16,6 +16,11 @@ flow is scan-immediately-and-clear-the-screen, not leave-it-on-screen-while-grad
 - If you want remote access: the domain's A record at your public IP, and the router forwarding
   TCP 443 to this box. LAN-only works without either.
 - The repo on the box, readable by both users.
+- llama.cpp's `llama-server` built for this box at `/usr/local/bin/llama-server` (ghost.oracled and
+  ghost.searchd both spawn it as a private loopback child; the path is a conf key if yours lives
+  elsewhere). Build it once, on the box, with whatever acceleration the box actually has.
+- pgvector installs automatically in step 1 (postgresql-<ver>-pgvector). If it fails or you skip it,
+  nothing breaks: search runs in the documented FTS-only degraded mode and says so in health.
 
 ## 1. System prep , root
 
@@ -84,7 +89,10 @@ the terminal once the phone has it. Fresh QR any time (each mints a fresh identi
 newest): `./bin/ghost-qr --ca /etc/ghost/ca --host box.example.com` as root. Then unlock with
 the main PIN. A wrong PIN looks exactly like a down box; that is the product, not a bug.
 
-## 7. Models , root
+## 7. Models , two different homes, do not mix them up
+
+**7a. App catalog models , root, unencrypted disk.** These are the models the PHONE downloads from
+the box for on-device inference:
 
     cp <model>.gguf /var/lib/ghost/models/
     sha256sum /var/lib/ghost/models/<model>.gguf
@@ -96,6 +104,46 @@ Entry in `/var/lib/ghost/models/catalog.json`:
 
 Downloads resume across drops (Range). The box never fetches models itself , you put them there,
 deliberately.
+
+**7b. Box inference weights , service user, ENCRYPTED volume, after the first unlock.** These are
+what ghost.oracled (chat + vision + captions) and ghost.searchd (embeddings) load. They live inside
+the mount so they die with it:
+
+    # unlocked, as the service user (paths for slot 0)
+    mkdir -p /var/lib/ghost/mnt/slot0/ai-models
+    cp gemma-4-12b-it-Q4_K_M.gguf mmproj-F16.gguf embeddinggemma-300m-q8.gguf \
+        /var/lib/ghost/mnt/slot0/ai-models/
+    chown ghost:ghost /var/lib/ghost/mnt/slot0/ai-models/*
+    shred -u <the source copies on the unencrypted disk>
+
+Missing weights are a named degraded mode, not a crash: oracled reports no model, searchd falls back
+to FTS-only, both say so in health. Restart the two daemons (or relock/unlock) after copying and they
+pick the weights up.
+
+## 8. First unlock , the checklist
+
+If the fTPM is in dictionary-attack lockout from earlier attempts (Intel PTT here), COLD power cycle
+first , full power off, wait ten seconds, power on. PTT ignores timed recovery; a warm reboot does
+not clear it. Then spend PIN attempts like they cost something, because they do.
+
+Unlock from the app with the main PIN, then verify in order , each step gates the next:
+
+    ./bin/ghost-cli ghost.secd status            # unlocked, slot mounted
+    ./bin/ghost-cli ghost.watchd status          # cohort up; searchd/oracled supervised
+    ./bin/ghost-cli ghost.oracled status         # model loading; ~30s degraded while llama warms is normal
+    ./bin/ghost-cli ghost.searchd ready          # false until T1/T2 exist , that is honest, not broken
+    ./bin/ghost-cli ghost.searchd queue          # pendingEmbeds/parkedJobs; parked captions drain once
+                                                 # oracled finishes loading the vision model
+    ./bin/ghost-cli ghost.searchd search query=anything   # FTS answers even before embeddings exist
+
+Take a photo in the app: framed archives it, hands it to searchd, a caption job appears in the queue,
+and once oracled is warm the caption lands and the photo becomes text-searchable. That single photo
+exercises upload, EXIF, archive, ingest, the job queue, vision, chunking, and embedding , the whole
+spine in one tap.
+
+The lock test matters as much as the unlock: lock from the app, watch the spin-down mirror the mount
+tick-up, then confirm the box answers 503 to everything and a wrong PIN is indistinguishable from a
+dead box. That indistinguishability is the product.
 
 ## Undo
 

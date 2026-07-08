@@ -1,13 +1,15 @@
 package hw
 
 import (
-	"path/filepath"
 	"encoding/json"
 	"fmt"
-	"os/exec"
+	"path/filepath"
 	"strconv"
-	"strings"
+	"sync"
 	"time"
+
+	"github.com/LocalGhostDao/localghost/server/internal/poltergres"
+	"github.com/LocalGhostDao/localghost/server/internal/apparedis"
 )
 
 // NotifStore is the per-account notification data model, living INSIDE the encrypted volume (Redis
@@ -67,10 +69,54 @@ func (n Notification) IsAsk() bool { return len(n.Options) > 0 }
 
 type NotifStore struct {
 	pgSocketFor func(slot int) string
+	mu          sync.Mutex
+	rw          map[int]*poltergres.ReadWrite // per-slot ghost_rw pg connection
+	rd          map[int]*apparedis.ReadWrite // per-slot ghost_rw redis connection
 }
 
 func NewNotifStore(pgSocketFor func(slot int) string) *NotifStore {
-	return &NotifStore{pgSocketFor: pgSocketFor}
+	return &NotifStore{
+		pgSocketFor: pgSocketFor,
+		rw:          map[int]*poltergres.ReadWrite{},
+		rd:          map[int]*apparedis.ReadWrite{},
+	}
+}
+
+// pg returns (lazily building) the slot's ghost_rw poltergres client. NotifStore both reads and writes, so
+// it uses the write role for everything , simpler than juggling two connections for a store whose
+// reads and writes interleave constantly.
+func (s *NotifStore) pg(slot int) (*poltergres.ReadWrite, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if c, ok := s.rw[slot]; ok {
+		return c, nil
+	}
+	mount := filepath.Dir(s.pgSocketFor(slot))
+	cfg, err := LoadServicesConfig(mount)
+	if err != nil {
+		return nil, err
+	}
+	sockDir := s.pgSocketFor(slot)
+	c := poltergres.NewReadWrite(sockDir, cfg.Postgres.Port, cfg.Postgres.RWUser, cfg.Postgres.RWPass, cfg.Postgres.Name)
+	s.rw[slot] = c
+	return c, nil
+}
+
+// rds returns (lazily building) the slot's ghost_rw redis client.
+func (s *NotifStore) rds(slot int) (*apparedis.ReadWrite, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if c, ok := s.rd[slot]; ok {
+		return c, nil
+	}
+	mount := filepath.Dir(s.pgSocketFor(slot))
+	cfg, err := LoadServicesConfig(mount)
+	if err != nil {
+		return nil, err
+	}
+	c := apparedis.NewReadWrite(cfg.Redis.Port, cfg.Redis.RWUser, cfg.Redis.RWPass)
+	s.rd[slot] = c
+	return c, nil
 }
 
 // Produce stores a new notification: insert into Postgres (durable, returns the assigned id), then
@@ -144,29 +190,37 @@ func (s *NotifStore) List(slot int, limit int) ([]Notification, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	q := fmt.Sprintf("SELECT id, service, kind, title, body, seen, "+
-		"coalesce(options,''), coalesce(answer,''), coalesce(extract(epoch from answered)::bigint,0), "+
-		"extract(epoch from created)::bigint "+
-		"FROM notifications ORDER BY id DESC LIMIT %d;", limit)
-	out, err := s.psqlQuery(slot, q)
+	c, err := s.pg(slot)
 	if err != nil {
 		return nil, err
 	}
-	res := make([]Notification, 0, len(out))
-	for _, row := range out {
-		f := strings.Split(row, "|")
-		if len(f) < 10 {
+	rows, err := c.Query("SELECT id, service, kind, title, body, seen, "+
+		"coalesce(options,''), coalesce(answer,''), coalesce(extract(epoch from answered)::bigint,0), "+
+		"extract(epoch from created)::bigint "+
+		"FROM notifications ORDER BY id DESC LIMIT $1", limit)
+	if err != nil {
+		return nil, err
+	}
+	res := make([]Notification, 0, len(rows.Vals))
+	for _, r := range rows.Vals {
+		if len(r) < 10 {
 			continue
 		}
-		id, _ := strconv.ParseInt(f[0], 10, 64)
-		answered, _ := strconv.ParseInt(f[8], 10, 64)
-		created, _ := strconv.ParseInt(f[9], 10, 64)
-		n := Notification{
-			ID: id, Service: f[1], Kind: f[2], Title: f[3], Body: f[4],
-			Seen: f[5] == "t", Answer: f[7], Answered: answered, Created: created,
+		cell := func(i int) string {
+			if r[i] == nil {
+				return ""
+			}
+			return *r[i]
 		}
-		if f[6] != "" {
-			_ = json.Unmarshal([]byte(f[6]), &n.Options) // options is a JSON array; ignore if malformed
+		id, _ := strconv.ParseInt(cell(0), 10, 64)
+		answered, _ := strconv.ParseInt(cell(8), 10, 64)
+		created, _ := strconv.ParseInt(cell(9), 10, 64)
+		n := Notification{
+			ID: id, Service: cell(1), Kind: cell(2), Title: cell(3), Body: cell(4),
+			Seen: cell(5) == "t", Answer: cell(7), Answered: answered, Created: created,
+		}
+		if o := cell(6); o != "" {
+			_ = json.Unmarshal([]byte(o), &n.Options) // options is a JSON array; ignore if malformed
 		}
 		res = append(res, n)
 	}
@@ -179,19 +233,26 @@ func (s *NotifStore) List(slot int, limit int) ([]Notification, error) {
 // Redis push cache is not rewritten (the ask was already pushed, and the app reads answered state
 // from the list). Returns ErrNotAsk / ErrBadChoice / ErrAlreadyAnswered for the endpoint to surface.
 func (s *NotifStore) Answer(slot int, id int64, choice string) error {
-	rows, err := s.psqlQuery(slot, fmt.Sprintf(
-		"SELECT coalesce(options,''), coalesce(answer,'') FROM notifications WHERE id = %d;", id))
+	c, err := s.pg(slot)
 	if err != nil {
 		return err
 	}
-	if len(rows) == 0 {
+	rows, err := c.Query(
+		"SELECT coalesce(options,''), coalesce(answer,'') FROM notifications WHERE id = $1", id)
+	if err != nil {
+		return err
+	}
+	if len(rows.Vals) == 0 {
 		return ErrNoNotif
 	}
-	f := strings.SplitN(rows[0], "|", 2)
-	optionsJSON := f[0]
-	prevAnswer := ""
-	if len(f) > 1 {
-		prevAnswer = f[1]
+	optionsJSON, prevAnswer := "", ""
+	if r := rows.Vals[0]; len(r) >= 2 {
+		if r[0] != nil {
+			optionsJSON = *r[0]
+		}
+		if r[1] != nil {
+			prevAnswer = *r[1]
+		}
 	}
 	if optionsJSON == "" {
 		return ErrNotAsk
@@ -213,35 +274,42 @@ func (s *NotifStore) Answer(slot int, id int64, choice string) error {
 	if !valid {
 		return ErrBadChoice
 	}
-	return s.psqlExec(slot, fmt.Sprintf(
-		"UPDATE notifications SET answer = '%s', answered = now() WHERE id = %d;", esc(choice), id))
+	return c.Exec("UPDATE notifications SET answer = $1, answered = now() WHERE id = $2", choice, id)
 }
 
 // MarkSeen sets the seen flag on a notification (the app calls this when it is viewed).
 func (s *NotifStore) MarkSeen(slot int, id int64) error {
-	return s.psqlExec(slot, fmt.Sprintf("UPDATE notifications SET seen = TRUE WHERE id = %d;", id))
+	c, err := s.pg(slot)
+	if err != nil {
+		return err
+	}
+	return c.Exec("UPDATE notifications SET seen = TRUE WHERE id = $1", id)
 }
 
 // Delete removes a notification forever (Postgres). It stays in the Redis last-100 until it ages out
 // of the window; the poller filters deleted ids out by virtue of the cursor having passed them, and
 // the in-app list reads Postgres, so a deleted one is gone from the list immediately.
 func (s *NotifStore) Delete(slot int, id int64) error {
-	return s.psqlExec(slot, fmt.Sprintf("DELETE FROM notifications WHERE id = %d;", id))
+	c, err := s.pg(slot)
+	if err != nil {
+		return err
+	}
+	return c.Exec("DELETE FROM notifications WHERE id = $1", id)
 }
 
 // --- helpers ---
 
 func (s *NotifStore) readRecent(slot int) ([]Notification, error) {
-	out, err := exec.Command("redis-cli", "-p", strconv.Itoa(redisPort(slot)), "-a", s.redisPass(slot), "LRANGE", recentKey, "0", "-1").Output()
+	c, err := s.rds(slot)
+	if err != nil {
+		return nil, err
+	}
+	items, err := c.LRange(recentKey, 0, -1)
 	if err != nil {
 		return nil, fmt.Errorf("read recent: %w", err)
 	}
 	var res []Notification
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
+	for _, line := range items {
 		var n Notification
 		if json.Unmarshal([]byte(line), &n) == nil {
 			res = append(res, n)
@@ -251,16 +319,16 @@ func (s *NotifStore) readRecent(slot int) ([]Notification, error) {
 }
 
 func (s *NotifStore) getCursor(slot int, device string) (int64, error) {
-	out, err := exec.Command("redis-cli", "-p", strconv.Itoa(redisPort(slot)), "-a", s.redisPass(slot), "GET", cursorKey(device)).Output()
+	c, err := s.rds(slot)
 	if err != nil {
 		return 0, err
 	}
-	v := strings.TrimSpace(string(out))
-	if v == "" || v == "(nil)" {
-		return 0, nil
+	v, ok, err := c.Get(cursorKey(device))
+	if err != nil || !ok || v == "" {
+		return 0, err
 	}
-	id, err := strconv.ParseInt(v, 10, 64)
-	if err != nil {
+	id, perr := strconv.ParseInt(v, 10, 64)
+	if perr != nil {
 		return 0, nil
 	}
 	return id, nil
@@ -287,71 +355,36 @@ func (s *NotifStore) insertPostgres(slot int, n Notification) (int64, error) {
 		}
 		optionsJSON = string(b)
 	}
-	q := fmt.Sprintf(
-		"INSERT INTO notifications (service, kind, title, body, seen, options, created) "+
-			"VALUES ('%s','%s','%s','%s', FALSE, '%s', to_timestamp(%d)) RETURNING id;",
-		esc(n.Service), esc(n.Kind), esc(n.Title), esc(n.Body), esc(optionsJSON), created)
-	rows, err := s.psqlQuery(slot, q)
+	c, err := s.pg(slot)
 	if err != nil {
 		return 0, err
 	}
-	if len(rows) == 0 {
+	rows, err := c.Query(
+		"INSERT INTO notifications (service, kind, title, body, seen, options, created) "+
+			"VALUES ($1,$2,$3,$4, FALSE, $5, to_timestamp($6)) RETURNING id",
+		n.Service, n.Kind, n.Title, n.Body, optionsJSON, created)
+	if err != nil {
+		return 0, err
+	}
+	if len(rows.Vals) == 0 || len(rows.Vals[0]) == 0 || rows.Vals[0][0] == nil {
 		return 0, fmt.Errorf("insert returned no id")
 	}
-	id, err := strconv.ParseInt(strings.TrimSpace(rows[0]), 10, 64)
+	id, err := strconv.ParseInt(*rows.Vals[0][0], 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("bad id: %w", err)
 	}
 	return id, nil
 }
 
-// redisPass reads the Redis password from services.conf on the mount (derived from the pg socket
-// path, which is <mount>/postgres). Empty string if unreadable , an unauthenticated call then fails
-// against the password-protected server, which is the correct visible failure, not a silent bypass.
-func (s *NotifStore) redisPass(slot int) string {
-	mount := filepath.Dir(s.pgSocketFor(slot))
-	c, err := LoadServicesConfig(mount)
-	if err != nil {
-		return ""
-	}
-	return c.Redis.Password
-}
-
+// redis runs a fire-and-forget write via the native ghost_rw client.
 func (s *NotifStore) redis(slot int, args ...string) error {
-	full := append([]string{"-p", strconv.Itoa(redisPort(slot)), "-a", s.redisPass(slot)}, args...)
-	out, err := exec.Command("redis-cli", full...).CombinedOutput()
+	c, err := s.rds(slot)
 	if err != nil {
-		return fmt.Errorf("redis %v: %v: %s", args, err, strings.TrimSpace(string(out)))
+		return err
 	}
-	return nil
+	_, err = c.Do(args...)
+	return err
 }
 
-func (s *NotifStore) psqlQuery(slot int, q string) ([]string, error) {
-	sock := s.pgSocketFor(slot)
-	out, err := exec.Command("psql", "-h", sock, "-p", strconv.Itoa(pgPort(slot)), "-U", "ghost",
-		"-d", "ghost", "-At", "-F", "|", "-c", q).Output()
-	if err != nil {
-		return nil, fmt.Errorf("psql query: %w", err)
-	}
-	var rows []string
-	for _, l := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if strings.TrimSpace(l) != "" {
-			rows = append(rows, l)
-		}
-	}
-	return rows, nil
-}
 
-func (s *NotifStore) psqlExec(slot int, stmt string) error {
-	sock := s.pgSocketFor(slot)
-	out, err := exec.Command("psql", "-h", sock, "-p", strconv.Itoa(pgPort(slot)), "-U", "ghost",
-		"-d", "ghost", "-v", "ON_ERROR_STOP=1", "-c", stmt).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("psql exec: %v: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
 
-// esc doubles single quotes for SQL literals. Notification content comes from the daemons (trusted,
-// in-volume), not the network; this guards against quotes in titles/bodies breaking the statement.
-func esc(s string) string { return strings.ReplaceAll(s, "'", "''") }

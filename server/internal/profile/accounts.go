@@ -59,7 +59,19 @@ func NewAccounts(reg *Registry, gate *auth.Gate, wiper *wipe.Wiper) *Accounts {
 	}
 }
 
-// Unlock evaluates one PIN attempt from device id. Order: rate-limit gate, resolve, act.
+// AuthorizesLock reports whether pin is a valid MAIN PIN, WITHOUT any side effects , it does not arm,
+// disarm, wipe, record a failure, or touch the rate-limit gate. It exists for the `off` command: off
+// is a lock, so it must never be able to wipe or disturb a pending wipe. A wrong PIN and the wipe PIN
+// both return false (off does nothing, indistinguishably); only the main PIN authorizes the lock.
+//
+// Deliberately does NOT go through the gate: off cannot lose data, so gating it would only let a
+// coercer rate-limit-lock you out of locking your own box. And it does not consume the armed state ,
+// off leaves a pending wipe exactly as it found it, so `off` then a later main-PIN unlock still
+// confirms the wipe if one was armed.
+func (a *Accounts) AuthorizesLock(pin string) bool {
+	res := a.reg.Resolve(pin)
+	return res.Valid && res.Open != NoSlot && res.Wipe != WipeAll
+}
 //
 // The wipe is deliberately a TWO-PART sequence so it cannot fire by accident or be triggered by
 // someone who only knows one PIN:

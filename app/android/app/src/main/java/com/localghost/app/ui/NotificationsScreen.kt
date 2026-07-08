@@ -14,10 +14,33 @@ import androidx.compose.ui.unit.dp
 import com.localghost.app.net.PendingNotification
 import com.localghost.app.ui.theme.*
 
+/** SessionHint tells the notifications screen whether to warn the user that the box can no longer be
+ *  polled. EXPIRED: the session token is dead, the app must be re-unlocked to fetch anything.
+ *  EXPIRING_SOON: still valid but close to the 2-day limit, a gentle heads-up. NONE: all good. */
+enum class SessionHint { NONE, EXPIRING_SOON, EXPIRED }
+
 @Composable
-fun NotificationsScreen(items: Loadable<List<PendingNotification>>) {
+fun NotificationsScreen(
+    items: Loadable<List<PendingNotification>>,
+    sessionHint: SessionHint = SessionHint.NONE,
+) {
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (sessionHint != SessionHint.NONE) item {
+            Spacer(Modifier.height(12.dp))
+            val msg = if (sessionHint == SessionHint.EXPIRED)
+                "This session has expired, so the box can no longer check for notifications. " +
+                    "Open the app and unlock to refresh."
+            else
+                "This session will expire soon. Once it does, you will have to open the app and " +
+                    "unlock to check if you have notifications , the box cannot notify an expired session."
+            Column(Modifier.fillMaxWidth().border(1.dp, TerminalGreen, RectangleShape)
+                .background(VoidLighter).padding(14.dp)) {
+                Text("SESSION", color = TerminalGreen, style = MaterialTheme.typography.labelMedium)
+                Spacer(Modifier.height(4.dp))
+                Text(msg, color = GhostTextDim, style = MaterialTheme.typography.bodyMedium)
+            }
+        }
         item {
             Spacer(Modifier.height(12.dp))
             SectionLabel("QUEUED BY DAEMONS")

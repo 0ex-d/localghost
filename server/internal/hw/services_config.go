@@ -21,42 +21,73 @@ import (
 
 type DBConfig struct {
 	Port     int    `json:"port"`
-	Password string `json:"password"` // generated at provision; gates TCP
-	User     string `json:"user"`     // postgres role / redis has no user, password only
+	Password string `json:"password"` // legacy single password; kept for the readiness checks
+	User     string `json:"user"`     // postgres superuser role (ghost); redis default user
 	Name     string `json:"name"`     // postgres database name
+
+	// Role-split service credentials. read_only can only SELECT (pg) / +@read (redis); read_write can
+	// write its own tables. Daemons connect as one of these, never as the owner role. Generated at
+	// provision alongside the owner password.
+	ROUser string `json:"roUser"`
+	ROPass string `json:"roPass"`
+	RWUser string `json:"rwUser"`
+	RWPass string `json:"rwPass"`
 }
 
 type ServicesConfig struct {
 	Postgres DBConfig       `json:"postgres"`
 	Redis    DBConfig       `json:"redis"`
-	Daemons  map[string]int `json:"daemons"` // service name -> loopback health port
+	Daemons  map[string]int `json:"daemons"`  // COHORT watchd supervises: name -> loopback health port
+	Critical []string       `json:"critical"` // subset of Daemons whose failure is surfaced as critical
 }
 
 // DefaultServicesConfig builds a fresh config with generated passwords and the fixed loopback ports.
 // Called at provision for the single account (slot 0). Ports are fixed (not derived) so the file is
 // the whole truth; a multi-account future would offset them per slot here, in one place.
 func DefaultServicesConfig() (ServicesConfig, error) {
-	pgPw, err := randHex(32)
+	// Six secrets: owner + read-only + read-write, per engine. All randHex, so SASLprep is a no-op and
+	// none ever touches an argv (the native clients pass them in the auth handshake, not on a command
+	// line , unlike the old psql/redis-cli shell-outs).
+	gen := func() (string, error) { return randHex(32) }
+	pgOwner, err := gen()
 	if err != nil {
 		return ServicesConfig{}, err
 	}
-	redisPw, err := randHex(32)
+	pgRO, err := gen()
+	if err != nil {
+		return ServicesConfig{}, err
+	}
+	pgRW, err := gen()
+	if err != nil {
+		return ServicesConfig{}, err
+	}
+	rdOwner, err := gen()
+	if err != nil {
+		return ServicesConfig{}, err
+	}
+	rdRO, err := gen()
+	if err != nil {
+		return ServicesConfig{}, err
+	}
+	rdRW, err := gen()
 	if err != nil {
 		return ServicesConfig{}, err
 	}
 	return ServicesConfig{
-		Postgres: DBConfig{Port: 6000, Password: pgPw, User: "ghost", Name: "ghost"},
-		Redis:    DBConfig{Port: 6100, Password: redisPw},
-		Daemons: map[string]int{
-			"ghost.shadowd": 9110,
-			"ghost.watchd":  9111,
-			"ghost.framed":  9112,
-			"ghost.noted":   9113,
-			"ghost.synthd":  9114,
-			"ghost.tallyd":  9115,
-			"ghost.voiced":  9116,
-			"ghost.cued":    9117,
+		Postgres: DBConfig{
+			Port: 6000, Password: pgOwner, User: "ghost", Name: "ghost",
+			ROUser: "ghost_ro", ROPass: pgRO, RWUser: "ghost_rw", RWPass: pgRW,
 		},
+		Redis: DBConfig{
+			Port: 6100, Password: rdOwner,
+			ROUser: "ghost_ro", ROPass: rdRO, RWUser: "ghost_rw", RWPass: rdRW,
+		},
+		// The cohort watchd supervises and the critical set both derive from the single daemon registry
+		// (daemon_registry.go) , the one place a daemon is declared. ghost.watchd is NOT here (it is the
+		// supervisor, started by secd directly). Postgres/Redis are not here either (secd owns them via
+		// DataStore, before watchd).
+		Critical: CriticalDaemons(),
+		Daemons:  SupervisedDaemons(),
 	}, nil
 }
 

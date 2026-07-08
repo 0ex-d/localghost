@@ -19,6 +19,7 @@ import (
 
 	"github.com/LocalGhostDao/localghost/server/internal/hw"
 	"github.com/LocalGhostDao/localghost/server/internal/pair"
+	"github.com/LocalGhostDao/localghost/server/internal/watchd"
 )
 
 func main() {
@@ -45,6 +46,10 @@ func main() {
 		migrate(os.Args[2:], hw.SealModeTPM)
 	case "migrate-to-software":
 		migrate(os.Args[2:], hw.SealModeSoftware)
+	case "restart-daemon":
+		restartDaemon(os.Args[2:])
+	case "daemon-status":
+		daemonStatus(os.Args[2:])
 	default:
 		usage()
 	}
@@ -55,6 +60,8 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  enroll <enroll-link>          save the device identity carried in the QR link")
 	fmt.Fprintln(os.Stderr, "  migrate-to-tpm [flags]        re-wrap the disk key from the software tier into the TPM")
 	fmt.Fprintln(os.Stderr, "  migrate-to-software [flags]   re-wrap the disk key from the TPM into the software tier")
+	fmt.Fprintln(os.Stderr, "  restart-daemon <name> [flags] restart one ghost.*d daemon via watchd (deploy: drop new binary, restart)")
+	fmt.Fprintln(os.Stderr, "  daemon-status [flags]         show the supervised cohort's state from watchd")
 	fmt.Fprintln(os.Stderr, "migration never touches the disk , the LUKS key is re-wrapped, not changed")
 	os.Exit(2)
 }
@@ -137,6 +144,56 @@ func promptPIN(label string) (string, error) {
 func fatal(format string, a ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", a...)
 	os.Exit(1)
+}
+
+// restartDaemon tells watchd to kill+respawn one daemon from its (updated) binary on the volume. This
+// is the elegant deploy primitive: drop the new binary at <mount>/bin/<name>, then
+//   ghost-ctl restart-daemon <name>
+// watchd kills the old process and starts the new one from the same path. No pkill, no orphan. Must be
+// run on the box while the box is UNLOCKED (the socket lives on the mounted volume).
+func restartDaemon(args []string) {
+	fs := flag.NewFlagSet("restart-daemon", flag.ExitOnError)
+	mount := fs.String("mount", "/var/lib/ghost/mnt/slot0", "mounted volume path (holds run/watchd.sock)")
+	_ = fs.Parse(args)
+	rest := fs.Args()
+	if len(rest) < 1 {
+		fatal("restart-daemon needs a daemon name, e.g. ghost.synthd")
+	}
+	name := rest[0]
+	c := watchd.NewClient(filepath.Join(*mount, "run", "watchd.sock"))
+	svcs, err := c.Restart(name)
+	if err != nil {
+		fatal("restart %s: %v (is the box unlocked?)", name, err)
+	}
+	fmt.Printf("restarted %s\n", name)
+	printCohort(svcs)
+}
+
+// daemonStatus prints the supervised cohort's state, read from watchd.
+func daemonStatus(args []string) {
+	fs := flag.NewFlagSet("daemon-status", flag.ExitOnError)
+	mount := fs.String("mount", "/var/lib/ghost/mnt/slot0", "mounted volume path (holds run/watchd.sock)")
+	_ = fs.Parse(args)
+	c := watchd.NewClient(filepath.Join(*mount, "run", "watchd.sock"))
+	svcs, err := c.Status()
+	if err != nil {
+		fatal("status: %v (is the box unlocked?)", err)
+	}
+	printCohort(svcs)
+}
+
+func printCohort(svcs []watchd.ServiceStatus) {
+	for _, s := range svcs {
+		crit := ""
+		if s.Critical {
+			crit = " [critical]"
+		}
+		line := fmt.Sprintf("  %-16s %-10s restarts=%d%s", s.Name, s.State, s.Restarts, crit)
+		if s.LastErr != "" {
+			line += "  last-err: " + s.LastErr
+		}
+		fmt.Println(line)
+	}
 }
 
 // enroll saves the device identity carried inside the link. Cert/key are optional at parse time but

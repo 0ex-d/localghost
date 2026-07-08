@@ -2,11 +2,13 @@ package hw
 
 import (
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"strconv"
-	"strings"
+	"sync"
 	"time"
+
+	"github.com/LocalGhostDao/localghost/server/internal/poltergres"
+	"github.com/LocalGhostDao/localghost/server/internal/apparedis"
 )
 
 // MuteStore reads and writes the notification mute for a mounted account. The mute is PER SCOPE:
@@ -40,10 +42,49 @@ var foreverTime = time.Date(9999, 1, 1, 0, 0, 0, 0, time.UTC)
 
 type MuteStore struct {
 	pgSocketFor func(slot int) string
+	mu          sync.Mutex
+	rw          map[int]*poltergres.ReadWrite
+	rd          map[int]*apparedis.ReadWrite
 }
 
 func NewMuteStore(pgSocketFor func(slot int) string) *MuteStore {
-	return &MuteStore{pgSocketFor: pgSocketFor}
+	return &MuteStore{
+		pgSocketFor: pgSocketFor,
+		rw:          map[int]*poltergres.ReadWrite{},
+		rd:          map[int]*apparedis.ReadWrite{},
+	}
+}
+
+func (m *MuteStore) pg(slot int) (*poltergres.ReadWrite, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if c, ok := m.rw[slot]; ok {
+		return c, nil
+	}
+	mount := filepath.Dir(m.pgSocketFor(slot))
+	cfg, err := LoadServicesConfig(mount)
+	if err != nil {
+		return nil, err
+	}
+	c := poltergres.NewReadWrite(m.pgSocketFor(slot), cfg.Postgres.Port, cfg.Postgres.RWUser, cfg.Postgres.RWPass, cfg.Postgres.Name)
+	m.rw[slot] = c
+	return c, nil
+}
+
+func (m *MuteStore) rds(slot int) (*apparedis.ReadWrite, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if c, ok := m.rd[slot]; ok {
+		return c, nil
+	}
+	mount := filepath.Dir(m.pgSocketFor(slot))
+	cfg, err := LoadServicesConfig(mount)
+	if err != nil {
+		return nil, err
+	}
+	c := apparedis.NewReadWrite(cfg.Redis.Port, cfg.Redis.RWUser, cfg.Redis.RWPass)
+	m.rd[slot] = c
+	return c, nil
 }
 
 func redisMuteKey(scope string) string { return "notifications:mute:" + scope }
@@ -66,12 +107,12 @@ func (m *MuteStore) IsMuted(slot int, service string) bool {
 func (m *MuteStore) GlobalMuted(slot int) bool { return m.scopeActive(slot, muteGlobalScope) }
 
 func (m *MuteStore) scopeActive(slot int, scope string) bool {
-	out, err := exec.Command("redis-cli", "-p", strconv.Itoa(redisPort(slot)), "-a", m.redisPass(slot), "GET", redisMuteKey(scope)).Output()
+	c, err := m.rds(slot)
 	if err != nil {
 		return false
 	}
-	v := strings.TrimSpace(string(out))
-	if v == "" || v == "(nil)" {
+	v, ok, err := c.Get(redisMuteKey(scope))
+	if err != nil || !ok || v == "" {
 		return false
 	}
 	if v == foreverSentinel {
@@ -119,81 +160,57 @@ func (m *MuteStore) ClearMute(slot int, scope string) error {
 // Status returns the active mutes (scope -> until) for the settings screen, from Postgres (the
 // authoritative view), filtering out expired rows.
 func (m *MuteStore) Status(slot int) (map[string]time.Time, error) {
-	sock := m.pgSocketFor(slot)
-	port := strconv.Itoa(pgPort(slot))
-	q := "SELECT scope, extract(epoch from muted_until)::bigint FROM notification_mute WHERE muted_until > now();"
-	out, err := exec.Command("psql", "-h", sock, "-p", port, "-U", "ghost", "-d", "ghost",
-		"-At", "-F", "|", "-c", q).Output()
+	c, err := m.pg(slot)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := c.Query("SELECT scope, extract(epoch from muted_until)::bigint FROM notification_mute WHERE muted_until > now()")
 	if err != nil {
 		return nil, fmt.Errorf("mute status: %w", err)
 	}
 	res := map[string]time.Time{}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if line == "" {
+	for _, r := range rows.Vals {
+		if len(r) != 2 || r[0] == nil || r[1] == nil {
 			continue
 		}
-		parts := strings.SplitN(line, "|", 2)
-		if len(parts) != 2 {
+		ts, perr := strconv.ParseInt(*r[1], 10, 64)
+		if perr != nil {
 			continue
 		}
-		ts, err := strconv.ParseInt(parts[1], 10, 64)
-		if err != nil {
-			continue
-		}
-		res[parts[0]] = time.Unix(ts, 0)
+		res[*r[0]] = time.Unix(ts, 0)
 	}
 	return res, nil
 }
 
 func (m *MuteStore) writePostgres(slot int, scope string, until *time.Time) error {
-	sock := m.pgSocketFor(slot)
-	port := strconv.Itoa(pgPort(slot))
-	stmt := fmt.Sprintf(
-		"INSERT INTO notification_mute (scope, muted_until) VALUES ('%s', to_timestamp(%d)) "+
-			"ON CONFLICT (scope) DO UPDATE SET muted_until = EXCLUDED.muted_until;",
-		sqlEscape(scope), until.Unix())
-	out, err := exec.Command("psql", "-h", sock, "-p", port, "-U", "ghost", "-d", "ghost",
-		"-v", "ON_ERROR_STOP=1", "-c", stmt).CombinedOutput()
+	c, err := m.pg(slot)
 	if err != nil {
-		return fmt.Errorf("mute postgres write: %v: %s", err, strings.TrimSpace(string(out)))
+		return err
 	}
-	return nil
+	return c.Exec(
+		"INSERT INTO notification_mute (scope, muted_until) VALUES ($1, to_timestamp($2)) "+
+			"ON CONFLICT (scope) DO UPDATE SET muted_until = EXCLUDED.muted_until",
+		scope, until.Unix())
 }
 
 func (m *MuteStore) deletePostgres(slot int, scope string) error {
-	sock := m.pgSocketFor(slot)
-	port := strconv.Itoa(pgPort(slot))
-	stmt := fmt.Sprintf("DELETE FROM notification_mute WHERE scope = '%s';", sqlEscape(scope))
-	out, err := exec.Command("psql", "-h", sock, "-p", port, "-U", "ghost", "-d", "ghost",
-		"-v", "ON_ERROR_STOP=1", "-c", stmt).CombinedOutput()
+	c, err := m.pg(slot)
 	if err != nil {
-		return fmt.Errorf("mute postgres delete: %v: %s", err, strings.TrimSpace(string(out)))
+		return err
 	}
-	return nil
-}
-
-// redisPass reads the Redis password from services.conf on the mount (derived from the pg socket
-// path). Empty on failure, so an unauthenticated call fails visibly rather than bypassing auth.
-func (m *MuteStore) redisPass(slot int) string {
-	c, err := LoadServicesConfig(filepath.Dir(m.pgSocketFor(slot)))
-	if err != nil {
-		return ""
-	}
-	return c.Redis.Password
+	return c.Exec("DELETE FROM notification_mute WHERE scope = $1", scope)
 }
 
 func (m *MuteStore) writeRedis(slot int, args ...string) error {
-	full := append([]string{"-p", strconv.Itoa(redisPort(slot)), "-a", m.redisPass(slot)}, args...)
-	out, err := exec.Command("redis-cli", full...).CombinedOutput()
+	c, err := m.rds(slot)
 	if err != nil {
-		return fmt.Errorf("mute redis write: %v: %s", err, strings.TrimSpace(string(out)))
+		return err
 	}
-	return nil
+	_, err = c.Do(args...)
+	return err
 }
 
-// sqlEscape doubles single quotes. Scopes are validated against the known daemon set by the handler
-// before reaching here; this is belt-and-braces against a malformed scope.
-func sqlEscape(s string) string { return strings.ReplaceAll(s, "'", "''") }
+
 
 // SocketForMount builds the postgres socket dir from a mount path (matching DataStore.pgData).
 func SocketForMount(mountPath string) string { return filepath.Join(mountPath, "postgres") }

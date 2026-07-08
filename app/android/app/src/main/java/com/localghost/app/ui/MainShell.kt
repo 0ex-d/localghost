@@ -160,7 +160,17 @@ fun MainShell(
                             onNew = { onNewConversation(); dest = Dest.CHAT },
                             onDelete = onDeleteConversation)
                         Dest.MEMORIES -> MemoriesScreen(lifeContext, memories)
-                        Dest.NOTIFICATIONS -> NotificationsScreen(pending)
+                        Dest.NOTIFICATIONS -> {
+                            val nctx = androidx.compose.ui.platform.LocalContext.current
+                            val nowSec = System.currentTimeMillis() / 1000
+                            // Warn within 6 hours of the 2-day token expiring, or once it is dead.
+                            val hint = when {
+                                com.localghost.app.security.SessionStore.isExpired(nctx, nowSec) -> SessionHint.EXPIRED
+                                com.localghost.app.security.SessionStore.isExpiringSoon(nctx, nowSec, 6 * 3600) -> SessionHint.EXPIRING_SOON
+                                else -> SessionHint.NONE
+                            }
+                            NotificationsScreen(pending, hint)
+                        }
                         Dest.HARNESS -> HarnessScreen(daemons)
                         Dest.SYNC -> SyncScreen(sync, onSync, onRequestFullAccess, onTestNotification)
                         Dest.CODES -> PinManagementScreen(devices)

@@ -47,6 +47,11 @@ type UnlockBackend interface {
 	// slot walks the same stages, each a no-op Complete. This is the deliberate "lock now" action,
 	// distinct from the wipe (which destroys keys).
 	Lock(slot int, emit func(profile.Progress)) error
+
+	// AuthorizesLock reports whether pin is a valid main PIN, with NO side effects (no arm, no wipe, no
+	// failure recorded). It is the auth for the `off` command, which locks the box from the local
+	// control socket. off can never wipe, so it uses this instead of Resolve.
+	AuthorizesLock(pin string) bool
 }
 
 // runUnlock drives the backend through the unlock stages, emitting progress. It is shared by both

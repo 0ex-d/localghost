@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/LocalGhostDao/localghost/server/internal/hw"
+	"github.com/LocalGhostDao/localghost/server/internal/profile"
 	"github.com/LocalGhostDao/localghost/server/internal/models"
 )
 
@@ -33,6 +34,62 @@ type Server struct {
 type Config struct {
 	StateDir string // unencrypted: /var/lib/ghost (certs, models)
 	Disk     string // the raw LUKS-formatted data disk, e.g. /dev/nvme1n1 (used by the TPM backend)
+	RunUser  string // if set (--user <name>), watchd runs the ghost.*d cohort as this user
+}
+
+// StatusView is the front-door state ghost-cli reads over secd's control socket. It works even when
+// LOCKED (secd is the always-on process), so `ghost-cli ghost.secd status` tells you the box is
+// locked and appears-down without needing to unlock it first.
+type StatusView struct {
+	Locked      bool `json:"locked"`
+	MountedSlot int  `json:"mountedSlot"` // -1 when locked
+	HasSession  bool `json:"hasSession"`
+}
+
+// Status returns the current front-door state for the control socket.
+func (s *Server) Status() StatusView {
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	return StatusView{
+		Locked:      mounted < 0,
+		MountedSlot: mounted,
+		HasSession:  s.session.ExpiresAt().After(time.Now()),
+	}
+}
+
+// Off is the `off` command: lock the box NOW from the local control socket, authorized by the main
+// PIN rather than an app session. It is the border-crossing "make appears-down true" action , the same
+// teardown as /v1/lock (stop cohort, stop DBs, unmount, luksClose), reachable without opening the app.
+//
+// Deliberately Option A , a LOCK, never a wipe. off can only tear the box down to the cold state the
+// main PIN reverses; it cannot destroy data. That separation is a property you can state plainly: off
+// cannot erase anything, so it cannot be coerced into erasing anything.
+//
+// Indistinguishability: whatever the input, Off returns nothing an observer can read , a wrong PIN, a
+// wipe PIN, an already-locked box, and a successful lock all return with no error and no signal. The
+// only observable is the box being (or staying) down, which is the whole point.
+func (s *Server) Off(pin string) {
+	if !s.unlock.AuthorizesLock(pin) {
+		return // wrong PIN or wipe PIN: off does nothing, indistinguishably. (No wipe: off never erases.)
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.session.Revoke() // already cold; kill any stray token too
+		return
+	}
+	if _, err := s.unlock.Lock(mounted); err != nil {
+		// The volume did not fully close. Stay honest about mounted state (it is still up); the caller
+		// gets no detail either way. Log locally for the operator; the socket reply is opaque.
+		secdLog.Warn("off: lock did not fully complete", "fn", "Off", "err", err)
+		return
+	}
+	s.mu.Lock()
+	s.mounted = -1
+	s.mu.Unlock()
+	s.session.Revoke() // foreground + poller down until the next unlock
 }
 
 func New(cfg Config) (*Server, error) {
@@ -47,7 +104,7 @@ func New(cfg Config) (*Server, error) {
 		models:  models.NewRegistry(filepath.Join(cfg.StateDir, "models")),
 		mounted: -1,
 	}
-	s.session = newSessionManager(12 * time.Hour)
+	s.session = newSessionManager(SessionTTL)
 	// Wire the notification mute store. The mute lives in the in-volume Postgres/Redis, per scope
 	// (global "*" + per-service). The mount path for a slot is <stateDir>/mnt/slot<N> (matching
 	// DMCryptMounter) and the pg socket is its "postgres" subdir. The handlers read it on the
@@ -65,6 +122,21 @@ func New(cfg Config) (*Server, error) {
 	// newDefaultBackend is build-tag-selected: the simulation in the default build, the real TPM +
 	// dm-crypt + Postgres/Redis backend with -tags tpm. This is the seam where unlock meets hardware.
 	s.unlock = newUnlockService(newDefaultBackend(cfg))
+
+	// Reconcile mount state at startup. The dm-crypt mount is KERNEL state: it survives a secd process
+	// restart (secd has no unmount-on-exit). If slot 0 is already mounted , e.g. secd crashed, or was
+	// restarted while unlocked , adopt it rather than defaulting to locked, so we do not split-brain
+	// (report locked while the volume is up and refuse authenticated calls to mounted data).
+	//
+	// HONEST LIMIT: adopting the mount does NOT re-adopt the ghost.*d daemons. They were spawned by
+	// the OLD secd in their own process group (Setpgid), so a secd restart orphans them , still
+	// running, but with no handle in the new supervisor. So after an unclean secd restart: reads work,
+	// but /v1/status shows no daemons and a later Lock cannot signal them. The correct operational fix
+	// is to LOCK before updating secd (the release script does this); this reconcile only keeps the
+	// crash case from looking like data loss. A future improvement is re-adopting daemons by PID file.
+	if s.unlock.Warm(profile.MainSlot) {
+		s.mounted = profile.MainSlot
+	}
 	return s, nil
 }
 
@@ -82,6 +154,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/notifications/seen", s.handleNotificationSeen)
 	mux.HandleFunc("/v1/notifications/delete", s.handleNotificationDelete)
 	mux.HandleFunc("/v1/notifications/answer", s.handleNotificationAnswer)
+	mux.HandleFunc("/v1/frames/upload", s.handleFrameUpload)
+	mux.HandleFunc("/v1/locations", s.handleLocations)
 	mux.HandleFunc("/v1/models", s.handleModels)
 	mux.HandleFunc("/v1/models/", s.handleModelBytes) // /v1/models/{id}
 	return logRequests(mux)
@@ -130,6 +204,28 @@ func (s *Server) handleLock(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	s.session.Revoke() // kill the token: foreground + poller both go down until the next unlock
 	writeJSON(w, map[string]any{"locked": true, "steps": steps})
+}
+
+// Shutdown performs a clean lock for process shutdown (SIGTERM). ghost.secd has ONE shutdown
+// behaviour: if the box is mounted, tear the whole stack down , stop watchd (which stops the cohort
+// and confirms every daemon dead), stop the DBs, unmount, close LUKS , then return. This is why secd
+// is freely restartable: a systemd restart always brings everything down cleanly, never leaving the
+// volume mounted with no front door. The cost is a re-unlock after every secd deploy, which is the
+// correct trade for a security appliance (a stopped gatekeeper must not leave data open). Returns any
+// teardown error so the caller can log it, but shutdown proceeds regardless.
+func (s *Server) Shutdown() error {
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		return nil // already locked; nothing to tear down
+	}
+	_, err := s.unlock.Lock(mounted)
+	s.mu.Lock()
+	s.mounted = -1
+	s.mu.Unlock()
+	s.session.Revoke()
+	return err
 }
 
 // handleInfo returns box + mounted-account summary for the app's home screen. Returns locked state

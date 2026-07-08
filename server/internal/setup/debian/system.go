@@ -1,6 +1,7 @@
 package debian
 
 import (
+	"io"
 	"bytes"
 	"crypto/rand"
 	"fmt"
@@ -36,6 +37,7 @@ type System struct {
 	MainPIN   string // chosen at setup; seals the AMK and opens the container
 	WipePIN   string // chosen at setup; crypto-erases everything (optional, "" to skip)
 	SealMode  string // "tpm" (default) or "software"; which seal tier to provision
+	SvcUser   string // service user the cohort runs as (default "ghost"); owns the volume bin/logs/run
 
 	// Confirm asks the operator a yes/no question during setup. It is used by the TPM sole-tenant
 	// check: if the box's TPM already holds objects LocalGhost did not create, setting the GLOBAL
@@ -187,10 +189,88 @@ func (s *System) writeServicesConfig() error {
 		return cerr
 	}
 	werr := hw.WriteServicesConfig(tmp, cfg)
+	if werr == nil {
+		werr = s.seedVolume(tmp) // bin/ (daemon binaries), logs/, run/, owned by the service user
+	}
 	if uerr := run("umount", tmp); uerr != nil && werr == nil {
-		werr = fmt.Errorf("umount after services.conf: %w", uerr)
+		werr = fmt.Errorf("umount after volume seed: %w", uerr)
 	}
 	return werr
+}
+
+// seedVolume lays down the on-volume layout the box needs at first unlock: the ghost.*d + ghost.watchd
+// binaries under <mount>/bin (watchd execs the cohort from here; a deploy replaces a file here and
+// asks watchd to restart it), plus empty logs/ and run/ dirs. Everything is chowned to the service
+// user so watchd (running as that user) owns its binaries, logs, and control socket. secd stays root
+// on the unencrypted disk; only the volume contents belong to the service user.
+//
+// The binaries are copied FROM ExecDir (where `make` + install put them, e.g. /usr/local/bin) TO the
+// volume. This is the bootstrap: the volume starts empty, so provision seeds the first copy. After
+// this, deploys replace <mount>/bin/<name> directly (the release script) , the unencrypted ExecDir
+// copies are only used to seed a fresh volume.
+func (s *System) seedVolume(mount string) error {
+	user := s.SvcUser
+	if user == "" {
+		user = "ghost"
+	}
+	binDir := filepath.Join(mount, "bin")
+	for _, d := range []string{binDir, filepath.Join(mount, "logs"), filepath.Join(mount, "run"),
+		filepath.Join(mount, "conf"), filepath.Join(mount, "ai-models")} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			return fmt.Errorf("seed dir %s: %w", d, err)
+		}
+	}
+	// The binaries to copy come from the single daemon registry (hw.SeededBinaries), so this list
+	// cannot drift from what watchd supervises. secd is NOT here , it lives on the unencrypted disk and
+	// is run by systemd, not from the volume. ghost.watchd IS here (seeded but not supervised).
+	cohort := hw.SeededBinaries()
+	required := hw.RequiredBinaries()
+	for _, name := range cohort {
+		src := filepath.Join(s.ExecDir, name)
+		if _, err := os.Stat(src); err != nil {
+			// A missing binary at provision is a real problem (the box could not run that daemon), but
+			// not fatal unless it is a required one (the supervisor or a critical daemon , without those
+			// the box cannot function). Seed what exists and let the operator install the rest.
+			if required[name] {
+				return fmt.Errorf("required binary %s not found in %s: %w", name, s.ExecDir, err)
+			}
+			continue
+		}
+		dst := filepath.Join(binDir, name)
+		if err := copyFile(src, dst, 0o750); err != nil {
+			return fmt.Errorf("seed binary %s: %w", name, err)
+		}
+	}
+	// Ownership: the whole volume tree we just created belongs to the service user.
+	if err := run("chown", "-R", user+":"+user, binDir,
+		filepath.Join(mount, "logs"), filepath.Join(mount, "run"),
+		filepath.Join(mount, "conf"), filepath.Join(mount, "ai-models")); err != nil {
+		return fmt.Errorf("chown volume seed to %s: %w", user, err)
+	}
+	return nil
+}
+
+// copyFile copies src to dst with the given mode, syncing to disk (this is going onto the encrypted
+// volume that is about to be unmounted, so the write must land).
+func copyFile(src, dst string, mode os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 // --- PIN registry ---

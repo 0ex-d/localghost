@@ -1,5 +1,5 @@
 // Package ghosthealth is the uniform health/status contract every ghost.*d daemon exposes and
-// ghost.secd's supervisor polls. One implementation, so the shape cannot drift across daemons.
+// ghost.watchd polls. One implementation, so the shape cannot drift across daemons.
 //
 // The split, by design:
 //   - Health is the NARROW waist the supervisor reads every 5s. One byte of meaning (Code) plus a
@@ -52,6 +52,14 @@ type Reporter interface {
 	Health() Health
 	Metrics() json.RawMessage
 }
+
+// ReporterFunc adapts a plain func into a Reporter for daemons whose health changes at runtime (e.g.
+// ghost.oracled is degraded until its model finishes loading). Metrics are nil; use a full Reporter
+// if you need metrics too.
+type ReporterFunc func() Health
+
+func (f ReporterFunc) Health() Health          { return f() }
+func (f ReporterFunc) Metrics() json.RawMessage { return nil }
 
 // Server binds the loopback health/status endpoints for one daemon.
 type Server struct {

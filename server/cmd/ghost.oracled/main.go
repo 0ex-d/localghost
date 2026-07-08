@@ -1,0 +1,196 @@
+// ghost.oracled is the box's inference broker: the model-agnostic front for anything that talks to a
+// model. Callers submit capability+class requests over its control socket; oracled queues them
+// (interactive before background, deadlines drop stale work), routes to a backend resolved from the
+// class, and returns the result. The local backend runs llama.cpp's llama-server as a PRIVATE
+// loopback child, weights loaded from the encrypted volume , so the model runs directly, exposed to
+// nothing, and dies with the mount. Swapping gemma for a frontier model is a conf change here, not a
+// change in any caller.
+//
+// Runs only while UNLOCKED (weights and conf are on the encrypted volume). Started by ghost.watchd
+// from <mount>/bin/ghost.oracled; logs to <mount>/logs/ghost.oracled-YYYY-MM-DD.log.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"flag"
+	"log"
+	"log/slog"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strconv"
+	"sync/atomic"
+	"syscall"
+
+	"github.com/LocalGhostDao/localghost/server/internal/ctlsock"
+	"github.com/LocalGhostDao/localghost/server/internal/ghosthealth"
+	"github.com/LocalGhostDao/localghost/server/internal/oracle"
+	"github.com/LocalGhostDao/localghost/server/internal/oracled"
+	"github.com/LocalGhostDao/localghost/server/internal/rotlog"
+	"github.com/LocalGhostDao/localghost/server/internal/svcconf"
+)
+
+const service = "ghost.oracled"
+
+// conf is ghost.oracled's config: the base keys plus the model wiring. Weights paths are on the
+// encrypted volume.
+type conf struct {
+	svcconf.Base
+	QueueDepth int    `json:"queueDepth"` // max waiting requests before backpressure
+	LlamaBin   string `json:"llamaBin"`   // llama-server binary path
+	ModelPath  string `json:"modelPath"`  // gemma gguf on the volume
+	MmprojPath string `json:"mmprojPath"` // multimodal projector on the volume (optional)
+	ModelName  string `json:"modelName"`  // reported in responses
+	LlamaPort  int    `json:"llamaPort"`  // loopback port for the private llama-server
+}
+
+func defaultConf(mount string) conf {
+	c := conf{
+		Base:       svcconf.DefaultBase(),
+		QueueDepth: 64,
+		LlamaBin:   "/usr/local/bin/llama-server",
+		ModelPath:  filepath.Join(mount, "ai-models", "gemma-4-12b-it-Q4_K_M.gguf"),
+		MmprojPath: filepath.Join(mount, "ai-models", "mmproj-F16.gguf"),
+		ModelName:  "gemma-4-12b",
+		LlamaPort:  18080, // loopback only; not advertised
+	}
+	return c
+}
+
+func main() {
+	port := flag.Int("health-port", envPort("GHOST_HEALTH_PORT"), "loopback health port")
+	mount := flag.String("mount", os.Getenv("GHOST_MOUNT"), "encrypted volume mount path")
+	flag.Parse()
+	if *mount == "" {
+		// watchd sets GHOST_LOG_DIR as <mount>/logs; derive mount if --mount absent.
+		if ld := os.Getenv("GHOST_LOG_DIR"); ld != "" {
+			*mount = filepath.Dir(ld)
+		}
+	}
+	if *mount == "" {
+		log.Fatalf("%s: --mount (or GHOST_MOUNT) is required", service)
+	}
+
+	// Logging through the self-rotating writer.
+	logDir := filepath.Join(*mount, "logs")
+	var lg *slog.Logger
+	var lvl *slog.LevelVar
+	if w, err := rotlog.New(logDir, service); err == nil {
+		defer w.Close()
+		lg, lvl = rotlog.Logger(w)
+	} else {
+		log.Fatalf("%s: open log: %v", service, err)
+	}
+
+	// Config: seed defaults, load the conf file over them.
+	cfg := defaultConf(*mount)
+	confPath := svcconf.Path(*mount, service)
+	if err := svcconf.Load(confPath, &cfg); err != nil {
+		lg.Warn("read conf, using defaults", "fn", "main", "err", err)
+	}
+	svcconf.FillBaseDefaults(&cfg.Base)
+	_ = svcconf.ApplyLevel(lvl, cfg.LogLevel)
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
+	// Broker + the local llama-server backend, started EAGERLY so the weights-load cost is paid now
+	// (on unlock) rather than on a user's first request.
+	broker := oracled.NewBroker(cfg.QueueDepth, lg)
+	llama := oracled.NewLlamaBackend(oracled.LlamaConfig{
+		BinPath:    cfg.LlamaBin,
+		ModelPath:  cfg.ModelPath,
+		MmprojPath: cfg.MmprojPath,
+		Port:       cfg.LlamaPort,
+		ModelName:  cfg.ModelName,
+	})
+	var modelReady atomic.Bool
+	go func() {
+		lg.Info("starting llama-server child", "fn", "main", "model", cfg.ModelName)
+		if err := llama.Start(ctx); err != nil {
+			lg.Error("llama-server did not become ready", "fn", "main", "err", err)
+			return
+		}
+		broker.SetBackend(oracle.ClassLocalSmall, llama)
+		modelReady.Store(true)
+		lg.Info("model ready", "fn", "main", "model", cfg.ModelName)
+	}()
+	broker.Run()
+	defer func() { broker.Stop(); llama.Stop() }()
+
+	// Control socket: base commands + infer + a models command.
+	runDir := filepath.Join(*mount, "run")
+	ctl := ctlsock.NewServer(service, runDir, lg)
+	svcconf.BindBase(ctl, service, lvl, func() (svcconf.Base, map[string]string, error) {
+		fresh := defaultConf(*mount)
+		if err := svcconf.Load(confPath, &fresh); err != nil {
+			return svcconf.Base{}, nil, err
+		}
+		svcconf.FillBaseDefaults(&fresh.Base)
+		// model wiring changes need a restart (cannot reload weights live); report that.
+		report := map[string]string{
+			"queueDepth": "needs-restart",
+			"modelPath":  "needs-restart",
+			"llamaPort":  "needs-restart",
+		}
+		return fresh.Base, report, nil
+	})
+	ctl.Handle("infer", func(args json.RawMessage) (ctlsock.Response, error) {
+		var req oracle.Request
+		if err := json.Unmarshal(args, &req); err != nil {
+			return ctlsock.Response{}, err
+		}
+		ch, ok := broker.Submit(req)
+		if !ok {
+			return ctlsock.Response{}, errFull
+		}
+		resp := <-ch
+		data, _ := json.Marshal(resp)
+		return ctlsock.Response{OK: resp.Err == "", Err: resp.Err, Data: data}, nil
+	})
+	ctl.Handle("models", func(json.RawMessage) (ctlsock.Response, error) {
+		m := map[string]any{"local-small": cfg.ModelName, "ready": modelReady.Load()}
+		data, _ := json.Marshal(m)
+		return ctlsock.Response{OK: true, Data: data}, nil
+	})
+	defer ctl.Cleanup()
+	go func() {
+		if err := ctl.Serve(ctx); err != nil {
+			lg.Error("control server exited", "fn", "main", "err", err)
+		}
+	}()
+
+	// Health: OK once the process is up; degraded until the model is ready. secd/watchd poll this.
+	rep := ghosthealth.ReporterFunc(func() ghosthealth.Health {
+		if modelReady.Load() {
+			return ghosthealth.Health{Code: ghosthealth.OK, Name: service}
+		}
+		return ghosthealth.Health{Code: ghosthealth.Degraded, Name: service, Detail: "model loading"}
+	})
+	srv := ghosthealth.NewServer(service, rep)
+	go func() {
+		if err := srv.Serve(*port); err != nil {
+			lg.Error("health server stopped", "fn", "main", "err", err)
+		}
+	}()
+
+	lg.Info("up", "fn", "main", "healthPort", *port, "queueDepth", cfg.QueueDepth)
+	<-ctx.Done()
+	lg.Info("shutting down", "fn", "main")
+}
+
+var errFull = errFullErr{}
+
+type errFullErr struct{}
+
+func (errFullErr) Error() string { return "inference queue full, try again" }
+
+func envPort(key string) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return 0
+}

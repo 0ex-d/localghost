@@ -1,4 +1,5 @@
 package com.localghost.app.net
+import com.localghost.app.security.SessionStore
 
 import android.content.Context
 import com.localghost.app.chat.Attachment
@@ -108,7 +109,16 @@ object BoxClient {
         // whether the opened account is real or a decoy: the poll shape is identical for every
         // account. Whatever the PIN triggered happened on the box.
         try {
-            BoxHttp.postJson(ctx, "/v1/unlock", JSONObject().put("pin", pin))
+            val resp = BoxHttp.postJson(ctx, "/v1/unlock", JSONObject().put("pin", pin))
+            // A correct PIN returns a fresh session token + its expiry. Persist both so the app can
+            // carry the token (foreground + notification poller) and know when to prompt a re-unlock.
+            // A wrong PIN / failed unlock returns no token; leave any prior session in place to expire.
+            val tok = resp.optString("token", "")
+            if (tok.isNotBlank()) {
+                val expIso = resp.optString("expiresAt", "")
+                val expSec = parseRfc3339ToEpochSec(expIso)
+                if (expSec > 0) SessionStore.write(ctx, tok, expSec)
+            }
         } catch (e: Exception) {
             emit(UnlockSnapshot.failed("could not reach the box: ${e.message}"))
             return@flow
@@ -182,6 +192,8 @@ object BoxClient {
      *  the app can show the spin-down), or an empty list on any error , the caller still locks the app. */
     suspend fun lock(ctx: Context): List<StageProgress> = try {
         val resp = BoxHttp.postJson(ctx, "/v1/lock", org.json.JSONObject())
+        // The box revoked the session server-side; drop the local copy so nothing carries a dead token.
+        SessionStore.clear(ctx)
         val arr = resp.optJSONArray("steps") ?: org.json.JSONArray()
         val out = mutableListOf<StageProgress>()
         for (i in 0 until arr.length()) {
@@ -505,4 +517,14 @@ object BoxClient {
     }
 
     suspend fun report(@Suppress("UNUSED_PARAMETER") result: CommandResult) {}
+    /** Parse an RFC3339 UTC timestamp (as the box emits) to epoch seconds, or 0 on failure. */
+    private fun parseRfc3339ToEpochSec(iso: String): Long {
+        if (iso.isBlank()) return 0
+        return try {
+            java.time.Instant.parse(iso).epochSecond
+        } catch (e: Exception) {
+            0
+        }
+    }
+
 }

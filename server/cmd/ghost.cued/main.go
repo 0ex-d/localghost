@@ -1,90 +1,241 @@
-// ghost.cued is the cueing daemon: it decides when to put a small, timely question in front of you
-// , keep this photo, surface this memory , and produces it as an ANSWERABLE notification (an "ask"
-// with options), which the app renders as buttons and posts back to /v1/notifications/answer.
+// ghost.cued is the cueing daemon: the First Officer that reads the user's context and, quietly and
+// rarely, surfaces the right memory for the moment , keep this photo, remember this , as an answerable
+// notification. It runs the four mechanisms from the "Before You Ask" Hard Truth (a running context
+// description, cheap priming, a high suppression threshold, a per-cue learning curve) for real.
 //
-// HONEST STATE. The hard part of ghost.cued is the trigger: reading context and deciding WHAT to
-// cue and WHEN, quietly and rarely (see the "Before You Ask" Hard Truth). That depends on
-// ghost.synthd (which surfaces the memory) and, for the shoebox nomination, on the photo pipeline
-// that scores the day's best few. Neither is built yet, so this binary does not fake that judgement.
-// What it does provide, for real and end to end, is:
+// HONEST STATE. cued is a full daemon, but the RETRIEVAL it depends on , ghost.synthd , is not built.
+// So the synth client is a stub that returns nothing: cued runs its whole loop, primes on every
+// context change, applies the threshold and learning curve, and correctly surfaces nothing, because
+// synthd proposes nothing yet. cued is running-but-blind, and it logs that plainly on start rather
+// than pretending to think. When synthd lands, its client replaces the stub behind the same interface
+// and cued begins surfacing with no change to this daemon.
 //
-//   - the producer plumbing: it writes ghost.cued asks through the SAME NotifStore.Produce path the
-//     real daemon will use (Postgres history + Redis push cache), not a shortcut;
-//   - one concrete, settled cue , the shoebox nomination , raisable by hand so the ask/answer loop
-//     can be exercised against the app today: `ghost.cued nominate -photo "beach, this morning"`
-//     produces a "Keep this one?" ask with Keep/Skip, which you answer from the phone.
+// The shoebox nomination works end to end today, kept as a control command
+// (ghost-cli ghost.cued nominate photo="beach, this morning") so the ask/answer loop can be exercised
+// against the app now. It produces a real ask through the same NotifStore.Produce path the automatic
+// trigger will use.
 //
-// When ghost.synthd and the photo scorer exist, the automatic trigger replaces the manual nominate
-// subcommand and calls the same produce path. Until then this is the real home for ghost.cued, not a
-// stub that pretends to think.
-//
-// The account must be UNLOCKED (volume mounted, Postgres + Redis up) when this runs; it writes into
-// the in-volume databases and does not unlock anything itself.
+// Runs only while UNLOCKED (the volume is mounted, Postgres + Redis up). Spawned by ghost.watchd from
+// <mount>/bin; logs to <mount>/logs/ghost.cued-YYYY-MM-DD.log.
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"log"
+	"log/slog"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"strconv"
+	"syscall"
+	"time"
 
+	"github.com/LocalGhostDao/localghost/server/internal/ctlsock"
+	"github.com/LocalGhostDao/localghost/server/internal/cued"
+	"github.com/LocalGhostDao/localghost/server/internal/ghosthealth"
 	"github.com/LocalGhostDao/localghost/server/internal/hw"
+	"github.com/LocalGhostDao/localghost/server/internal/rotlog"
+	"github.com/LocalGhostDao/localghost/server/internal/svcconf"
+	"github.com/LocalGhostDao/localghost/server/internal/synth"
 )
 
-// service is this daemon's notification identity. It must match the allow-list in secd
-// (notificationServices) and the mute scopes, so a cue can be muted like any other service.
 const service = "ghost.cued"
 
-// keepOptions are the two answers a shoebox nomination offers. Keep sends the photo to the plain
-// shoebox (survives a forgotten code); Skip leaves it in the encrypted tiers only.
 var keepOptions = []string{"Keep", "Skip"}
 
-func main() {
-	if len(os.Args) < 2 {
-		usage()
-	}
-	switch os.Args[1] {
-	case "nominate":
-		nominate(os.Args[2:])
-	default:
-		usage()
+// conf is ghost.cued's config: base keys plus the engine tuning (threshold, cooldown, learning
+// half-life), all live-reloadable via ghost.cued.conf and the ctlsock, so the suppression behaviour
+// can be tuned on a running box.
+type conf struct {
+	svcconf.Base
+	SurfaceThreshold   float64 `json:"surfaceThreshold"`
+	MinDistinctiveness float64 `json:"minDistinctiveness"`
+	PrimeLimit         int     `json:"primeLimit"`
+	LearningHalfLife   float64 `json:"learningHalfLife"`
+	CooldownSeconds    int     `json:"cooldownSeconds"`
+	Slot               int     `json:"slot"`
+	// SynthService names the daemon answering prime/ready. ghost.synthd is the default; ghost.searchd
+	// answers the same contract over the real corpus , flip here when retiring synthd.
+	SynthService string `json:"synthService"`
+}
+
+func defaultConf() conf {
+	d := cued.DefaultConfig()
+	return conf{
+		Base:               svcconf.DefaultBase(),
+		SurfaceThreshold:   d.SurfaceThreshold,
+		MinDistinctiveness: d.MinDistinctiveness,
+		PrimeLimit:         d.PrimeLimit,
+		LearningHalfLife:   d.LearningHalfLife,
+		CooldownSeconds:    int(d.Cooldown.Seconds()),
+		Slot:               0,
 	}
 }
 
-// nominate produces one shoebox-nomination ask for a photo. This is the manual stand-in for the
-// automatic daily selection until the photo scorer exists; the produced ask is real and answerable.
-func nominate(args []string) {
-	fs := flag.NewFlagSet("nominate", flag.ExitOnError)
-	stateDir := fs.String("state", "/var/lib/ghost", "unencrypted state dir (to locate the mount)")
-	slot := fs.Int("slot", 0, "account slot (single-account model: 0)")
-	photo := fs.String("photo", "", "a short reference for the photo being nominated (required)")
-	_ = fs.Parse(args)
-	if *photo == "" {
-		fmt.Fprintln(os.Stderr, "nominate: -photo is required")
-		os.Exit(2)
+func (c conf) engineConfig() cued.Config {
+	return cued.Config{
+		SurfaceThreshold:   c.SurfaceThreshold,
+		MinDistinctiveness: c.MinDistinctiveness,
+		PrimeLimit:         c.PrimeLimit,
+		LearningHalfLife:   c.LearningHalfLife,
+		Cooldown:           time.Duration(c.CooldownSeconds) * time.Second,
 	}
+}
+
+// notifSurfacer produces a cleared cue as a real answerable notification through NotifStore , the same
+// produce path the manual nominate uses.
+type notifSurfacer struct {
+	store *hw.NotifStore
+	slot  int
+}
+
+func (n notifSurfacer) Surface(c synth.Candidate) error {
+	kind := "note"
+	if len(c.Options) > 0 {
+		kind = "ask"
+	}
+	return n.store.Produce(n.slot, hw.Notification{
+		Service: service, Kind: kind, Title: c.Title, Body: c.Body, Options: c.Options,
+	})
+}
+
+func main() {
+	port := flag.Int("health-port", envPort("GHOST_HEALTH_PORT"), "loopback health port")
+	mount := flag.String("mount", os.Getenv("GHOST_MOUNT"), "encrypted volume mount path")
+	flag.Parse()
+	if *mount == "" {
+		if ld := os.Getenv("GHOST_LOG_DIR"); ld != "" {
+			*mount = filepath.Dir(ld)
+		}
+	}
+	if *mount == "" {
+		log.Fatalf("%s: --mount (or GHOST_MOUNT) is required", service)
+	}
+
+	logDir := filepath.Join(*mount, "logs")
+	var lg *slog.Logger
+	var lvl *slog.LevelVar
+	if w, err := rotlog.New(logDir, service); err == nil {
+		defer w.Close()
+		lg, lvl = rotlog.Logger(w)
+	} else {
+		log.Fatalf("%s: open log: %v", service, err)
+	}
+
+	cfg := defaultConf()
+	confPath := svcconf.Path(*mount, service)
+	if err := svcconf.Load(confPath, &cfg); err != nil {
+		lg.Warn("read conf, using defaults", "fn", "main", "err", err)
+	}
+	svcconf.FillBaseDefaults(&cfg.Base)
+	_ = svcconf.ApplyLevel(lvl, cfg.LogLevel)
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
 
 	store := hw.NewNotifStore(func(s int) string {
-		mnt := filepath.Join(*stateDir, "mnt", fmt.Sprintf("slot%d", s))
-		return hw.SocketForMount(mnt)
+		return hw.SocketForMount(filepath.Join(*mount, "mnt", fmt.Sprintf("slot%d", s)))
 	})
 
-	ask := hw.Notification{
-		Service: service,
-		Kind:    "ask",
-		Title:   "Keep this one?",
-		Body:    fmt.Sprintf("A favourite from today (%s) , keep it in the plain shoebox so a lost code can never erase it?", *photo),
-		Options: keepOptions,
+	runDir := os.Getenv("GHOST_RUN_DIR")
+	if runDir == "" {
+		runDir = filepath.Join(*mount, "run")
 	}
-	if err := store.Produce(*slot, ask); err != nil {
-		fmt.Fprintf(os.Stderr, "produce cue: %v\n", err)
-		os.Exit(1)
+
+	// The engine, wired to the REAL synth client talking to ghost.synthd over its control socket. Today
+	// synthd's index is empty, so Prime returns nothing and cued surfaces nothing , but the path is
+	// real: when synthd's corpus is built, cued starts surfacing with no change here. A short timeout
+	// keeps priming a hot path (cued would rather get nothing fast than block on retrieval).
+	synthSvc := cfg.SynthService
+	if synthSvc == "" {
+		synthSvc = "ghost.synthd"
 	}
-	fmt.Printf("raised a shoebox nomination for %q into slot %d\n", *photo, *slot)
+	sc := synth.NewSocketClientFor(synthSvc, runDir, 2*time.Second)
+	engine := cued.New(cfg.engineConfig(), sc, notifSurfacer{store: store, slot: cfg.Slot}, lg)
+	if !sc.Ready() {
+		lg.Info("running; ghost.synthd reports no index yet, so no automatic cue will be raised "+
+			"(manual nominate still works)", "fn", "main")
+	}
+
+	ctl := ctlsock.NewServer(service, runDir, lg)
+	svcconf.BindBase(ctl, service, lvl, func() (svcconf.Base, map[string]string, error) {
+		fresh := defaultConf()
+		if err := svcconf.Load(confPath, &fresh); err != nil {
+			return svcconf.Base{}, nil, err
+		}
+		svcconf.FillBaseDefaults(&fresh.Base)
+		engine.SetConfig(fresh.engineConfig()) // tuning is hot , applied live
+		return fresh.Base, map[string]string{
+			"surfaceThreshold": "applied", "cooldownSeconds": "applied", "learningHalfLife": "applied",
+		}, nil
+	})
+	ctl.Handle("nominate", func(args json.RawMessage) (ctlsock.Response, error) {
+		var a struct {
+			Photo string `json:"photo"`
+			Slot  int    `json:"slot"`
+		}
+		if len(args) > 0 {
+			_ = json.Unmarshal(args, &a)
+		}
+		if a.Photo == "" {
+			return ctlsock.Response{}, fmt.Errorf("nominate requires photo=<ref>")
+		}
+		ask := hw.Notification{
+			Service: service, Kind: "ask", Title: "Keep this one?",
+			Body: fmt.Sprintf("A favourite from today (%s) , keep it in the plain shoebox so a lost "+
+				"code can never erase it?", a.Photo),
+			Options: keepOptions,
+		}
+		if err := store.Produce(a.Slot, ask); err != nil {
+			return ctlsock.Response{}, err
+		}
+		return ctlsock.Response{OK: true, Text: "raised a shoebox nomination for " + a.Photo}, nil
+	})
+	ctl.Handle("queue", func(json.RawMessage) (ctlsock.Response, error) {
+		data, _ := json.Marshal(engine.Snapshot())
+		return ctlsock.Response{OK: true, Data: data}, nil
+	})
+	defer ctl.Cleanup()
+	go func() {
+		if err := ctl.Serve(ctx); err != nil {
+			lg.Error("control server exited", "fn", "main", "err", err)
+		}
+	}()
+
+	// Health: OK , the daemon is up and doing its job (which is mostly staying silent). Detail notes
+	// retrieval is offline so /v1/status can show "cueing online, retrieval offline".
+	rep := ghosthealth.ReporterFunc(func() ghosthealth.Health {
+		d := ""
+		if !sc.Ready() {
+			d = "retrieval offline (synthd not built)"
+		}
+		return ghosthealth.Health{Code: ghosthealth.OK, Name: service, Detail: d}
+	})
+	hsrv := ghosthealth.NewServer(service, rep)
+	go func() {
+		if err := hsrv.Serve(*port); err != nil {
+			lg.Error("health server stopped", "fn", "main", "err", err)
+		}
+	}()
+
+	// The context loop. When context-signal sources exist, they feed engine.UpdateContext and the four
+	// mechanisms run per change. Today there are no signal sources on the box, so the loop idles ,
+	// correct: no context change, no priming, no cue. cued is present and ready, waiting for both the
+	// signals and synthd, without faking either.
+	lg.Info("up", "fn", "main", "healthPort", *port, "surfaceThreshold", cfg.SurfaceThreshold,
+		"cooldownSeconds", cfg.CooldownSeconds)
+	<-ctx.Done()
+	lg.Info("shutting down", "fn", "main")
 }
 
-func usage() {
-	fmt.Fprintln(os.Stderr, "usage: ghost.cued nominate -photo <ref> [-state DIR] [-slot N]")
-	fmt.Fprintln(os.Stderr, "  raises a real ghost.cued ask (the automatic trigger awaits ghost.synthd)")
-	os.Exit(2)
+func envPort(key string) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return 0
 }

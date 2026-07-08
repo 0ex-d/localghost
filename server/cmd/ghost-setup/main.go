@@ -152,6 +152,7 @@ func main() {
 	stateDir := flag.String("state", "/var/lib/ghost", "unencrypted state dir")
 	tpmDevice := flag.String("tpm", "/dev/tpmrm0", "TPM resource-manager device (seals the disk key)")
 	sealMode := flag.String("seal", "tpm", "seal tier: 'tpm' (hardware-sealed key, default) or 'software' (PIN-derived key, no hardware lockout , for machines without a TPM)")
+	svcUser := flag.String("user", "ghost", "service user the ghost.*d cohort runs as (owns the volume bin/logs/run)")
 	port := flag.Int("port", 8443, "mTLS port ghost.secd serves behind nginx")
 	apply := flag.Bool("apply", false, "actually provision (default is a dry run)")
 	flag.Parse()
@@ -224,6 +225,7 @@ func main() {
 
 	sys := debian.NewSystem(diskVal, *caDir, hostVal, *execDir, *stateDir, *tpmDevice, mainPIN, wipePIN)
 	sys.SealMode = *sealMode
+	sys.SvcUser = *svcUser
 
 	// nginx config + systemd units the plan installs.
 	ghostSecdAddr := fmt.Sprintf("127.0.0.1:%d", *port)
@@ -233,6 +235,7 @@ func main() {
 		nginxConf = setup.DomainConfig{Domain: domainVal}.NginxConfig(ghostSecdAddr)
 	}
 	units := setup.SystemdUnits(*execDir, setup.DaemonConfig{
+		RunUser: *svcUser,
 		Host: hostVal, CaDir: *caDir, StateDir: *stateDir, Disk: diskVal, Port: *port,
 	})
 

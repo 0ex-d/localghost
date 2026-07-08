@@ -19,6 +19,16 @@ import (
 //
 // A token does NOT unmount or re-lock anything; it is an authorisation credential only. The mount
 // persists across token churn until reboot.
+//
+// TTL is 2 days. It is deliberately longer than a work session because the background notification
+// poller carries this same token: once it expires the box can no longer be polled, so the app stops
+// getting notifications until the user re-opens and re-unlocks. Two days balances "not nagging for a
+// PIN constantly" against "a lost/stolen phone's token dies on its own within a couple of days". The
+// app knows the expiry (it is returned at issue) and shows a gentle "reopen to check notifications"
+// state as it approaches, since the box cannot notify a session it can no longer authenticate.
+
+// SessionTTL is the fixed lifetime of a session token, and the hard ceiling , nothing mints longer.
+const SessionTTL = 48 * time.Hour
 
 type sessionManager struct {
 	mu      sync.Mutex
@@ -28,10 +38,21 @@ type sessionManager struct {
 }
 
 func newSessionManager(ttl time.Duration) *sessionManager {
-	if ttl <= 0 {
-		ttl = 12 * time.Hour
+	if ttl <= 0 || ttl > SessionTTL {
+		ttl = SessionTTL // default and hard cap: no session outlives SessionTTL
 	}
 	return &sessionManager{ttl: ttl}
+}
+
+// ExpiresAt reports the current token's expiry so the issue path can hand it to the app. Zero time
+// if there is no live token.
+func (m *sessionManager) ExpiresAt() time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.token == "" {
+		return time.Time{}
+	}
+	return m.expires
 }
 
 // Issue mints a fresh token, replacing any previous one. Called on a correct-PIN unlock.

@@ -146,15 +146,15 @@ func DefaultPlan(sys System, withDomain bool, dnsCheck func() error, nginxConf s
 			Name:     "install systemd services",
 			Check:    sys.ServicesInstalled,
 			Describe: func() (string, error) {
-				return fmt.Sprintf("install %d systemd unit (ghost.secd only; the ghost.*d daemons are "+
-					"supervised by ghost.secd on the encrypted volume, not by systemd)", len(units)), nil
+				return fmt.Sprintf("install %d systemd unit (ghost.secd only; ghost.secd starts ghost.watchd "+
+					"on the encrypted volume, and ghost.watchd supervises the ghost.*d daemons, not systemd)", len(units)), nil
 			},
 			Do:       func() error { return sys.InstallServices(units) },
 		},
 		Step{
 			Name:     "enable + start services",
 			Check:    yes,
-			Describe: func() (string, error) { return "enable and start ghost.secd (it supervises the daemons itself)", nil },
+			Describe: func() (string, error) { return "enable and start ghost.secd (it starts ghost.watchd, which supervises the daemons)", nil },
 			Do:       func() error { return sys.EnableAndStartServices(unitNames(units)) },
 		},
 		Step{
