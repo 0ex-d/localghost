@@ -332,3 +332,16 @@ ENCRYPTED volume , gemma + mmproj + embeddinggemma into <mount>/ai-models/ after
 a step 8 first-unlock checklist that starts with the PTT cold power cycle and ends with the one-photo
 test that exercises the whole spine , upload, EXIF, archive, ingest, queue, vision, chunking,
 embedding , in a single tap.
+
+## The sim is dead; the docs now know it
+
+Confirmed against the tree: one build, no tags, both seal tiers compiled in, tier chosen at runtime
+from GHOST_SEAL_MODE in seal.env, never a silent downgrade. Encryption is always software (LUKS); the
+tier is key custody , PTT-sealed on real hardware, Argon2id-wrapped for TPM-less dev boxes. The
+README's step 2 and both setup scripts' printed hints still said `make box TAGS=tpm` with the old
+sim warning; corrected. Also removed internal/secd/simkey_test.go, a compile bomb pinning a
+derivation the runtime-tier rework deleted (it called simDiskKey and debian.SimDiskKey, neither of
+which exists) , it only survived because the targeted test list never included ./internal/secd/.
+Coverage is better than what it pinned: hw/seal_software_test.go holds five software-tier tests
+(roundtrip, wrong PIN, rekey, cross-slot rejection, destroy). The first-unlock checklist now starts
+by reading GHOST_SEAL_MODE and stopping if real hardware says software.

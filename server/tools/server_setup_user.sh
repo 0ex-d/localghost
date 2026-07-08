@@ -112,7 +112,7 @@ else bad "go" "(not installed , fetch go$GO_WANT from https://go.dev/dl/ into \$
 echo
 echo "==================================================================="
 if [ "$problems" = 0 ]; then
-    echo " READY. Build (no root):  cd <server> && make box TAGS=tpm"
+    echo " READY. Build (no root):  cd <server> && make box"
     echo " Then provision in your ROOT session:  ./bin/ghost-setup --disk <dev> --host <ip> --apply"
 else
     echo " NOT READY , see FAIL lines. Missing packages/access => run server_setup_root.sh as root,"

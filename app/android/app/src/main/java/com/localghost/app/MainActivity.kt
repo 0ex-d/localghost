@@ -616,6 +616,11 @@ class MainActivity : ComponentActivity() {
             tearDownCache()
         }
     }
+
+    // tearDownCache drops every piece of unlocked-session state held in app memory , chat, caches,
+    // loadables, jobs. Called on lock, on local-only entry, and after re-pair, so nothing from an
+    // unlocked session lingers on the phone once the box goes dark.
+    private fun tearDownCache() {
         messages.clear()
         pendingAttachments = emptyList()
         lifeContext = null

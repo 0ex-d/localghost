@@ -38,11 +38,24 @@ Group grants are stamped at login; the session that existed before step 1 does n
 `exec su - <name>` or reconnect, then:
 
     ./tools/server_setup_user.sh --host box.example.com   # --host optional if already set
-    make box TAGS=tpm                                          # the REAL backend; sim is default
+    make box                                                   # ONE build; no tags, no sim
 
 Expect all OK except a GHOST_HOST reachability WARN , nothing is listening yet, that is the
-timeline, not a fault. The sim/tpm distinction is the one to respect: a sim build on the real box
-means your PINs guard a simulation while the disk sits unsealed.
+timeline, not a fault.
+
+There is no sim build any more. One binary compiles BOTH seal tiers and the choice is made at
+RUNTIME from `GHOST_SEAL_MODE` in seal.env (written by ghost-setup; tpm is the default). The two
+tiers differ in KEY CUSTODY only , the volume encryption is always software (LUKS):
+
+- **tpm**: the disk key is sealed in the fTPM (Intel PTT here), with the hardware dictionary-attack
+  counter guarding PIN guesses. This is what a real box runs.
+- **software**: for TPM-less dev machines. The key is wrapped under Argon2id(PIN) in seal.env; an
+  attacker with the raw disk can brute-force the PIN offline with no lockout. Real data does not
+  belong on this tier, and the code says so where it lives.
+
+The rule that replaces the old sim warning: the box NEVER silently downgrades. seal.env says tpm and
+the TPM is unusable = a hard stop with a message, never a quiet fall to software that could not
+unseal the hardware-sealed key anyway.
 
 ## 3. Build + install the app , before any QR exists
 
@@ -128,6 +141,8 @@ not clear it. Then spend PIN attempts like they cost something, because they do.
 
 Unlock from the app with the main PIN, then verify in order , each step gates the next:
 
+    sudo grep GHOST_SEAL_MODE /var/lib/ghost/seal.env   # says tpm , if it says software on real
+                                                        # hardware, stop and re-provision
     ./bin/ghost-cli ghost.secd status            # unlocked, slot mounted
     ./bin/ghost-cli ghost.watchd status          # cohort up; searchd/oracled supervised
     ./bin/ghost-cli ghost.oracled status         # model loading; ~30s degraded while llama warms is normal

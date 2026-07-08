@@ -10,8 +10,11 @@ package secd
 // documented go-tpm + cryptsetup interfaces and exercised on the box.
 
 import (
-	"context"
-	"log"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"syscall"

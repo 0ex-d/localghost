@@ -239,7 +239,7 @@ else
     echo " NEXT (as $SVC_USER, after RE-LOGIN so the tss group applies):"
     echo "   1) edit /etc/ghost/ghost.env , set GHOST_HOST to the box IP/hostname"
     echo "   2) tools/server_setup_user.sh        # confirm everything as $SVC_USER"
-    echo "   3) cd <server> && make box TAGS=tpm  # build the daemon"
+    echo "   3) cd <server> && make box  # one build; seal tier is runtime (seal.env)"
     echo "   4) provisioning (ghost-setup --apply) still needs root , run it in this root session"
 fi
 echo "==================================================================="
