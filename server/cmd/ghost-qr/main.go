@@ -21,7 +21,7 @@ import (
 func main() {
 	caDir := flag.String("ca", "./ghost-ca", "CA + cert directory (created if absent)")
 	host := flag.String("host", "", "host/IP or domain the phone connects to (required)")
-	port := flag.Int("port", 8443, "public mTLS port in the enrol link")
+	port := flag.Int("port", 443, "PUBLIC port in the enrol link the phone connects to (nginx SNI on the hostname; proxies to --secd)")
 	secd := flag.String("secd", "127.0.0.1:8443", "ghost.secd loopback address nginx proxies to")
 	nginxOut := flag.String("nginx-out", "", "optional: write the appears-down nginx config here")
 	flag.Parse()

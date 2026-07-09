@@ -101,11 +101,14 @@ server {
     # no cert, bad cert, wrong path , gets the identical 503.
     location / {
         if ($ssl_client_verify != SUCCESS) { return 503; }
-        proxy_pass https://%[2]s;
+        # secd serves plain HTTP on loopback , nginx already terminated the public TLS and this hop
+        # never leaves the box (127.0.0.1 on the encrypted host). http:// here, not https://, or nginx
+        # speaks TLS to a plaintext server and every proxied request fails into the same 503.
+        proxy_pass http://%[2]s;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Client-Cert  $ssl_client_escaped_cert; # ghost.secd binds device -> account
-        proxy_ssl_verify off; # ghost.secd presents the box's own cert; account auth is enforced there
+        # (no proxy_ssl_* here , the upstream is plain http on loopback; account auth is enforced in secd)
     }
 }
 `, d.Domain, ghostSecdAddr)

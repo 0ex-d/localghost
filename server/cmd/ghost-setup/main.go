@@ -155,7 +155,8 @@ func main() {
 	tpmDevice := flag.String("tpm", "/dev/tpmrm0", "TPM resource-manager device (seals the disk key)")
 	sealMode := flag.String("seal", "tpm", "seal tier: 'tpm' (hardware-sealed key, default) or 'software' (PIN-derived key, no hardware lockout , for machines without a TPM)")
 	svcUser := flag.String("user", "ghost", "service user the ghost.*d cohort runs as (owns the volume bin/logs/run)")
-	port := flag.Int("port", 8443, "mTLS port ghost.secd serves behind nginx")
+	port := flag.Int("port", 8443, "INTERNAL loopback port ghost.secd serves on, behind nginx")
+	pubPort := flag.Int("pub-port", 443, "PUBLIC mTLS port the phone connects to (nginx listens here and proxies to --port)")
 	apply := flag.Bool("apply", false, "actually provision (default is a dry run)")
 	flag.Parse()
 
@@ -365,7 +366,7 @@ func main() {
 	pki := debian.NewPKI(*caDir, hostVal)
 	popts := pair.Options{
 		Host:        hostVal,
-		Port:        *port,
+		Port:        *pubPort, // the QR advertises the PUBLIC port; nginx on it proxies to secd's --port
 		CertPath:    *caDir + "/box-server.pem",
 		BoxName:     hostVal,
 		IssueDevice: pki.IssueDeviceCertDER,
