@@ -53,11 +53,22 @@ Architectures: ${ARCH}
 Signed-By: /usr/share/keyrings/redis-archive-keyring.gpg
 EOF
 
+# Preseed BEFORE the packages land: postgresql-common auto-creates a 'main' cluster at install time
+# unless told not to. With this, no cluster is ever created on the system drive , the drop further
+# down becomes belt-and-braces for boxes that installed before this preseed existed.
+echo "> preseeding: no auto-created cluster..."
+install -d /etc/postgresql-common
+if ! grep -qE '^\s*create_main_cluster\s*=\s*false' /etc/postgresql-common/createcluster.conf 2>/dev/null; then
+    printf '\n# LocalGhost: clusters live on the encrypted volume, never the system drive\ncreate_main_cluster = false\n' \
+        >> /etc/postgresql-common/createcluster.conf
+fi
+
 echo "> installing binaries..."
 apt-get update
-# postgresql-18 pulls the server + client + postgresql-common. redis-server + redis-tools give the
+# postgresql-18 pulls the server + client + postgresql-common; postgresql-18-pgvector is the search
+# layer's vector index (rides into the volume bundle later). redis-server + redis-tools give the
 # server binary and redis-cli. We install, then immediately neutralise the auto-provisioning below.
-apt-get install -y postgresql-18 postgresql-client-18 redis-server redis-tools
+apt-get install -y postgresql-18 postgresql-client-18 postgresql-18-pgvector redis-server redis-tools
 
 # --- Neutralise auto-provisioning -------------------------------------------------------------
 echo "> stopping + masking distro units (ghost.secd owns these lifecycles)..."

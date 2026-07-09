@@ -158,6 +158,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/locations", s.handleLocations)
 	mux.HandleFunc("/v1/models", s.handleModels)
 	mux.HandleFunc("/v1/models/", s.handleModelBytes) // /v1/models/{id}
+	mux.HandleFunc("/v1/openapi.json", s.handleOpenAPI)
 	return logRequests(mux)
 }
 

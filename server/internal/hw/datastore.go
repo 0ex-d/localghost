@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -138,13 +139,13 @@ func (d *DataStore) startPostgres(slot int, c ServicesConfig) error {
 		if err := os.MkdirAll(data, 0o700); err != nil {
 			return err
 		}
-		if out, err := exec.Command("initdb", "-D", data, "--auth=trust", "--encoding=UTF8").CombinedOutput(); err != nil {
+		if out, err := d.pgCmd(filepath.Dir(data), "initdb", "-D", data, "--auth=trust", "--encoding=UTF8").CombinedOutput(); err != nil {
 			return fmt.Errorf("initdb slot %d: %v: %s", slot, err, strings.TrimSpace(string(out)))
 		}
 	}
 	// start, bound to loopback on the config's port, socket inside the volume.
 	opts := fmt.Sprintf("-p %d -k %s -c listen_addresses=127.0.0.1", c.Postgres.Port, data)
-	cmd := exec.Command("pg_ctl", "-D", data, "-o", opts, "-w", "-t", "30", "start")
+	cmd := d.pgCmd(filepath.Dir(data), "pg_ctl", "-D", data, "-o", opts, "-w", "-t", "30", "start")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("pg_ctl start slot %d: %v: %s", slot, err, strings.TrimSpace(string(out)))
 	}
@@ -180,7 +181,7 @@ func (d *DataStore) initPostgresAuthAndSchema(slot int, c ServicesConfig) error 
 		fmt.Sprintf("CREATE DATABASE %s OWNER %s;", c.Postgres.Name, c.Postgres.User),
 	}
 	for _, s := range stmts {
-		if out, err := exec.Command("psql", "-h", data, "-p", port, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", s).CombinedOutput(); err != nil {
+		if out, err := d.pgCmd(filepath.Dir(data), "psql", "-h", data, "-p", port, "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-c", s).CombinedOutput(); err != nil {
 			return fmt.Errorf("psql %q: %v: %s", s, err, strings.TrimSpace(string(out)))
 		}
 	}
@@ -243,7 +244,7 @@ CREATE TABLE IF NOT EXISTS location_points (
   PRIMARY KEY (ts, source)
 );
 `
-	if out, err := exec.Command("psql", "-h", data, "-p", port, "-d", c.Postgres.Name, "-v", "ON_ERROR_STOP=1", "-c", schema).CombinedOutput(); err != nil {
+	if out, err := d.pgCmd(filepath.Dir(data), "psql", "-h", data, "-p", port, "-d", c.Postgres.Name, "-v", "ON_ERROR_STOP=1", "-c", schema).CombinedOutput(); err != nil {
 		return fmt.Errorf("apply schema: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 
@@ -268,7 +269,7 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO %[1]s;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %[3]s;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO %[3]s;`,
 		c.Postgres.ROUser, pgLit(c.Postgres.ROPass), c.Postgres.RWUser, pgLit(c.Postgres.RWPass), c.Postgres.Name)
-	if out, err := exec.Command("psql", "-h", data, "-p", port, "-d", c.Postgres.Name, "-v", "ON_ERROR_STOP=1", "-c", roleSQL).CombinedOutput(); err != nil {
+	if out, err := d.pgCmd(filepath.Dir(data), "psql", "-h", data, "-p", port, "-d", c.Postgres.Name, "-v", "ON_ERROR_STOP=1", "-c", roleSQL).CombinedOutput(); err != nil {
 		return fmt.Errorf("create roles: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 
@@ -308,11 +309,54 @@ func (d *DataStore) hardenPgHBA(slot int, c ServicesConfig) error {
 	if err := os.WriteFile(filepath.Join(data, "pg_hba.conf"), []byte(hba), 0o600); err != nil {
 		return err
 	}
-	out, err := exec.Command("pg_ctl", "-D", data, "reload").CombinedOutput()
+	out, err := d.pgCmd(filepath.Dir(data), "pg_ctl", "-D", data, "reload").CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("pg_ctl reload: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// --- volume-resident DB runtime ---
+// The encrypted drive can carry the database BINARIES too, not just the data. tools/
+// bundle_db_runtime.sh mirrors Debian's Postgres tree (usr/lib/postgresql/<ver> + usr/share/
+// postgresql/<ver> , the structure must travel intact because PG relocates by RELATIVE offset from
+// where the binary actually is) plus the redis binaries and both shared-library closures into
+// <mount>/runtime. When that runtime exists, every DB process this file spawns comes from the volume:
+// binaries live and die with the mount, version-pinned to the data they initdb'd, immune to OS apt
+// upgrades. When it does not exist (first bring-up), PATH , the OS packages , is the fallback, and
+// after bundling the OS packages can be purged entirely.
+
+// pgRuntimeBin locates the bundled Postgres bin dir and the LD_LIBRARY_PATH to run it with.
+func pgRuntimeBin(mount string) (string, string, bool) {
+	globs, _ := filepath.Glob(filepath.Join(mount, "runtime", "pgroot", "usr", "lib", "postgresql", "*", "bin"))
+	if len(globs) == 0 {
+		return "", "", false
+	}
+	sort.Strings(globs)
+	bin := globs[len(globs)-1]
+	ld := filepath.Join(filepath.Dir(bin), "lib") + ":" + filepath.Join(mount, "runtime", "pgroot", "lib")
+	return bin, ld, true
+}
+
+// pgCmd builds a command for a Postgres binary, volume runtime first, PATH fallback.
+func (d *DataStore) pgCmd(mount, name string, args ...string) *exec.Cmd {
+	if bin, ld, ok := pgRuntimeBin(mount); ok {
+		cmd := exec.Command(filepath.Join(bin, name), args...)
+		cmd.Env = append(os.Environ(), "LD_LIBRARY_PATH="+ld)
+		return cmd
+	}
+	return exec.Command(name, args...)
+}
+
+// redisCmd is the same contract for redis-server / redis-cli.
+func (d *DataStore) redisCmd(mount, name string, args ...string) *exec.Cmd {
+	bin := filepath.Join(mount, "runtime", "redis", "bin", name)
+	if _, err := os.Stat(bin); err == nil {
+		cmd := exec.Command(bin, args...)
+		cmd.Env = append(os.Environ(), "LD_LIBRARY_PATH="+filepath.Join(mount, "runtime", "redis", "lib"))
+		return cmd
+	}
+	return exec.Command(name, args...)
 }
 
 // pgIdent admits only strict lower-case identifiers for role/database names sourced from
@@ -344,7 +388,7 @@ func pgLit(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'
 // everything just created.
 func (d *DataStore) applySearchSchema(sockDir, port string, c ServicesConfig) error {
 	run := func(sql string) error {
-		out, err := exec.Command("psql", "-h", sockDir, "-p", port, "-d", c.Postgres.Name,
+		out, err := d.pgCmd(filepath.Dir(sockDir), "psql", "-h", sockDir, "-p", port, "-d", c.Postgres.Name,
 			"-v", "ON_ERROR_STOP=1", "-c", sql).CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
@@ -373,7 +417,7 @@ func (d *DataStore) stopPostgres(slot int, _ ServicesConfig) error {
 	if _, err := os.Stat(filepath.Join(data, "postmaster.pid")); os.IsNotExist(err) {
 		return nil // not running
 	}
-	out, err := exec.Command("pg_ctl", "-D", data, "-m", "fast", "-w", "stop").CombinedOutput()
+	out, err := d.pgCmd(filepath.Dir(data), "pg_ctl", "-D", data, "-m", "fast", "-w", "stop").CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("pg_ctl stop slot %d: %v: %s", slot, err, strings.TrimSpace(string(out)))
 	}
@@ -389,7 +433,7 @@ func (d *DataStore) startRedis(slot int, c ServicesConfig) error {
 	// requirepass from services.conf: even loopback-only, an unauthenticated Redis lets any local
 	// process read the cache. The password gates it, matching Postgres. The readiness ping below must
 	// authenticate too (-a), so a wrong/missing password reads as not-ready, not silently open.
-	cmd := exec.Command("redis-server",
+	cmd := d.redisCmd(filepath.Dir(dir), "redis-server",
 		"--port", fmt.Sprint(c.Redis.Port),
 		"--bind", "127.0.0.1",
 		"--dir", dir,
@@ -403,7 +447,7 @@ func (d *DataStore) startRedis(slot int, c ServicesConfig) error {
 	}
 	// brief readiness wait, authenticated
 	for i := 0; i < 30; i++ {
-		if exec.Command("redis-cli", "-p", fmt.Sprint(c.Redis.Port), "-a", c.Redis.Password, "ping").Run() == nil {
+		if d.redisCmd(filepath.Dir(dir), "redis-cli", "-p", fmt.Sprint(c.Redis.Port), "-a", c.Redis.Password, "ping").Run() == nil {
 			return d.ensureRedisACL(slot, c)
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -419,13 +463,14 @@ func (d *DataStore) ensureRedisACL(slot int, c ServicesConfig) error {
 	if c.Redis.ROUser == "" || c.Redis.RWUser == "" {
 		return nil // pre-role config; nothing to assert
 	}
+	mount := filepath.Dir(d.pgData(slot))
 	users := [][]string{
 		{"ACL", "SETUSER", c.Redis.ROUser, "on", ">" + c.Redis.ROPass, "~*", "+@read", "+ping", "+auth", "+hello"},
 		{"ACL", "SETUSER", c.Redis.RWUser, "on", ">" + c.Redis.RWPass, "~*", "+@read", "+@write", "+@keyspace", "+ping", "+auth", "+hello"},
 	}
 	for _, u := range users {
 		args := append([]string{"-p", fmt.Sprint(c.Redis.Port), "-a", c.Redis.Password}, u...)
-		if out, err := exec.Command("redis-cli", args...).CombinedOutput(); err != nil {
+		if out, err := d.redisCmd(mount, "redis-cli", args...).CombinedOutput(); err != nil {
 			return fmt.Errorf("redis acl %s: %v: %s", u[2], err, strings.TrimSpace(string(out)))
 		}
 	}
@@ -435,12 +480,13 @@ func (d *DataStore) ensureRedisACL(slot int, c ServicesConfig) error {
 func (d *DataStore) stopRedis(slot int, c ServicesConfig) error {
 	port := fmt.Sprint(c.Redis.Port)
 	pw := c.Redis.Password
-	if exec.Command("redis-cli", "-p", port, "-a", pw, "ping").Run() != nil {
+	mount := filepath.Dir(d.pgData(slot))
+	if d.redisCmd(mount, "redis-cli", "-p", port, "-a", pw, "ping").Run() != nil {
 		return nil // not running (or unreachable) , nothing to stop
 	}
-	out, err := exec.Command("redis-cli", "-p", port, "-a", pw, "shutdown", "nosave").CombinedOutput()
+	out, err := d.redisCmd(mount, "redis-cli", "-p", port, "-a", pw, "shutdown", "nosave").CombinedOutput()
 	// shutdown closes the connection, so an error here is often benign; check it actually stopped.
-	if exec.Command("redis-cli", "-p", port, "-a", pw, "ping").Run() == nil {
+	if d.redisCmd(mount, "redis-cli", "-p", port, "-a", pw, "ping").Run() == nil {
 		return fmt.Errorf("redis slot %d still up after shutdown: %s", slot, strings.TrimSpace(string(out)))
 	}
 	_ = err

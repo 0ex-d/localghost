@@ -20,12 +20,14 @@ set -uo pipefail
 
 # --- args ---
 SVC_USER="ghost"
+BOX_HOST=""
 DRY=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --user) SVC_USER="${2:?--user needs a value}"; shift 2;;
+        --host) BOX_HOST="${2:?--host needs a value}"; shift 2;;
         --dry-run|-n) DRY=1; shift;;
-        *) echo "unknown arg: $1"; exit 2;;
+        *) echo "unknown arg: $1 (known: --user <name>, --host <fqdn-or-ip>, --dry-run)"; exit 2;;
     esac
 done
 # In dry-run we mutate NOTHING, so root is not required , you can preview as any user. A real run
@@ -74,9 +76,6 @@ ensure() {  # ensure <binary> <apt-pkg> <label>
         && echo "  $3: installed" || echo "  $3: INSTALL FAILED ($2)"
 }
 ensure cryptsetup   cryptsetup    "cryptsetup (LUKS)"
-ensure psql         postgresql    "postgresql (client+server)"
-ensure redis-server redis-server  "redis-server"
-ensure redis-cli    redis-tools   "redis-cli"
 ensure tpm2_getcap  tpm2-tools    "tpm2-tools (TPM debug)"
 # nginx is assumed already installed + configured on this shared box; we don't touch it.
 command -v nginx >/dev/null 2>&1 && echo "  nginx: present (not modifying its config)" \
@@ -96,28 +95,39 @@ else
     fi
 fi
 
-# --- pgvector: the search layer's vector index. Optional at runtime , without it ghost.searchd runs
-# --- in the documented FTS-only degraded mode , but installing it here is a one-liner and the
-# --- alternative is remembering to do it later. Package-based check (pgvector ships no binary).
-echo "> Ensuring pgvector..."
+# --- database binaries: verify only , tools/install_db.sh owns installation ---
+# install_db.sh pins PGDG Postgres 18 + redis.io Redis 8, preseeds cluster-creation off, installs
+# pgvector, and MASKS the distro units (ghost.secd owns the lifecycles). Installing Debian's default
+# packages here would fight those pins, so this script checks the result and stops if it is missing.
+echo "> Verifying database binaries (installed by tools/install_db.sh)..."
+DB_MISSING=0
+if ls /usr/lib/postgresql/*/bin/initdb >/dev/null 2>&1 || command -v initdb >/dev/null 2>&1; then
+    echo "  postgres: present"
+else
+    echo "  postgres: MISSING"; DB_MISSING=1
+fi
+if command -v redis-server >/dev/null 2>&1 && command -v redis-cli >/dev/null 2>&1; then
+    echo "  redis: present"
+else
+    echo "  redis: MISSING"; DB_MISSING=1
+fi
 if ls /usr/share/postgresql/*/extension/vector.control >/dev/null 2>&1; then
     echo "  pgvector: present"
 else
-    PGVER="$(ls -d /usr/lib/postgresql/*/bin 2>/dev/null | sort -V | tail -1 | sed 's|.*/postgresql/\([0-9][0-9]*\)/bin|\1|')"
-    if [ -n "$PGVER" ]; then
-        [ "$APT_UPDATED" = 0 ] && { RUN "apt-get update -qq"; APT_UPDATED=1; }
-        echo "  pgvector: installing postgresql-$PGVER-pgvector ..."
-        if [ "$DRY" = 1 ]; then
-            printf '  [would] apt-get install -y postgresql-%s-pgvector\n' "$PGVER"
-        else
-            apt-get install -y "postgresql-$PGVER-pgvector" >/dev/null 2>&1 \
-                && echo "  pgvector: installed" \
-                || echo "  pgvector: INSTALL FAILED (search will run FTS-only; install postgresql-$PGVER-pgvector manually)"
-        fi
-    else
-        echo "  pgvector: SKIPPED (postgres version not detected); search runs FTS-only until installed"
-    fi
+    echo "  pgvector: MISSING (search runs FTS-only until installed; install_db.sh includes it)"
 fi
+if [ "$DB_MISSING" = 1 ]; then
+    echo "  run tools/install_db.sh first (root), then re-run this script"
+    exit 1
+fi
+for u in postgresql.service redis-server.service; do
+    state="$(systemctl is-enabled "$u" 2>/dev/null || true)"
+    case "$state" in
+        masked) echo "  $u: masked (correct , ghost.secd owns the lifecycle)";;
+        "") ;;
+        *) echo "  WARNING: $u is '$state', not masked , re-run tools/install_db.sh to neutralise it";;
+    esac
+done
 
 # --- dm_crypt module (now + on boot) ---
 echo "> dm_crypt (LUKS) kernel module..."
@@ -203,16 +213,22 @@ RUN "install -d -o '$SVC_USER' -g '$SVC_USER' -m 0700 '$STATE_DIR'"
 PGBIN_DIR="$(dirname "$(command -v pg_ctl 2>/dev/null || echo /usr/local/bin/pg_ctl)")"
 # Only write if absent, so re-running root setup doesn't clobber a host/addr you've customised.
 if [ -f /etc/ghost/ghost.env ]; then
-    echo "  /etc/ghost/ghost.env exists, leaving it (edit by hand to change host/addr)"
+    if [ -n "$BOX_HOST" ]; then
+        echo "  /etc/ghost/ghost.env exists, leaving it , --host $BOX_HOST IGNORED (edit GHOST_HOST by hand,"
+        echo "  or delete the file and re-run to have it rewritten)"
+    else
+        echo "  /etc/ghost/ghost.env exists, leaving it (edit by hand to change host/addr)"
+    fi
 elif [ "$DRY" = 1 ]; then
-    echo "  [would] write /etc/ghost/ghost.env with GHOST_ADDR=127.0.0.1:8443, GHOST_STATE_DIR=$STATE_DIR,"
-    echo "          GHOST_CA_DIR=/etc/ghost/ca, GHOST_SERVICE_USER=$SVC_USER, PATH including $PGBIN_DIR"
-    echo "          (GHOST_HOST left empty for you to set)"
+    echo "  [would] write /etc/ghost/ghost.env with GHOST_HOST=$BOX_HOST, GHOST_ADDR=127.0.0.1:8443,"
+    echo "          GHOST_STATE_DIR=$STATE_DIR, GHOST_CA_DIR=/etc/ghost/ca, GHOST_SERVICE_USER=$SVC_USER,"
+    echo "          PATH including $PGBIN_DIR"
+    [ -z "$BOX_HOST" ] && echo "          (no --host given: GHOST_HOST left empty for you to set)"
 else
     cat > /etc/ghost/ghost.env <<EOF
 # LocalGhost box runtime config. Box-specific, NOT committed to the repo. Read by the systemd units.
 # Per-account Postgres/Redis ports are derived in code (6000+slot / 6100+slot); not configured here.
-GHOST_HOST=
+GHOST_HOST=$BOX_HOST
 GHOST_ADDR=127.0.0.1:8443
 GHOST_STATE_DIR=$STATE_DIR
 GHOST_CA_DIR=/etc/ghost/ca
@@ -221,7 +237,11 @@ GHOST_SERVICE_USER=$SVC_USER
 PATH=$PGBIN_DIR:/usr/local/bin:/usr/bin:/bin
 EOF
     chmod 0644 /etc/ghost/ghost.env
-    echo "  wrote /etc/ghost/ghost.env  (set GHOST_HOST to the box IP/hostname before provisioning)"
+    if [ -n "$BOX_HOST" ]; then
+        echo "  wrote /etc/ghost/ghost.env  (GHOST_HOST=$BOX_HOST)"
+    else
+        echo "  wrote /etc/ghost/ghost.env  (set GHOST_HOST to the box IP/hostname before provisioning)"
+    fi
 fi
 
 echo
@@ -234,12 +254,58 @@ else
     echo " ROOT setup complete for service user: $SVC_USER"
     echo "   packages detected/installed, postgres bins on PATH, dm_crypt loaded,"
     echo "   $SVC_USER granted TPM (tss) + scoped ghost.* service sudo,"
-    echo "   box env at /etc/ghost/ghost.env (set GHOST_HOST before provisioning)."
+    CUR_HOST="$(grep '^GHOST_HOST=' /etc/ghost/ghost.env 2>/dev/null | head -1 | cut -d= -f2-)"
+    if [ -n "$CUR_HOST" ]; then
+        echo "   box env at /etc/ghost/ghost.env (GHOST_HOST=$CUR_HOST , read from the file, not the flag)."
+    else
+        echo "   box env at /etc/ghost/ghost.env , GHOST_HOST is EMPTY. Set it before provisioning:"
+        echo "     either edit the file, or: rm /etc/ghost/ghost.env && re-run this script with --host"
+    fi
     echo
-    echo " NEXT (as $SVC_USER, after RE-LOGIN so the tss group applies):"
-    echo "   1) edit /etc/ghost/ghost.env , set GHOST_HOST to the box IP/hostname"
-    echo "   2) tools/server_setup_user.sh        # confirm everything as $SVC_USER"
-    echo "   3) cd <server> && make box  # one build; seal tier is runtime (seal.env)"
-    echo "   4) provisioning (ghost-setup --apply) still needs root , run it in this root session"
+    REPO="$(cd "$(dirname "$0")/.." && pwd)"   # the server/ dir this script lives under
+    echo " ------------------------------------------------------------------"
+    echo " NEXT , copy/paste in order. Two roles: the SERVICE USER builds, ROOT provisions."
+    echo " ------------------------------------------------------------------"
+    echo
+    echo " A) Become $SVC_USER with a FRESH login (required , the tss group is stamped at login,"
+    echo "    your current shell predates the grant):"
+    echo
+    echo "      exec su - $SVC_USER"
+    echo
+    echo " B) As $SVC_USER, from the server dir , confirm the environment, then build:"
+    echo
+    echo "      cd $REPO"
+    echo "      ./tools/server_setup_user.sh          # expect all OK except a GHOST_HOST reachability WARN"
+    echo "      make box                              # one binary; the seal tier is chosen at provision, not build"
+    echo
+    echo " C) Back as ROOT (this session is fine , provisioning writes the disk, mints the CA, starts units):"
+    echo
+    echo "      cd $REPO"
+    echo "      # DRY RUN first , prints every step, touches nothing. Read the partition line twice:"
+    echo "      ./bin/ghost-setup --user $SVC_USER --disk /dev/nvmeXnY --host $CUR_HOST --domain $CUR_HOST"
+    echo "      # then APPLY (prompts for main PIN + wipe PIN on the tty, no echo):"
+    echo "      ./bin/ghost-setup --user $SVC_USER --disk /dev/nvmeXnY --host $CUR_HOST --domain $CUR_HOST --apply"
+    echo
+    echo "    Replace /dev/nvmeXnY with the EMPTY data disk from lsblk , NOT the OS disk. Setup destroys it."
+    echo "    LAN-only (no public domain)? Drop --domain and pass the LAN IP as --host."
+    echo
+    echo " D) SEAL TIER , the default is HARDWARE (TPM). Choose per box by adding --seal to BOTH ghost-setup"
+    echo "    commands above:"
+    echo
+    echo "      (default)        --seal tpm        # disk key sealed in the fTPM (Intel PTT); hardware"
+    echo "                                         # dictionary-attack lockout guards PIN guessing. Real boxes."
+    echo "      software lock    --seal software   # disk key wrapped under Argon2id(PIN) in seal.env. Still"
+    echo "                                         # genuinely encrypted, but NO hardware lockout , a stolen"
+    echo "                                         # disk can be brute-forced offline. For TPM-less/dev boxes."
+    echo
+    echo "    Example, software tier, apply:"
+    echo "      ./bin/ghost-setup --user $SVC_USER --disk /dev/nvmeXnY --host $CUR_HOST --seal software --apply"
+    echo
+    echo "    The box never silently downgrades: if you provision --seal tpm and the TPM is later unusable,"
+    echo "    unlock hard-stops rather than falling back. Pick the tier deliberately here."
+    echo
+    echo " E) Enrol + unlock: scan the QR ghost-setup renders (scanning IS enrolment), then unlock with the"
+    echo "    main PIN from the app. See tools/README.md steps 6-8 for models, the bundle, and the checks."
+    echo " ------------------------------------------------------------------"
 fi
 echo "==================================================================="

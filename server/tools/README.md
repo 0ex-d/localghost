@@ -28,7 +28,15 @@ flow is scan-immediately-and-clear-the-screen, not leave-it-on-screen-while-grad
     ./tools/server_setup_root.sh --user <name> --host box.example.com
 
 Packages, TPM (tss) grant, scoped ghost.* sudo, and /etc/ghost/ghost.env owned by the service user
-with GHOST_HOST filled in. Idempotent, with one deliberate exception: an EXISTING ghost.env keeps
+with GHOST_HOST filled in.
+
+One architectural rule across both scripts: the OS disk carries no database DATA ever, and after
+bundling (7c below) it need not carry database BINARIES either , install_db.sh bootstraps, the
+bundle makes the volume self-sufficient, and the OS packages become removable. ghost.secd runs a private postgres and a private redis per slot, initdb'd at unlock with their
+data on the encrypted volume, dead when it locks. The script preseeds Debian so a fresh postgres
+install creates no OS-disk cluster, and it detects any existing system cluster or system redis
+service and reports them. Pass `--disable-system-dbs` to stop and disable both (services only ,
+their data directories are reported but never deleted; removing a data dir is a human decision). Idempotent, with one deliberate exception: an EXISTING ghost.env keeps
 its contents (so re-runs never clobber a customised host) , delete it first if you want it
 rewritten. The env PATH includes /usr/sbin, which the unlock path needs (cryptsetup lives there).
 
@@ -132,6 +140,19 @@ the mount so they die with it:
 Missing weights are a named degraded mode, not a crash: oracled reports no model, searchd falls back
 to FTS-only, both say so in health. Restart the two daemons (or relock/unlock) after copying and they
 pick the weights up.
+
+## 7c. Move the database binaries onto the volume , service user, after first unlock
+
+The OS packages exist to BOOTSTRAP: the first-ever initdb runs from them because the volume has
+nothing on it yet. Once unlocked, move the runtimes onto the encrypted drive and cut the cord:
+
+    ./tools/bundle_db_runtime.sh /var/lib/ghost/mnt/slot0 --verify
+
+It mirrors the full Postgres tree (pgvector included), copies redis, carries each binary's
+shared-library closure, and proves the result by running the bundled initdb with the OS packages out
+of the loop. On VERIFIED, remove the OS packages , ghost.secd prefers the volume runtime
+automatically from the next unlock, and falls back to PATH only if the bundle is absent. From then
+on the databases are version-pinned to their own data and an apt upgrade cannot touch them.
 
 ## 8. First unlock , the checklist
 
