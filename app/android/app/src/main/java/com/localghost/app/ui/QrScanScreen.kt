@@ -11,6 +11,9 @@ import androidx.camera.core.ImageProxy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Row
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
@@ -76,9 +79,12 @@ fun QrScanScreen(
     // at once to begin enrolling; onProceed fires when the animation ends. Latching also stops the
     // scanner re-triggering on later frames of the same code.
     var foundLink by remember { mutableStateOf<EnrollLink?>(null) }
+    val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
     // Accumulates multi-frame enrolment QRs across camera frames. Remembered so it survives recompositions.
     val frames = remember { com.localghost.app.qr.FrameAssembler() }
     var frameProgress by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    var capturedFrames by remember { mutableStateOf<Set<Int>>(emptySet()) }
+    var frameFlashAt by remember { mutableStateOf(0L) } // timestamp of the last new-frame pulse
     var enrolAnim by remember { mutableStateOf(0f) } // 0..1 over the animation
     // Two-frame confirmation gate. A live scanner runs many decode attempts per frame (8 orientations,
     // several versions and biases); very occasionally one lands a Reed-Solomon miscorrection that is
@@ -216,6 +222,13 @@ fun QrScanScreen(
                     return@setAnalyzer
                 }
                 timing.lastDecodeAt = now
+                if (foundLink != null) {
+                    // Enrolment already latched. The QR keeps rotating on the box, but there is nothing
+                    // left to read , stop decoding entirely so duplicate frames cannot re-enter the parse
+                    // path (which was causing the post-completion errors). The found overlay stays up.
+                    proxy.close()
+                    return@setAnalyzer
+                }
                 val result = tryDecode(proxy, frames)
                 proxy.close()
                 // A code is "in view" when this frame either sampled a grid (corners set) or saw at least
@@ -265,12 +278,20 @@ fun QrScanScreen(
                         }
                     }
                     is ScanResult.Frames -> {
-                        // Mid-capture of a multi-frame identity. Anchor the overlay so the ghost sits on the
-                        // code, show progress, and keep scanning , do not proceed until the set completes.
+                        // Mid-capture of a multi-frame identity. Anchor the overlay, show progress, and on
+                        // a NEWLY captured frame fire a brief success pulse + haptic so each scan feels
+                        // acknowledged. Already-scanned frames just keep their checkmark, no re-pulse.
                         overlay = result.overlay
                         timing.lastSeenAt = now
                         frameProgress = result.have to result.want
-                        status = "scanned ${result.have} of ${result.want}"
+                        capturedFrames = result.captured
+                        if (result.justCaptured) {
+                            frameFlashAt = now
+                            haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            status = "captured ${result.have} of ${result.want}"
+                        } else {
+                            status = "hold steady , ${result.have} of ${result.want}"
+                        }
                     }
                     ScanResult.Nothing -> {
                         // No readable QR this frame. A gap breaks the confirmation chain. In found mode,
@@ -463,6 +484,34 @@ fun QrScanScreen(
                     .padding(horizontal = 12.dp, vertical = 8.dp)
             ) {
                 Text("> $status", color = TerminalGreen, style = MaterialTheme.typography.labelMedium)
+                // Multi-frame enrolment progress: one pip per frame, filled + checked once captured. A
+                // just-captured frame briefly brightens (frameFlashAt), so each scan visibly lands.
+                frameProgress?.let { (_, want) ->
+                    if (want > 1) {
+                        Spacer(Modifier.height(6.dp))
+                        val flashing = System.currentTimeMillis() - frameFlashAt < 450L
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            for (seq in 1..want) {
+                                val got = seq in capturedFrames
+                                Text(
+                                    if (got) "☑" else "☐",
+                                    color = when {
+                                        got && flashing -> TerminalGreen
+                                        got -> TerminalGreen.copy(alpha = 0.85f)
+                                        else -> GhostTextDim
+                                    },
+                                    style = MaterialTheme.typography.labelMedium,
+                                )
+                            }
+                        }
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            "${capturedFrames.size} of $want frames , keep the phone pointed at the box",
+                            color = GhostTextDim,
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    }
+                }
                 if (diag.isNotEmpty()) {
                     Spacer(Modifier.height(3.dp))
                     Text("· $diag", color = GhostTextDim, style = MaterialTheme.typography.labelSmall)
@@ -554,7 +603,7 @@ private sealed interface ScanResult {
     object Nothing : ScanResult
     data class Enrol(val link: EnrollLink, val overlay: Overlay, val clean: Boolean) : ScanResult
     data class NotForUs(val guess: com.localghost.app.qr.QrGuess, val overlay: Overlay) : ScanResult
-    data class Frames(val have: Int, val want: Int, val overlay: Overlay) : ScanResult
+    data class Frames(val have: Int, val want: Int, val captured: Set<Int>, val justCaptured: Boolean, val overlay: Overlay) : ScanResult
 }
 
 /**
@@ -1013,7 +1062,14 @@ private fun tryDecode(proxy: ImageProxy, frames: com.localghost.app.qr.FrameAsse
             val (have, want) = frames.progress()
             if (joined == null) {
                 ScanDiag.last = "enrol frame ${have} of ${want} captured"
-                return ScanResult.Frames(have, want, overlay)
+                return ScanResult.Frames(have, want, frames.capturedSeqs(), frames.lastOfferWasNew, overlay)
+            }
+            // Set complete. Emit one final Frames so the UI marks the last frame captured, but only when
+            // this offer actually completed it (a new frame). On subsequent duplicate scans of an
+            // already-complete set, fall through to parse so the enrol link is produced exactly once and
+            // the found-mode transition happens , without this, every rotating frame re-fired the parse.
+            if (frames.lastOfferWasNew) {
+                ScanDiag.last = "enrol complete ${have} of ${want}"
             }
             toParse = joined
         } else {

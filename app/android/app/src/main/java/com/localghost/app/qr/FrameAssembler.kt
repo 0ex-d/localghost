@@ -30,6 +30,13 @@ class FrameAssembler {
     /** Frames captured so far and the total expected (0 total = nothing valid seen yet). */
     fun progress(): Pair<Int, Int> = parts.size to total
 
+    /** The set of frame indices (1-based) captured so far , drives per-frame checkmarks in the UI. */
+    fun capturedSeqs(): Set<Int> = parts.keys.toSet()
+
+    /** Whether the most recent [offer] added a frame the set did not already have. */
+    var lastOfferWasNew: Boolean = false
+        private set
+
     /** Discards accumulated frames , used when the user backs out or a mismatched set is detected. */
     fun reset() {
         total = 0
@@ -60,7 +67,9 @@ class FrameAssembler {
             total = tot
             sha8 = cksum
         }
+        val hadIt = parts.containsKey(seq)
         parts[seq] = f[4]
+        lastOfferWasNew = !hadIt
 
         if (parts.size < total) return null
         val sb = StringBuilder()
