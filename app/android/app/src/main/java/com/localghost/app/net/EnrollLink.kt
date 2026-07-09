@@ -87,7 +87,15 @@ data class EnrollLink(
             val certPem = decodeB64Url(params["cert"]?.trim().orEmpty())
             val keyPem = decodeB64Url(params["key"]?.trim().orEmpty())
 
-            if (host.isEmpty() || code.isEmpty() || fp.isEmpty()) return Result.Malformed
+            // Required fields differ by version. v1 (legacy) used a pairing `code`; v2 carries the device
+            // cert + key IN the link instead, so `code` is gone , requiring it rejected every real v2 QR
+            // (the assembled link is correct; this check was stale). v2 requires host, fp, and a cert.
+            if (host.isEmpty() || fp.isEmpty()) return Result.Malformed
+            if (version >= 2) {
+                if (certPem.isNullOrEmpty()) return Result.Malformed
+            } else {
+                if (code.isEmpty()) return Result.Malformed
+            }
             if (port !in 1..65535) return Result.Malformed
 
             return Result.Ok(

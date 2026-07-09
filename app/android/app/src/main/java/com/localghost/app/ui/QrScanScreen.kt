@@ -403,6 +403,21 @@ fun QrScanScreen(
             overlay?.let { ov ->
                 Canvas(Modifier.fillMaxSize()) {
                     val pts = mapFindersToView(ov, size.width, size.height)
+                    // On a fresh frame capture, flash a green tick right on the code , the "we saw THIS
+                    // one" confirmation Vlad asked for, drawn where the phone is actually pointed. Brief
+                    // (matches frameFlashAt's ~450ms window) so it acknowledges without obscuring the next.
+                    if (pts.size == 3 && System.currentTimeMillis() - frameFlashAt < 450L) {
+                        val minX = pts.minOf { it.x }; val maxX = pts.maxOf { it.x }
+                        val minY = pts.minOf { it.y }; val maxY = pts.maxOf { it.y }
+                        val cx = (minX + maxX) / 2f; val cy = (minY + maxY) / 2f
+                        val r = (maxX - minX).coerceAtLeast(60f) * 0.28f
+                        drawCircle(TerminalGreen.copy(alpha = 0.22f), r * 1.7f, androidx.compose.ui.geometry.Offset(cx, cy))
+                        val sw = r * 0.28f
+                        drawLine(TerminalGreen, androidx.compose.ui.geometry.Offset(cx - r * 0.55f, cy),
+                            androidx.compose.ui.geometry.Offset(cx - r * 0.1f, cy + r * 0.5f), sw, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+                        drawLine(TerminalGreen, androidx.compose.ui.geometry.Offset(cx - r * 0.1f, cy + r * 0.5f),
+                            androidx.compose.ui.geometry.Offset(cx + r * 0.6f, cy - r * 0.5f), sw, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+                    }
                     // Only the WRONG-code ghost is drawn over the code. A successful scan is handled by the
                     // full-screen celebration layer at the end, so nothing is drawn on the code on success.
                     if (pts.size == 3 && quip != null) {
@@ -1064,15 +1079,20 @@ private fun tryDecode(proxy: ImageProxy, frames: com.localghost.app.qr.FrameAsse
                 ScanDiag.last = "enrol frame ${have} of ${want} captured"
                 return ScanResult.Frames(have, want, frames.capturedSeqs(), frames.lastOfferWasNew, overlay)
             }
-            // Set complete. Emit one final Frames so the UI marks the last frame captured, but only when
-            // this offer actually completed it (a new frame). On subsequent duplicate scans of an
-            // already-complete set, fall through to parse so the enrol link is produced exactly once and
-            // the found-mode transition happens , without this, every rotating frame re-fired the parse.
             if (frames.lastOfferWasNew) {
                 ScanDiag.last = "enrol complete ${have} of ${want}"
             }
             toParse = joined
         } else {
+            // Not a well-formed frame. But if we are MID-COLLECTION (some frames captured, not all), a
+            // decode that is not a clean frame is almost always a garbled candidate of one , the decoder
+            // tries several samplings per physical QR and a bad one can lose the "LGQR1" prefix. Showing
+            // "not an enrol link" for it is wrong and alarming. Stay in frame mode and keep the progress
+            // UI up rather than routing a near-miss to the wrong-QR classifier.
+            val (have, want) = frames.progress()
+            if (want > 0 && have < want) {
+                return ScanResult.Frames(have, want, frames.capturedSeqs(), false, overlay)
+            }
             toParse = text
         }
 
