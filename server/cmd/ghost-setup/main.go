@@ -322,6 +322,7 @@ func main() {
 		CertPath:    *caDir + "/box-server.pem",
 		BoxName:     hostVal,
 		IssueDevice: pki.IssueDeviceCertDER,
+		Animate:     term.IsTerminal(int(os.Stdout.Fd())),
 	}, pair.EncodeQR); err != nil {
 		fmt.Fprintln(os.Stderr, "could not render enrolment QR:", err)
 		os.Exit(1)

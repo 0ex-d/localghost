@@ -15,6 +15,7 @@ import (
 	"github.com/LocalGhostDao/localghost/server/internal/pair"
 	"github.com/LocalGhostDao/localghost/server/internal/setup"
 	"github.com/LocalGhostDao/localghost/server/internal/setup/debian"
+	"golang.org/x/term"
 )
 
 func main() {
@@ -56,6 +57,7 @@ func main() {
 		CertPath:    *caDir + "/box-server.pem",
 		BoxName:     *host,
 		IssueDevice: pki.IssueDeviceCertDER,
+		Animate:     term.IsTerminal(int(os.Stdout.Fd())),
 	}, pair.EncodeQR); err != nil {
 		fmt.Fprintln(os.Stderr, "render QR:", err)
 		os.Exit(1)

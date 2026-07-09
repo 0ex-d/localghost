@@ -4,7 +4,7 @@ import (
 	"errors"
 )
 
-// From-scratch QR encoder: byte mode, versions 1-10, EC level M. Replaces rsc.io/qr so LocalGhost
+// From-scratch QR encoder: byte mode, versions 1-20, EC level M. Replaces rsc.io/qr so LocalGhost
 // carries no third-party encoding code. The enrollment payload is short ASCII, so byte mode and a
 // small version range cover it. Validated by round-trip against an independently written decoder
 // across payload sizes (a spec-correct symbol is one a scanner reads; the round-trip proves it).
@@ -42,6 +42,8 @@ func gfMul(a, b int) int {
 }
 
 // versionM[v] = {totalDataCodewords, ecPerBlock, g1blocks, g1dataCW, g2blocks, g2dataCW} at level M.
+// From ISO/IEC 18004 at error-correction level M. Extended to v20 because the enrol link carries a
+// PEM-wrapped P256 cert + key (a few hundred bytes), which overflows v10's 271-byte ceiling.
 var versionM = map[int][6]int{
 	1:  {16, 10, 1, 16, 0, 0},
 	2:  {28, 16, 1, 28, 0, 0},
@@ -53,19 +55,34 @@ var versionM = map[int][6]int{
 	8:  {154, 22, 2, 38, 2, 39},
 	9:  {182, 22, 3, 36, 2, 37},
 	10: {216, 26, 4, 43, 1, 44},
+	11: {254, 30, 1, 50, 4, 51},
+	12: {290, 22, 6, 36, 2, 37},
+	13: {334, 22, 8, 37, 1, 38},
+	14: {365, 24, 4, 40, 5, 41},
+	15: {415, 24, 5, 41, 5, 42},
+	16: {453, 28, 7, 45, 3, 46},
+	17: {507, 28, 10, 46, 1, 47},
+	18: {563, 26, 9, 43, 4, 44},
+	19: {627, 26, 3, 44, 11, 45},
+	20: {669, 26, 3, 41, 13, 42},
 }
 
+// alignCenters[v] = alignment-pattern centre coordinates, ISO/IEC 18004 Annex E.
 var alignCenters = map[int][]int{
 	1: {}, 2: {6, 18}, 3: {6, 22}, 4: {6, 26}, 5: {6, 30}, 6: {6, 34},
 	7: {6, 22, 38}, 8: {6, 24, 42}, 9: {6, 26, 46}, 10: {6, 28, 50},
+	11: {6, 30, 54}, 12: {6, 32, 58}, 13: {6, 34, 62},
+	14: {6, 26, 46, 66}, 15: {6, 26, 48, 70}, 16: {6, 26, 50, 74},
+	17: {6, 30, 54, 78}, 18: {6, 30, 56, 82}, 19: {6, 30, 58, 86},
+	20: {6, 34, 62, 90},
 }
 
 func qrSide(v int) int { return 17 + 4*v }
 
-var ErrPayloadTooBig = errors.New("payload too big for QR versions 1-10 at EC level M")
+var ErrPayloadTooBig = errors.New("payload too big for QR versions 1-20 at EC level M")
 
 func chooseVersion(nbytes int) (int, error) {
-	for v := 1; v <= 10; v++ {
+	for v := 1; v <= 20; v++ {
 		ccbits := 8
 		if v >= 10 {
 			ccbits = 16
@@ -277,6 +294,16 @@ func (g *grid) placeFunctionPatterns(v int) {
 		g.res[8][n-1-i] = true
 		g.res[n-1-i][8] = true
 	}
+	// reserve the two version-information blocks (v>=7) so placeData never fills them; placeVersion
+	// writes them after masking.
+	if v >= 7 {
+		for i := 0; i < 6; i++ {
+			for j := 0; j < 3; j++ {
+				g.res[i][n-11+j] = true
+				g.res[n-11+j][i] = true
+			}
+		}
+	}
 }
 
 func abs(x int) int {
@@ -467,6 +494,45 @@ func placeFormat(m [][]int, n, mask int) {
 	}
 }
 
+// versionBits returns the 18-bit version-information sequence for v (6 data bits + 12 BCH EC bits,
+// generator 0x1F25), MSB first. Required for v>=7; absent, larger symbols do not scan.
+func versionBits(v int) []int {
+	data := v
+	rem := v << 12
+	g := 0x1F25
+	for i := 5; i >= 0; i-- {
+		if (rem>>(12+i))&1 == 1 {
+			rem ^= g << i
+		}
+	}
+	full := (data << 12) | (rem & 0xFFF)
+	out := make([]int, 18)
+	for i := 0; i < 18; i++ {
+		out[i] = (full >> (17 - i)) & 1
+	}
+	return out
+}
+
+// placeVersion writes the two version-information blocks (v>=7 only). Bit i (LSB-first per the spec's
+// module map) fills a 3-wide by 6-tall region above the bottom-left finder and its transpose left of
+// the top-right finder.
+func placeVersion(m [][]int, n, v int) {
+	if v < 7 {
+		return
+	}
+	vb := versionBits(v) // vb[0] is the MSB; the spec indexes bit 0 as the LSB, so read from the end
+	bit := func(i int) int { return vb[17-i] }
+	k := 0
+	for i := 0; i < 6; i++ {
+		for j := 0; j < 3; j++ {
+			b := bit(k)
+			m[i][n-11+j] = b // top-right block
+			m[n-11+j][i] = b // bottom-left block (transposed)
+			k++
+		}
+	}
+}
+
 // qrMatrix is the encoded symbol implementing the Matrix seam.
 type qrMatrix struct {
 	m [][]int
@@ -476,7 +542,7 @@ type qrMatrix struct {
 func (q qrMatrix) Size() int          { return q.n }
 func (q qrMatrix) Dark(x, y int) bool { return q.m[y][x] == 1 }
 
-// EncodeQR encodes text into a QR symbol (byte mode, versions 1-10, EC level M) with full mask
+// EncodeQR encodes text into a QR symbol (byte mode, versions 1-20, EC level M) with full mask
 // selection, returning the Matrix the terminal renderer draws.
 func EncodeQR(text string) (Matrix, error) {
 	v, err := chooseVersion(len([]byte(text)))
@@ -492,6 +558,7 @@ func EncodeQR(text string) (Matrix, error) {
 	for mask := 0; mask < 8; mask++ {
 		cand := g.masked(mask)
 		placeFormat(cand, g.n, mask)
+		placeVersion(cand, g.n, v)
 		sc := penalty(cand, g.n)
 		if bestScore < 0 || sc < bestScore {
 			bestScore = sc

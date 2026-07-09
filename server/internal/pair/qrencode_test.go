@@ -143,8 +143,9 @@ func encodeForTest(t *testing.T, text string) (qrMatrix, int, int) {
 }
 
 func TestQRRoundTrip(t *testing.T) {
-	// The real link the box emits, built through EnrollLink.String() so the test exercises exactly
-	// what ships (including the v= version field), not a hand-written approximation.
+	// The real link the box emits, built through EnrollLink.String(), then CHUNKED as the box now does
+	// (a real cert+key link is ~1.4 KB, so it ships as several small frames, not one dense symbol).
+	// Every frame must round-trip through the encoder/decoder.
 	realLink := EnrollLink{
 		Host: "192.168.1.50", Port: 8443,
 		Fingerprint: "AB:12:CD:34", BoxName: "box",
@@ -153,12 +154,13 @@ func TestQRRoundTrip(t *testing.T) {
 	}.String()
 
 	payloads := []string{
-		realLink,
 		"localghost://enroll?host=192.168.1.50&port=8443&fp=AB12CD34&name=box",
 		"localghost://enroll?host=10.0.0.5&code=X",
 		"hello",
 		"a",
 	}
+	// the real link contributes its frames , exactly the strings the box renders as QRs
+	payloads = append(payloads, ChunkLink(realLink)...)
 	// add varying sizes
 	for _, nc := range []int{16, 40, 80, 120, 160, 200} {
 		s := ""
@@ -210,7 +212,7 @@ func TestEnrollLinkCarriesVersion(t *testing.T) {
 	// The app reads v as the format version (absent = 1). The box must emit it so a future format
 	// change lets a newer box tell an older app to update rather than mis-parsing. Pin that the
 	// emitted link contains the current version, and that it equals the documented constant.
-	if CurrentVersion != 1 {
+	if CurrentVersion != 2 {
 		t.Fatalf("CurrentVersion changed to %d , update the app's EnrollLink.CURRENT_VERSION in lockstep", CurrentVersion)
 	}
 	link := EnrollLink{Host: "10.0.0.1", Port: 8443, Fingerprint: "CD"}.String()

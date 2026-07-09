@@ -76,6 +76,9 @@ fun QrScanScreen(
     // at once to begin enrolling; onProceed fires when the animation ends. Latching also stops the
     // scanner re-triggering on later frames of the same code.
     var foundLink by remember { mutableStateOf<EnrollLink?>(null) }
+    // Accumulates multi-frame enrolment QRs across camera frames. Remembered so it survives recompositions.
+    val frames = remember { com.localghost.app.qr.FrameAssembler() }
+    var frameProgress by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var enrolAnim by remember { mutableStateOf(0f) } // 0..1 over the animation
     // Two-frame confirmation gate. A live scanner runs many decode attempts per frame (8 orientations,
     // several versions and biases); very occasionally one lands a Reed-Solomon miscorrection that is
@@ -213,7 +216,7 @@ fun QrScanScreen(
                     return@setAnalyzer
                 }
                 timing.lastDecodeAt = now
-                val result = tryDecode(proxy)
+                val result = tryDecode(proxy, frames)
                 proxy.close()
                 // A code is "in view" when this frame either sampled a grid (corners set) or saw at least
                 // two finder patterns , the marginal codes that fail to sample are exactly the ones that
@@ -260,6 +263,14 @@ fun QrScanScreen(
                         } else {
                             pendingPayload = payload
                         }
+                    }
+                    is ScanResult.Frames -> {
+                        // Mid-capture of a multi-frame identity. Anchor the overlay so the ghost sits on the
+                        // code, show progress, and keep scanning , do not proceed until the set completes.
+                        overlay = result.overlay
+                        timing.lastSeenAt = now
+                        frameProgress = result.have to result.want
+                        status = "scanned ${result.have} of ${result.want}"
                     }
                     ScanResult.Nothing -> {
                         // No readable QR this frame. A gap breaks the confirmation chain. In found mode,
@@ -543,6 +554,7 @@ private sealed interface ScanResult {
     object Nothing : ScanResult
     data class Enrol(val link: EnrollLink, val overlay: Overlay, val clean: Boolean) : ScanResult
     data class NotForUs(val guess: com.localghost.app.qr.QrGuess, val overlay: Overlay) : ScanResult
+    data class Frames(val have: Int, val want: Int, val overlay: Overlay) : ScanResult
 }
 
 /**
@@ -929,7 +941,7 @@ private object ScanBuffers {
     }
 }
 
-private fun tryDecode(proxy: ImageProxy): ScanResult {
+private fun tryDecode(proxy: ImageProxy, frames: com.localghost.app.qr.FrameAssembler): ScanResult {
     return try {
         val plane = proxy.planes[0]
         val buffer = plane.buffer
@@ -992,7 +1004,23 @@ private fun tryDecode(proxy: ImageProxy): ScanResult {
         val cleanDecode = QrMatrixDecode.lastPath == "clean"
         ScanDiag.last = "v$ver $align ${QrMatrixDecode.lastPath} ${text.length}ch"
 
-        when (val r = EnrollLink.parseResult(text)) {
+        // Multi-frame enrolment: a real device identity spans several QRs. If this decode is a frame,
+        // feed it to the assembler and only parse once every frame is captured and the checksum verifies.
+        // A single-QR (small) enrol link never matches the frame magic and falls straight through.
+        val toParse: String
+        if (frames.isFrame(text)) {
+            val joined = frames.offer(text)
+            val (have, want) = frames.progress()
+            if (joined == null) {
+                ScanDiag.last = "enrol frame ${have} of ${want} captured"
+                return ScanResult.Frames(have, want, overlay)
+            }
+            toParse = joined
+        } else {
+            toParse = text
+        }
+
+        when (val r = EnrollLink.parseResult(toParse)) {
             is EnrollLink.Result.Ok -> ScanResult.Enrol(r.link, overlay, cleanDecode)
             is EnrollLink.Result.Outdated -> ScanResult.NotForUs(
                 com.localghost.app.qr.QrGuess(

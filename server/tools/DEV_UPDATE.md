@@ -345,3 +345,37 @@ which exists) , it only survived because the targeted test list never included .
 Coverage is better than what it pinned: hw/seal_software_test.go holds five software-tier tests
 (roundtrip, wrong PIN, rekey, cross-slot rejection, destroy). The first-unlock checklist now starts
 by reading GHOST_SEAL_MODE and stopping if real hardware says software.
+
+## Multi-frame enrolment QR
+
+A real device identity (P256 cert + key, PEM-wrapped, base64url'd into the enrol link) is ~1.4 KB ,
+too much for one comfortably-scannable QR (it would need a dense ~v31 symbol). Instead of one big
+code, the box now splits the link into several small frames the app scans in sequence , "Scan 1 of N"
+, each fitting an easy ~v12 (65x65) QR.
+
+Wire format, one line per frame: `LGQR1 <seq> <total> <sha8> <chunk>`. sha8 is the first 8 hex of
+SHA-256 over the full reassembled link; the app uses it to know all frames belong to one enrolment and
+to verify the join before parsing. internal/pair/qrchunk.go (ChunkLink/JoinFrames) and the app's
+qr/FrameAssembler.kt are the two ends of this contract , tests on both sides build byte-identical
+frames, so a format drift on one side fails the other. Order-independent and duplicate-safe: scan the
+frames in any order, rescanning is idempotent, a frame from a different box resets the set. A small
+link yields a single frame, so single-QR and multi-frame share one code path with no mode switch.
+
+Two real bugs fixed alongside, both caught by the tests: the QR encoder never placed the v>=7
+version-information modules (a latent break for any symbol >= v7), now added and the regions reserved;
+and TestEnrollLinkCarriesVersion was self-contradictory (asserted CurrentVersion==1 AND v=2) , fixed
+to ==2 to match the constant. The setup unit test wrongly required a literal /dev/tpmrm0 line; the
+unit grants TPM access via PrivateDevices=no by design (a DeviceAllow whitelist would deny /dev/mapper
+that cryptsetup needs), so the assertion now checks for that instead.
+
+## Rotating enrolment QR , automation without a feedback channel
+
+The box cannot know a frame was scanned: pre-enrolment the phone has no client cert (the cert is IN
+the QR), so nginx's mTLS edge rejects it, and an unauthenticated "advance" endpoint would puncture
+appears-down. So no feedback , by design. But none is needed: FrameAssembler was built order-
+independent and duplicate-safe, so pair.Run now ANIMATES on an interactive tty , each frame shows
+for ~2.2s, the screen clears, the next appears, looping until the operator presses Enter. The person
+just holds the phone up; the app catches frames across a loop or two and its "scanned N of M" counter
+says when it is done. Same trick air-gapped hardware wallets use for large payloads. Pure display:
+zero network, zero new surface. Non-tty output (pipes, logs) keeps the static sequential rendering.
+Both ghost-setup and ghost-qr detect the tty via x/term (already a dependency).

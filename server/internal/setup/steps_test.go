@@ -104,8 +104,12 @@ func TestSystemdUnitsHardenedAndOrdered(t *testing.T) {
 	}
 	// ghost.secd gets TPM access (it does the unseal) and must NOT have a private /dev (it needs the
 	// real disk + dm-crypt to mount).
-	if !strings.Contains(secd.Unit, "/dev/tpmrm0") {
-		t.Fatal("ghost.secd must have TPM device access")
+	// ghost.secd reaches the TPM (it does the unseal) and the real disk + dm-crypt to mount. Both come
+	// from a real /dev, i.e. NOT a private/sandboxed device namespace , the unit deliberately avoids a
+	// DeviceAllow whitelist (which would deny /dev/mapper) and instead sets PrivateDevices=no. So the
+	// correct assertion is the absence of device sandboxing, not the presence of a specific device line.
+	if !strings.Contains(secd.Unit, "PrivateDevices=no") {
+		t.Fatal("ghost.secd must have a real /dev (PrivateDevices=no) for the TPM, raw disk, and dm-crypt")
 	}
 	if strings.Contains(secd.Unit, "PrivateDevices=yes") {
 		t.Fatal("ghost.secd must NOT have PrivateDevices=yes , it needs the real disk and dm-crypt")
