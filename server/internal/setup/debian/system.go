@@ -329,6 +329,7 @@ func (s *System) CreateGhostUser() error {
 func (s *System) CAExists() (bool, error)            { return s.pki.Exists(), nil }
 func (s *System) CreateCA() error                    { return s.pki.CreateCA() }
 func (s *System) IssueServerCert() error             { return s.pki.IssueServerCert() }
+func (s *System) ServerCertExists() (bool, error)    { return s.pki.ServerCertExists(), nil }
 func (s *System) ServerCertFingerprint() (string, error) { return s.pki.ServerFingerprint() }
 
 // --- nginx ---

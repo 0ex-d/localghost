@@ -27,6 +27,7 @@ type System interface {
 	CAExists() (bool, error)
 	CreateCA() error           // box CA
 	IssueServerCert() error    // box's own https server cert, signed by the box CA
+	ServerCertExists() (bool, error) // the server cert specifically , NOT the CA; a partial run can have one without the other
 	ServerCertFingerprint() (string, error) // pinned by the phone
 
 	// nginx edge.
@@ -96,7 +97,7 @@ func DefaultPlan(sys System, withDomain bool, dnsCheck func() error, nginxConf s
 		},
 		{
 			Name:     "box server cert",
-			Check:    func() (bool, error) { d, err := sys.CAExists(); return d, err },
+			Check:    sys.ServerCertExists,
 			Describe: func() (string, error) { return "issue the box https server cert from the box CA", nil },
 			Do:       sys.IssueServerCert,
 		},

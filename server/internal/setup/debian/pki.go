@@ -46,6 +46,17 @@ func (p PKI) Exists() bool {
 	return err == nil
 }
 
+// ServerCertExists reports whether the box's https server cert AND its key are on disk. Distinct
+// from Exists() on purpose: a partial provision can leave the CA present with no server cert issued,
+// and a step that checks the CA to decide about the server cert skips itself into a broken nginx.
+func (p PKI) ServerCertExists() bool {
+	if _, err := os.Stat(p.serverCertPath()); err != nil {
+		return false
+	}
+	_, err := os.Stat(p.serverKeyPath())
+	return err == nil
+}
+
 // CreateCA generates the box CA and writes it, plus the devices-ca bundle nginx verifies against
 // (which is the same CA, since the box signs its own device certs).
 func (p PKI) CreateCA() error {
