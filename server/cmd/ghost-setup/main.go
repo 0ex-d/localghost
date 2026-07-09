@@ -21,6 +21,7 @@ import (
 	"github.com/LocalGhostDao/localghost/server/internal/pair"
 	"github.com/LocalGhostDao/localghost/server/internal/setup"
 	"github.com/LocalGhostDao/localghost/server/internal/setup/debian"
+	"path/filepath"
 )
 
 // promptPIN reads a PIN from the terminal WITHOUT echoing it, so it never appears on screen, in
@@ -148,7 +149,7 @@ func main() {
 	host := flag.String("host", "", "box LAN IP/hostname the phone connects to")
 	domain := flag.String("domain", "", "optional public domain (omit for the zero-server QR default)")
 	caDir := flag.String("ca", "/etc/ghost/ca", "box CA + cert directory")
-	execDir := flag.String("exec", "/usr/local/bin", "where the daemon binaries are installed")
+	execDir := flag.String("exec", "", "where the daemon binaries live (default: the directory this ghost-setup binary runs from , make box builds them all as siblings)")
 	stateDir := flag.String("state", "/var/lib/ghost", "unencrypted state dir")
 	tpmDevice := flag.String("tpm", "/dev/tpmrm0", "TPM resource-manager device (seals the disk key)")
 	sealMode := flag.String("seal", "tpm", "seal tier: 'tpm' (hardware-sealed key, default) or 'software' (PIN-derived key, no hardware lockout , for machines without a TPM)")
@@ -156,6 +157,21 @@ func main() {
 	port := flag.Int("port", 8443, "mTLS port ghost.secd serves behind nginx")
 	apply := flag.Bool("apply", false, "actually provision (default is a dry run)")
 	flag.Parse()
+
+	// The daemons are ghost-setup's SIBLINGS: make box builds everything into one bin/ directory, and
+	// provisioning seeds the volume from wherever this very binary is running. No install step, no
+	// /usr/local/bin assumption , the build output is the deployment. --exec overrides for boxes that
+	// do install system-wide.
+	if *execDir == "" {
+		if self, err := os.Executable(); err == nil {
+			if rp, err2 := filepath.EvalSymlinks(self); err2 == nil {
+				self = rp
+			}
+			*execDir = filepath.Dir(self)
+		} else {
+			*execDir = "/usr/local/bin"
+		}
+	}
 
 	// Resolve disk and host. If either is missing, drop into the interactive wizard (pick the disk
 	// from a list, type the host), so you never have to know or type a device path. Flags still work

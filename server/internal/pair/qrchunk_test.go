@@ -61,3 +61,17 @@ func TestSingleFrameForSmallLink(t *testing.T) {
 		t.Fatalf("a small link should be one frame, got %d", len(frames))
 	}
 }
+
+func TestChunkSizedRoundTrip(t *testing.T) {
+	link := "localghost://enroll?v=2&host=192.168.1.50&fp=AB&cert=" + strings.Repeat("Q", 1200)
+	for _, size := range []int{127, 240, 480, 642} { // small console, default, large, huge window
+		frames := ChunkLinkSized(link, size)
+		back, err := JoinFrames(frames)
+		if err != nil {
+			t.Fatalf("size %d: %v", size, err)
+		}
+		if back != link {
+			t.Fatalf("size %d: round-trip mismatch across %d frames", size, len(frames))
+		}
+	}
+}

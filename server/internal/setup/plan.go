@@ -63,7 +63,7 @@ func DefaultPlan(sys System, withDomain bool, dnsCheck func() error, nginxConf s
 
 	steps := []Step{
 		{
-			Name:        "partition disk",
+			Name:        "luks whole disk",
 			Destructive: true,
 			Check:       sys.PartitionsReady,
 			Describe:    sys.DescribePartitioning,

@@ -18,7 +18,17 @@ note() { printf '  %-26s %s\n' "$1" "$2"; }
 ok()   { note "$1" "OK    $2"; }
 bad()  { note "$1" "FAIL  $2"; problems=1; }
 warn() { note "$1" "WARN  $2"; }
-have() { command -v "$1" >/dev/null 2>&1; }
+warn() { note "$1" "WARN  $2"; }
+# have looks beyond the user PATH: a login shell's PATH excludes /usr/sbin on Debian, but binaries
+# like cryptsetup and nginx live exactly there. Presence on the box is what this check is about, not
+# presence on this shell's PATH.
+have() {
+    command -v "$1" >/dev/null 2>&1 && return 0
+    for _d in /usr/sbin /sbin /usr/local/sbin /usr/local/bin; do
+        [ -x "$_d/$1" ] && return 0
+    done
+    return 1
+}
 
 # resolve_ips <host-or-ip> : print the IPs it resolves to (one per line), via nsswitch (files+DNS).
 # Works for a DNS name, a .local name, or an IP literal (which resolves to itself).
@@ -79,7 +89,7 @@ if [ -f /etc/ghost/ghost.env ]; then
             if tls_reachable "$host" "$pubport"; then
                 ok "GHOST_HOST" "($host:$pubport reachable , resolves ($rip_flat), port forwards, a listener is up)"
             else
-                bad "GHOST_HOST" "($host:$pubport NOT reachable , resolves ($rip_flat) but nothing is listening/forwarding there)"
+                warn "GHOST_HOST" "($host:$pubport not reachable YET , resolves ($rip_flat), nothing listening , expected BEFORE provisioning, a problem only if it persists after)"
             fi
         fi
     fi

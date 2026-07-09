@@ -123,9 +123,10 @@ fi
 for u in postgresql.service redis-server.service; do
     state="$(systemctl is-enabled "$u" 2>/dev/null || true)"
     case "$state" in
-        masked) echo "  $u: masked (correct , ghost.secd owns the lifecycle)";;
+        masked) echo "  $u: masked (LocalGhost-only box , ghost.secd owns the lifecycle)";;
         "") ;;
-        *) echo "  WARNING: $u is '$state', not masked , re-run tools/install_db.sh to neutralise it";;
+        *) echo "  $u: $state (shared box , powers other services; coexisting. ghost.secd's instances use"
+           echo "      their own ports and encrypted-volume data, the system service is not ours to touch)";;
     esac
 done
 
@@ -219,6 +220,13 @@ if [ -f /etc/ghost/ghost.env ]; then
     else
         echo "  /etc/ghost/ghost.env exists, leaving it (edit by hand to change host/addr)"
     fi
+    # One surgical heal on an existing file: the PATH line must include /usr/sbin , cryptsetup lives
+    # there and ghost.secd shells it at unlock. An env written by an older revision lacks it, and the
+    # failure mode (luksOpen: command not found, at unlock, on the console) is too obscure to leave in.
+    if grep -q '^PATH=' /etc/ghost/ghost.env && ! grep '^PATH=' /etc/ghost/ghost.env | grep -q '/usr/sbin'; then
+        sed -i 's|^PATH=\(.*\)$|PATH=\1:/usr/sbin:/sbin|' /etc/ghost/ghost.env
+        echo "  healed PATH in existing ghost.env: appended /usr/sbin:/sbin (cryptsetup lives there)"
+    fi
 elif [ "$DRY" = 1 ]; then
     echo "  [would] write /etc/ghost/ghost.env with GHOST_HOST=$BOX_HOST, GHOST_ADDR=127.0.0.1:8443,"
     echo "          GHOST_STATE_DIR=$STATE_DIR, GHOST_CA_DIR=/etc/ghost/ca, GHOST_SERVICE_USER=$SVC_USER,"
@@ -234,7 +242,7 @@ GHOST_STATE_DIR=$STATE_DIR
 GHOST_CA_DIR=/etc/ghost/ca
 GHOST_SERVICE_USER=$SVC_USER
 # postgres server binaries (initdb/pg_ctl) must be on the daemon's PATH:
-PATH=$PGBIN_DIR:/usr/local/bin:/usr/bin:/bin
+PATH=$PGBIN_DIR:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 EOF
     chmod 0644 /etc/ghost/ghost.env
     if [ -n "$BOX_HOST" ]; then

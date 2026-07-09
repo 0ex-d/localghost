@@ -35,21 +35,29 @@ const ChunkMagic = "LGQR1"
 // around QR v12 at EC level M (~290 data bytes), an easy phone scan. The header is ~25 bytes.
 const chunkPayloadBytes = 240
 
-// ChunkLink splits a link into ordered frame strings. A link that fits one frame returns a single
-// frame , the app path is identical whether there is one frame or five, so there is no special case
-// on either side.
-func ChunkLink(link string) []string {
+// ChunkLink splits a link into ordered frame strings at the default frame size. A link that fits one
+// frame returns a single frame , the app path is identical whether there is one frame or five, so
+// there is no special case on either side.
+func ChunkLink(link string) []string { return ChunkLinkSized(link, chunkPayloadBytes) }
+
+// ChunkLinkSized is ChunkLink with an explicit per-frame payload budget. The renderer sizes frames to
+// the terminal it is drawing on (a big window carries more per QR, a small one less), so the budget
+// arrives from terminal geometry; the wire format is identical at every size.
+func ChunkLinkSized(link string, payloadBytes int) []string {
+	if payloadBytes < 24 {
+		payloadBytes = 24
+	}
 	sum := sha256.Sum256([]byte(link))
 	sha8 := hex.EncodeToString(sum[:])[:8]
 
-	total := (len(link) + chunkPayloadBytes - 1) / chunkPayloadBytes
+	total := (len(link) + payloadBytes - 1) / payloadBytes
 	if total == 0 {
 		total = 1
 	}
 	frames := make([]string, 0, total)
 	for seq := 1; seq <= total; seq++ {
-		start := (seq - 1) * chunkPayloadBytes
-		end := start + chunkPayloadBytes
+		start := (seq - 1) * payloadBytes
+		end := start + payloadBytes
 		if end > len(link) {
 			end = len(link)
 		}

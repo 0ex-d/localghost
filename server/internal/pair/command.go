@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
+
+	"golang.org/x/term"
 )
 
 // Options for one pairing render. The daemon/setup fills these from config/flags.
@@ -63,7 +66,21 @@ func Run(w io.Writer, opts Options, encodeQR func(string) (Matrix, error)) error
 	// Chunk the link into scannable frames. A real device identity (~1.4 KB) will not fit one
 	// comfortable QR, so we render a few small frames the app scans in sequence. A small link yields a
 	// single frame, so this is one code path, not a special case.
-	frames := ChunkLink(link.String())
+	payload := chunkPayloadBytes
+	animate := opts.Animate
+	if animate {
+		if cols, rows, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
+			if p, ok := frameBudget(cols, rows); ok {
+				payload = p
+			} else {
+				// Too small to rotate usefully (frames would shrink until a real link needs dozens).
+				// Print statically instead , scroll and scan, or re-run from a larger window.
+				animate = false
+				fmt.Fprintln(w, "note: this terminal is small for animated QR , printing frames statically; a larger window makes this nicer")
+			}
+		}
+	}
+	frames := ChunkLinkSized(link.String(), payload)
 	fmt.Fprintln(w)
 	if len(frames) == 1 {
 		matrix, err := encodeQR(frames[0])
@@ -72,7 +89,7 @@ func Run(w io.Writer, opts Options, encodeQR func(string) (Matrix, error)) error
 		}
 		fmt.Fprintln(w, RenderTerminal(matrix))
 		fmt.Fprintln(w, "Scan this with the LocalGhost app. The QR carries the device identity , scanning it enrols the phone.")
-	} else if opts.Animate {
+	} else if animate {
 		if err := animateFrames(w, frames, encodeQR); err != nil {
 			return err
 		}
@@ -94,6 +111,28 @@ func Run(w io.Writer, opts Options, encodeQR func(string) (Matrix, error)) error
 	fmt.Fprintln(w, "Link:", link.String())
 	fmt.Fprintln(w, "Anyone who scans this QR gets a working device identity , show it to your phone only.")
 	return nil
+}
+
+// frameBudget converts terminal geometry into a per-frame payload budget. Height is the binding
+// constraint on most consoles: half-block rendering draws two module rows per text line, captions
+// take ~6 lines, the quiet zone 8 modules. Below version 8 the per-frame payload collapses and a
+// real identity link explodes into dozens of frames (an 80x25 console would need ~80 v3 frames , a
+// three-minute rotation), so under v8 we decline and the caller prints statically instead.
+func frameBudget(cols, rows int) (int, bool) {
+	avail := cols
+	if h := (rows - 6) * 2; h < avail {
+		avail = h
+	}
+	avail -= 8 // quiet zone
+	v := (avail - 17) / 4
+	if v < 8 {
+		return 0, false
+	}
+	if v > 20 {
+		v = 20
+	}
+	// data codewords minus byte-mode overhead (~3) and the frame header (~20, with margin).
+	return versionM[v][0] - 27, true
 }
 
 // animateFrames rotates the enrolment QR frames on an interactive terminal: each frame shows for a
@@ -119,17 +158,23 @@ func animateFrames(w io.Writer, frames []string, encodeQR func(string) (Matrix, 
 		close(done)
 	}()
 	const hold = 2200 * time.Millisecond
+	// One full clear up front, cursor hidden for the duration (a blinking cursor inside the symbol
+	// helps nobody). Each frame then redraws from HOME with erase-to-end-of-line per line and
+	// erase-below at the end , no full clears in the loop, so there is no flicker, and frames of
+	// different sizes (the last chunk is shorter, so its QR can be smaller) leave no residue.
+	fmt.Fprint(w, "\x1b[2J\x1b[?25l")
+	defer fmt.Fprint(w, "\x1b[?25h\x1b[0m\x1b[2J\x1b[H")
 	i := 0
 	for {
-		// ANSI clear + home; the next frame redraws in place.
-		fmt.Fprint(w, "\033[2J\033[H")
-		fmt.Fprintf(w, "QR %d of %d , hold the phone steady; the app collects them in any order.\n", i%len(frames)+1, len(frames))
-		fmt.Fprintln(w, "Press Enter here once the app shows all frames captured.")
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, rendered[i%len(frames)])
+		fmt.Fprint(w, "\x1b[H")
+		fmt.Fprintf(w, "QR %d of %d , hold the phone steady; the app collects them in any order.\x1b[K\n", i%len(frames)+1, len(frames))
+		fmt.Fprint(w, "Press Enter here once the app shows all frames captured.\x1b[K\n\x1b[K\n")
+		for _, line := range strings.Split(rendered[i%len(frames)], "\n") {
+			fmt.Fprint(w, line, "\x1b[K\n")
+		}
+		fmt.Fprint(w, "\x1b[J")
 		select {
 		case <-done:
-			fmt.Fprint(w, "\033[2J\033[H")
 			return nil
 		case <-time.After(hold):
 			i++

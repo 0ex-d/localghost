@@ -10,9 +10,12 @@
 # default port ghost.secd's private instance must avoid, and (b) put unencrypted DB data on the
 # system disk , exactly what this design refuses.
 #
-# Coexistence: if you ALREADY run a system Postgres/Redis on 5432/6379 for something else, this does
-# not touch it , masking only stops the DISTRO units from auto-starting the ones we just installed.
-# ghost.secd's instances use their own ports (services.conf), so they never collide.
+# Coexistence, the rule this script now actually keeps: if this box ALREADY runs Postgres/Redis for
+# other things, NOTHING here stops, disables, masks, or drops them. Neutralisation (mask + drop the
+# auto-created cluster) happens ONLY for packages this very run installed on a previously DB-less box
+# , the case where the distro just auto-provisioned services nobody asked for. ghost.secd's instances
+# use their own ports (6000+slot / 6100+slot) and unix sockets on the encrypted mount, so they never
+# collide with a system 5432/6379.
 #
 # Idempotent. Reads nothing secret. Run as root. Read it before you run it.
 set -euo pipefail
@@ -22,12 +25,30 @@ CODENAME="${VERSION_CODENAME:?cannot determine Debian codename}"
 ARCH="$(dpkg --print-architecture)"
 echo "> Debian ${CODENAME} (${ARCH})"
 
+# Self-heal before ANY apt call: if a previous run of this script added our source files alongside
+# pre-existing sources for the same repos (a box that already had PGDG or redis.io configured), apt
+# sees one repo with two different Signed-By values and refuses to read ANY source list , which also
+# means this script can never fix it via apt. Ours are the removable ones; theirs were here first.
+for pair in "apt.postgresql.org:/etc/apt/sources.list.d/pgdg.sources" \
+            "packages.redis.io:/etc/apt/sources.list.d/redis.sources"; do
+    _host="${pair%%:*}"; _ours="${pair#*:}"
+    _others="$(grep -rl "$_host" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null | grep -vx "$_ours" || true)"
+    if [ -f "$_ours" ] && [ -n "$_others" ]; then
+        echo "> removing duplicate apt source $_ours , repo already configured in:"
+        echo "$_others" | sed 's/^/    /'
+        rm -f "$_ours"
+    fi
+done
+
 echo "> prerequisites..."
 apt-get update
 apt-get install -y curl ca-certificates gpg lsb-release
 
 # --- PostgreSQL (PGDG, Postgres 18 , newer than Trixie's default 17) --------------------------
 echo "> adding PGDG repository (deb822)..."
+if grep -rlq "apt.postgresql.org" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+    echo "  PGDG already configured on this box , using the existing source, not adding a second"
+else
 install -d /usr/share/postgresql-common/pgdg
 curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
     https://www.postgresql.org/media/keys/ACCC4CF8.asc
@@ -39,9 +60,13 @@ Components: main
 Architectures: ${ARCH}
 Signed-By: /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
 EOF
+fi
 
 # --- Redis (official redis.io repo, Redis 8.x , newer than Trixie's default) -------------------
 echo "> adding Redis repository..."
+if grep -rlq "packages.redis.io" /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+    echo "  redis.io already configured on this box , using the existing source, not adding a second"
+else
 curl -fsSL https://packages.redis.io/gpg | gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg
 chmod 644 /usr/share/keyrings/redis-archive-keyring.gpg
 cat > /etc/apt/sources.list.d/redis.sources <<EOF
@@ -52,6 +77,7 @@ Components: main
 Architectures: ${ARCH}
 Signed-By: /usr/share/keyrings/redis-archive-keyring.gpg
 EOF
+fi
 
 # Preseed BEFORE the packages land: postgresql-common auto-creates a 'main' cluster at install time
 # unless told not to. With this, no cluster is ever created on the system drive , the drop further
@@ -64,38 +90,61 @@ if ! grep -qE '^\s*create_main_cluster\s*=\s*false' /etc/postgresql-common/creat
 fi
 
 echo "> installing binaries..."
-apt-get update
 # postgresql-18 pulls the server + client + postgresql-common; postgresql-18-pgvector is the search
 # layer's vector index (rides into the volume bundle later). redis-server + redis-tools give the
-# server binary and redis-cli. We install, then immediately neutralise the auto-provisioning below.
-apt-get install -y postgresql-18 postgresql-client-18 postgresql-18-pgvector redis-server redis-tools
-
-# --- Neutralise auto-provisioning -------------------------------------------------------------
-echo "> stopping + masking distro units (ghost.secd owns these lifecycles)..."
-# Postgres: the packaged unit is a wrapper that starts ALL clusters. Stop + disable + mask it and
-# the per-version template so nothing brings a cluster up at boot.
-systemctl stop    postgresql.service            2>/dev/null || true
-systemctl disable postgresql.service            2>/dev/null || true
-systemctl mask    postgresql.service            2>/dev/null || true
-# Redis: same , the packaged redis-server.service must never auto-start our binary.
-systemctl stop    redis-server.service          2>/dev/null || true
-systemctl disable redis-server.service          2>/dev/null || true
-systemctl mask    redis-server.service          2>/dev/null || true
-
-echo "> removing the auto-created Postgres cluster on the SYSTEM drive (if any)..."
-# postgresql-common creates a 'main' cluster at install. It lives on the system drive with
-# unencrypted data , exactly what we do not want. Drop it. ghost.secd will initdb a fresh cluster
-# INSIDE the encrypted volume at provision. pg_lsclusters lists what exists; pg_dropcluster removes.
-if command -v pg_lsclusters >/dev/null 2>&1; then
-    # Only the auto-created 18/main on the system drive; never touches an encrypted-volume cluster
-    # (which is not registered with pg_lsclusters , ghost.secd runs postgres directly by -D).
-    if pg_lsclusters -h 2>/dev/null | awk '{print $1"/"$2}' | grep -qx "18/main"; then
-        pg_dropcluster --stop 18 main || true
-        echo "  dropped 18/main"
-    else
-        echo "  no 18/main cluster to drop"
-    fi
+# server binary and redis-cli.
+#
+# Install ONLY what is missing. "Ensure installed" is this script's whole contract , never "ensure
+# latest": upgrading present packages as a setup side effect would fight apt-mark holds (refused with
+# -y, correctly) and violate the version-pinning philosophy everything else here is built on. On this
+# box, database upgrades are a deliberate act (see bundle_db_runtime.sh), not something setup does to
+# you in passing.
+MISSING=""
+for _pkg in postgresql-18 postgresql-client-18 postgresql-18-pgvector redis-server redis-tools; do
+    dpkg -s "$_pkg" >/dev/null 2>&1 || MISSING="$MISSING $_pkg"
+done
+if [ -n "$MISSING" ]; then
+    echo "  installing:$MISSING"
+    apt-get update
+    # shellcheck disable=SC2086
+    apt-get install -y $MISSING
+else
+    echo "  all packages already installed , versions left exactly as they are (holds respected)"
 fi
+
+# --- Neutralise auto-provisioning , ONLY for what this run installed --------------------------
+# The dangerous half of this script, so the rule is explicit: a service that predates this run is
+# somebody's production database and gets left exactly as found. Only when THIS run installed the
+# packages (fresh box , the distro auto-provisioned a service and an OS-disk cluster nobody asked
+# for) do we stop/mask the unit and drop the auto-created empty cluster.
+case " $MISSING " in
+    *" postgresql-18 "*)
+        echo "> postgres was installed by THIS run , neutralising the distro auto-provisioning..."
+        systemctl stop    postgresql.service   2>/dev/null || true
+        systemctl disable postgresql.service   2>/dev/null || true
+        systemctl mask    postgresql.service   2>/dev/null || true
+        if pg_lsclusters -h 2>/dev/null | awk '{print $1"/"$2}' | grep -qx "18/main"; then
+            pg_dropcluster --stop 18 main || true
+            echo "  dropped the just-auto-created 18/main"
+        fi
+        ;;
+    *)
+        echo "> postgres pre-existed on this box , leaving its service, clusters, and data COMPLETELY alone"
+        echo "  (ghost.secd runs its own instances on ports 6000+slot with data on the encrypted volume;"
+        echo "   the system 5432 is not ours and is not touched)"
+        ;;
+esac
+case " $MISSING " in
+    *" redis-server "*)
+        echo "> redis was installed by THIS run , neutralising the distro unit..."
+        systemctl stop    redis-server.service 2>/dev/null || true
+        systemctl disable redis-server.service 2>/dev/null || true
+        systemctl mask    redis-server.service 2>/dev/null || true
+        ;;
+    *)
+        echo "> redis pre-existed on this box , leaving its service and data COMPLETELY alone"
+        ;;
+esac
 
 # Redis leaves /var/lib/redis and a default /etc/redis/redis.conf. We leave the files (harmless,
 # unused , ghost.secd writes its own redis.conf inside the volume) but the masked unit guarantees
