@@ -129,6 +129,14 @@ func (p *Plan) Apply(dryRun []Planned) ([]Result, error) {
 	}
 	results := make([]Result, 0, len(p.steps))
 	for _, step := range p.steps {
+		// A step with a nil Check or Do is a construction bug (usually version skew between plan.go
+		// and the caller). Name it and stop , a SIGSEGV names nothing.
+		if step.Check == nil || step.Do == nil {
+			err := fmt.Errorf("step %q is missing its %s function , plan.go and this build disagree; rebuild from one consistent tree", step.Name,
+				map[bool]string{true: "Check", false: "Do"}[step.Check == nil])
+			results = append(results, Result{step.Name, Failed, err})
+			return results, fmt.Errorf("%w: %v", ErrStepFailed, err)
+		}
 		done, err := step.Check()
 		if err != nil {
 			results = append(results, Result{step.Name, Failed, err})
