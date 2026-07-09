@@ -26,6 +26,11 @@ type Options struct {
 	// has no client cert until the scan completes, so nginx's mTLS wall rejects it by design).
 	// Callers set this when stdout is an interactive tty.
 	Animate bool
+	// EnrolledSignal, if set, returns true once the box has seen its first authenticated device , i.e.
+	// the phone assembled every frame and made real contact through nginx. The rotation loop polls it
+	// and stops on completion, so the operator gets a printed confirmation instead of eyeballing the
+	// app's frame counter. Nil disables the feature (rotation then only ends on Enter).
+	EnrolledSignal func() bool
 }
 
 // Run mints a fresh device identity, builds the enroll link that CARRIES it, and writes the link
@@ -90,7 +95,7 @@ func Run(w io.Writer, opts Options, encodeQR func(string) (Matrix, error)) error
 		fmt.Fprintln(w, RenderTerminal(matrix))
 		fmt.Fprintln(w, "Scan this with the LocalGhost app. The QR carries the device identity , scanning it enrols the phone.")
 	} else if animate {
-		if err := animateFrames(w, frames, encodeQR); err != nil {
+		if err := animateFrames(w, frames, encodeQR, opts.EnrolledSignal); err != nil && err != errEnrolled {
 			return err
 		}
 	} else {
@@ -128,8 +133,12 @@ func frameBudget(cols, rows int) (int, bool) {
 	if v < 8 {
 		return 0, false
 	}
-	if v > 20 {
-		v = 20
+	// Cap at v10 even on huge terminals. Phone cameras pointed at MONITORS fight moire and per-module
+	// blur, and field testing showed dense frames (v12+) only scanning from far away , more, smaller
+	// frames beat fewer, denser ones (the assembler does not care; the rotation just runs a bit
+	// longer). v10 keeps a real identity link to ~8 frames.
+	if v > 10 {
+		v = 10
 	}
 	// data codewords minus byte-mode overhead (~3) and the frame header (~20, with margin).
 	return versionM[v][0] - 27, true
@@ -142,7 +151,7 @@ func frameBudget(cols, rows int) (int, bool) {
 // when the set is complete. No feedback channel exists , or can: pre-enrolment the phone has no
 // client cert, so the box's mTLS edge rejects it, which is the appears-down design doing its job.
 // The rotation is pure display; security posture is unchanged.
-func animateFrames(w io.Writer, frames []string, encodeQR func(string) (Matrix, error)) error {
+func animateFrames(w io.Writer, frames []string, encodeQR func(string) (Matrix, error), enrolled func() bool) error {
 	// Pre-encode every frame so the loop never fails mid-rotation.
 	rendered := make([]string, len(frames))
 	for i, f := range frames {
@@ -179,5 +188,17 @@ func animateFrames(w io.Writer, frames []string, encodeQR func(string) (Matrix, 
 		case <-time.After(hold):
 			i++
 		}
+		// After each frame, check whether the phone has completed enrolment (first authenticated
+		// request reached the box). If so, stop rotating and report success , the operator no longer
+		// has to read the app's counter to know it worked.
+		if enrolled != nil && enrolled() {
+			fmt.Fprint(w, "\x1b[2J\x1b[H")
+			fmt.Fprintln(w, "Enrolment complete , the phone assembled its identity and reached the box.")
+			return errEnrolled
+		}
 	}
 }
+
+// errEnrolled is a sentinel: the rotation ended because enrolment succeeded, not because of an error.
+// Run() treats it as success.
+var errEnrolled = fmt.Errorf("enrolled")

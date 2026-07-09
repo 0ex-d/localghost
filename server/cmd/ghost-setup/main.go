@@ -363,14 +363,24 @@ func main() {
 	// embeds them in the QR, and keeps no copy of the key.
 	fmt.Println("\nBox provisioned. Enrol your phone by scanning the QR below:")
 	pki := debian.NewPKI(*caDir, hostVal)
-	if err := pair.Run(os.Stdout, pair.Options{
+	popts := pair.Options{
 		Host:        hostVal,
 		Port:        *port,
 		CertPath:    *caDir + "/box-server.pem",
 		BoxName:     hostVal,
 		IssueDevice: pki.IssueDeviceCertDER,
 		Animate:     term.IsTerminal(int(os.Stdout.Fd())),
-	}, pair.EncodeQR); err != nil {
+		// The rotation stops itself once the phone completes enrolment: secd touches enrolled.flag in
+		// the state dir on the first verified request nginx forwards. Polling a file keeps ghost-setup
+		// decoupled from secd internals and needs no client cert of its own.
+		EnrolledSignal: func() bool {
+			_, err := os.Stat(filepath.Join(*stateDir, "enrolled.flag"))
+			return err == nil
+		},
+	}
+	// Clear any prior enrolment marker so THIS rotation waits for THIS device, not a past one.
+	_ = os.Remove(filepath.Join(*stateDir, "enrolled.flag"))
+	if err := pair.Run(os.Stdout, popts, pair.EncodeQR); err != nil {
 		fmt.Fprintln(os.Stderr, "could not render enrolment QR:", err)
 		os.Exit(1)
 	}

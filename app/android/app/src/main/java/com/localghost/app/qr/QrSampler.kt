@@ -127,19 +127,30 @@ object QrSampler {
             val roles = assignCorners(triple) ?: continue
             val moduleLen = estimateModuleSize(bin, width, height, roles)
             val nFromTiming = countVersionFromTiming(bin, width, height, roles, moduleLen)
-            val nEst = if (nFromTiming in 21..97 && (nFromTiming - 17) % 4 == 0) {
-                nFromTiming
-            } else if (moduleLen != null) {
+            // Version candidates per triple , the decoder is the judge, same principle as the triples
+            // themselves. Timing used to be a single bet, and close to a monitor it loses in a
+            // characteristic way: screen moire merges module transitions and the count lands on a
+            // SMALLER but legal size (v8 for a v12 code), so the "valid" answer was wrong and the
+            // geometry estimate , derived from the 7-module finder width, which blur cannot shrink ,
+            // was never consulted. Now both nominate: timing first (right when conditions are good),
+            // then the geometry snap and its neighbouring versions. LinkedHashSet keeps that order and
+            // drops duplicates; MAX_GRIDS still bounds total sampling cost.
+            val sizes = LinkedHashSet<Int>()
+            if (nFromTiming in 21..97 && (nFromTiming - 17) % 4 == 0) sizes.add(nFromTiming)
+            if (moduleLen != null) {
                 val raw = (distD(roles.tl, roles.tr) / moduleLen) + 7.0
-                ((raw.roundToInt() - 17) / 4) * 4 + 17
-            } else continue   // no usable version for this triple; skip it cheaply (this is the filter)
-            if (nEst < 21 || nEst > 97 || (nEst - 17) % 4 != 0) continue
-            // Timing gives the version, so sample just that one size per triple. That keeps the grid
-            // budget spread across MANY triples, which matters because a finder-shaped data coincidence
-            // can push the genuine triple several places down the geometry ranking; we must still reach
-            // it. A rare version-estimate miss is recovered by the per-frame bias rotation retrying.
-            val (grid, conf) = sampleAtSize(lum, bin, width, height, roles, nEst) ?: continue
-            cands.add(Cand(grid, conf, timingScore(grid, nEst), roles, aimCentrality(roles, width, height)))
+                val nGeo = ((raw.roundToInt() - 17) / 4) * 4 + 17
+                for (d in intArrayOf(0, -4, 4)) {
+                    val nc = nGeo + d
+                    if (nc in 21..97 && (nc - 17) % 4 == 0) sizes.add(nc)
+                }
+            }
+            if (sizes.isEmpty()) continue // no usable version for this triple; skip it cheaply
+            for (nEst in sizes) {
+                if (cands.size >= MAX_GRIDS) break
+                val (grid, conf) = sampleAtSize(lum, bin, width, height, roles, nEst) ?: continue
+                cands.add(Cand(grid, conf, timingScore(grid, nEst), roles, aimCentrality(roles, width, height)))
+            }
         }
         if (cands.isEmpty()) return emptyList<Sampled>() to Diag.NoGrid(clusters.size, "no grid @bias$bias")
         // Best first for decode order. Normalised timing quality (so it doesn't merely favour higher

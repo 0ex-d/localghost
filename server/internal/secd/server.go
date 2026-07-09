@@ -21,6 +21,7 @@ import (
 // without a box-issued device cert at the handshake (the access key), so every request that reaches
 // here is already from an enrolled device. The PIN (account selection) is then proven at /unlock.
 type Server struct {
+	enrolFlagField // one-time "a verified device reached us" marker for provisioning's rotation loop
 	cfg      Config
 	models   *models.Registry
 	mu       sync.Mutex
@@ -159,7 +160,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/models", s.handleModels)
 	mux.HandleFunc("/v1/models/", s.handleModelBytes) // /v1/models/{id}
 	mux.HandleFunc("/v1/openapi.json", s.handleOpenAPI)
-	return logRequests(mux)
+	// Observe verified clients: the first request nginx forwards with a verified client cert means a
+	// phone finished enrolment. Mark it (best-effort) so provisioning can stop rotating the QR. This
+	// wraps every route and changes no response , purely a side signal.
+	observed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if verifiedClient(r) {
+			s.noteVerifiedDevice()
+		}
+		mux.ServeHTTP(w, r)
+	})
+	return logRequests(observed)
 }
 
 // handleHealth is the cheap reachability check the app's reachable() calls. It needs no account.
