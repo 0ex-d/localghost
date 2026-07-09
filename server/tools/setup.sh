@@ -170,6 +170,7 @@ TRAN="$(lsblk -dno TRAN "$DISK" 2>/dev/null | tr -d ' ')"
 ROTA="$(lsblk -dno ROTA "$DISK" 2>/dev/null | tr -d ' ')"
 KIND="SSD"; [ "$ROTA" = "1" ] && KIND="spinning disk"
 NPARTS="$(lsblk -no NAME "$DISK" 2>/dev/null | tail -n +2 | wc -l | tr -d ' ')"
+FSTYPE="$(blkid -o value -s TYPE "$DISK" 2>/dev/null || true)"
 echo
 echo "  ------------------------------------------------------------"
 echo "  This is the drive you chose , it will be COMPLETELY WIPED:"
@@ -177,13 +178,35 @@ echo
 echo "      $DISK , $DSIZE ${TRAN:-unknown-bus} $KIND"
 echo "      model   ${MODEL:-unknown}"
 echo "      serial  ${SERIAL:-unknown}"
-if [ "$NPARTS" = "0" ]; then
-    echo "      content none , no partitions (empty, as expected)"
+if [ "$NPARTS" = "0" ] && [ -z "$FSTYPE" ]; then
+    echo "      content none , no partitions, no signatures (empty, as expected)"
+elif [ "$NPARTS" = "0" ]; then
+    echo "      content a $FSTYPE signature on the raw disk (NOT empty , see below)"
 else
     echo "      content $NPARTS EXISTING partition(s) , they will be destroyed:"
     lsblk -no NAME,SIZE,FSTYPE,MOUNTPOINT "$DISK" 2>/dev/null | tail -n +2 | sed 's/^/        /'
 fi
 echo "  ------------------------------------------------------------"
+# Deal with an existing LUKS container NOW, not after the PINs. ghost-setup refuses a provisioned-
+# looking disk (re-provisioning would silently keep the original PIN), so surfacing it here saves the
+# whole ceremony. Two honest cases: a previous incomplete run of THIS setup (wipe and carry on), or
+# somebody's real encrypted data (that is the wrong disk , walk away).
+if [ "$FSTYPE" = "crypto_LUKS" ]; then
+    echo
+    echo "  This disk already holds a LUKS container. If it is the remains of an earlier incomplete"
+    echo "  LocalGhost run, it can be wiped here and setup continues. If it might be REAL encrypted"
+    echo "  data, abort , this is the wrong disk."
+    printf '  type WIPEIT to erase the container and continue, anything else aborts: '
+    read -r _w
+    if [ "$_w" = "WIPEIT" ]; then
+        cryptsetup luksErase --batch-mode "$DISK" 2>/dev/null || true
+        wipefs -a "$DISK" >/dev/null
+        echo "  wiped , $DISK is bare again"
+    else
+        echo "  aborted , nothing touched."
+        exit 1
+    fi
+fi
 confirm_word "YES" || { echo "  aborted , nothing touched."; exit 1; }
 echo "  confirmed: $DISK"
 

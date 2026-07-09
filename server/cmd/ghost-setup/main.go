@@ -12,8 +12,10 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"golang.org/x/term"
@@ -21,7 +23,6 @@ import (
 	"github.com/LocalGhostDao/localghost/server/internal/pair"
 	"github.com/LocalGhostDao/localghost/server/internal/setup"
 	"github.com/LocalGhostDao/localghost/server/internal/setup/debian"
-	"path/filepath"
 )
 
 // promptPIN reads a PIN from the terminal WITHOUT echoing it, so it never appears on screen, in
@@ -255,7 +256,37 @@ func main() {
 		Host: hostVal, CaDir: *caDir, StateDir: *stateDir, Disk: diskVal, Port: *port,
 	})
 
-	plan := setup.DefaultPlan(sys, withDomain, nil, nginxConf, units)
+	// The DNS step's Do: resolve the domain and report how it relates to this box. Hard failure ONLY
+	// when the name does not resolve at all , a domain resolving to a non-local address is the normal
+	// shape of NAT/port-forwarding and gets a note, not a veto. Self-signed PKI means DNS is for
+	// reachability, never for cert issuance, so there is nothing else to demand of it.
+	dnsCheck := func() error { return nil }
+	if withDomain {
+		d := domainVal
+		dnsCheck = func() error {
+			ips, err := net.LookupIP(d)
+			if err != nil || len(ips) == 0 {
+				return fmt.Errorf("domain %s does not resolve: %v", d, err)
+			}
+			local := map[string]bool{}
+			if addrs, aerr := net.InterfaceAddrs(); aerr == nil {
+				for _, a := range addrs {
+					if ipn, ok := a.(*net.IPNet); ok {
+						local[ipn.IP.String()] = true
+					}
+				}
+			}
+			for _, ip := range ips {
+				if local[ip.String()] {
+					fmt.Printf("    %s -> %s (an address of this box)\n", d, ip)
+					return nil
+				}
+			}
+			fmt.Printf("    %s resolves to %v , not a local interface address; normal behind NAT/port-forward, verify from the phone after start\n", d, ips)
+			return nil
+		}
+	}
+	plan := setup.DefaultPlan(sys, withDomain, dnsCheck, nginxConf, units)
 
 	planned, err := plan.DryRun()
 	if err != nil {
