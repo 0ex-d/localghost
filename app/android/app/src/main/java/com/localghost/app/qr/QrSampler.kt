@@ -63,6 +63,9 @@ object QrSampler {
         // proxy the UI turns into "move closer": below ~3px/module the binariser cannot resolve modules
         // reliably, which is exactly when a dense code refuses to decode however steady you hold it.
         @Volatile var moduleLenPx: Double = 0.0
+        // Consecutive analyser passes that saw finders but decoded nothing. tryDecode increments it and
+        // zeroes it on any successful decode; the UI reads it to decide whether to coach the person.
+        @Volatile var noDecodeStreak: Int = 0
     }
 
     /**
@@ -1015,7 +1018,7 @@ object QrSampler {
                     if (looksLikeAlignmentCentre(bin, w, h, xx, yy, moduleSpanPx)) {
                         val centre = darkBlobCentroid(bin, w, h, xx, yy, (moduleSpanPx).roundToInt().coerceIn(1, 8))
                         val d = (centre.x - predicted.x) * (centre.x - predicted.x) +
-                            (centre.y - predicted.y) * (centre.y - predicted.y)
+                                (centre.y - predicted.y) * (centre.y - predicted.y)
                         if (d < bestDist) { bestDist = d; best = centre }
                     }
                 }

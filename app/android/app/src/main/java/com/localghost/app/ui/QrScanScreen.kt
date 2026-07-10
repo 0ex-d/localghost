@@ -14,6 +14,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
@@ -55,7 +56,7 @@ fun QrScanScreen(
     var granted by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
-                PackageManager.PERMISSION_GRANTED
+                    PackageManager.PERMISSION_GRANTED
         )
     }
     var status by remember { mutableStateOf("point at the QR on the box") }
@@ -63,9 +64,22 @@ fun QrScanScreen(
     // frame with the exact stage reached (finder count, grid size, "no candidate decoded", "decoded N
     // chars"), so polling it here shows WHERE a code is getting stuck instead of failing silently.
     var diag by remember { mutableStateOf("") }
+    var coach by remember { mutableStateOf<String?>(null) } // "move closer" / "hold steady" hint, or null
     LaunchedEffect(Unit) {
         while (true) {
             diag = ScanDiag.last
+            // Coaching from the shared streak counter: only after a sustained run of finders-but-no-decode
+            // (~1.5s), turn module pixel size into a "move closer / back / focus" hint. Cleared as soon as
+            // anything decodes (tryDecode zeroes the streak).
+            val streak = com.localghost.app.qr.QrSampler.ScanGeom.noDecodeStreak
+            coach = if (streak >= 6) {
+                val mod = com.localghost.app.qr.QrSampler.ScanGeom.moduleLenPx
+                when {
+                    mod in 0.1..3.0 -> "move closer , the code is too small to read"
+                    mod > 9.0 -> "move back a little , the code is too big for the frame"
+                    else -> "hold steady and tap the code to focus"
+                }
+            } else null
             kotlinx.coroutines.delay(180)
         }
     }
@@ -85,8 +99,6 @@ fun QrScanScreen(
     var frameProgress by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var capturedFrames by remember { mutableStateOf<Set<Int>>(emptySet()) }
     var frameFlashAt by remember { mutableStateOf(0L) } // timestamp of the last new-frame pulse
-    var noDecodeStreak by remember { mutableStateOf(0) } // consecutive frames: finders seen, nothing decoded
-    var coach by remember { mutableStateOf<String?>(null) } // "move closer" / "hold steady" hint, or null
     var enrolAnim by remember { mutableStateOf(0f) } // 0..1 over the animation
     // Two-frame confirmation gate. A live scanner runs many decode attempts per frame (8 orientations,
     // several versions and biases); very occasionally one lands a Reed-Solomon miscorrection that is
@@ -146,8 +158,8 @@ fun QrScanScreen(
                 SectionLabel("SCAN THE BOX QR")
                 Spacer(Modifier.height(12.dp))
                 Text("Camera permission is needed to scan. You can also go back and type the box " +
-                     "address, code and fingerprint by hand.",
-                     color = GhostTextDim, style = MaterialTheme.typography.bodyMedium)
+                        "address, code and fingerprint by hand.",
+                    color = GhostTextDim, style = MaterialTheme.typography.bodyMedium)
                 Spacer(Modifier.height(16.dp))
                 GhostButton("BACK TO TYPED ENTRY", onCancel, modifier = Modifier.fillMaxWidth())
             }
@@ -260,7 +272,7 @@ fun QrScanScreen(
                             if (result.clean || pendingPayload == payload) {
                                 status = "found ${result.link.host}"
                                 quip = null
-                                coach = null; noDecodeStreak = 0
+                                coach = null
                                 foundLink = result.link
                             } else {
                                 status = "reading…"
@@ -285,7 +297,7 @@ fun QrScanScreen(
                         }
                     }
                     is ScanResult.Frames -> {
-                        noDecodeStreak = 0; coach = null
+                        coach = null
                         // Mid-capture of a multi-frame identity. Anchor the overlay, show progress, and on
                         // a NEWLY captured frame fire a brief success pulse + haptic so each scan feels
                         // acknowledged. Already-scanned frames just keep their checkmark, no re-pulse.
@@ -382,110 +394,110 @@ fun QrScanScreen(
             }
         }
 
-            // FEEDBACK RETICLE: whenever the detector has locked onto a code's position this frame
-            // (ScanGeom.corners is set), draw a clean pulsing corner-bracket square around it, so the
-            // person can see "yes, I'm seeing a code, hold steady" even while the decode is still being
-            // worked out. It tracks the detected quad; it is feedback, not the decode verdict (that is
-            // the ghost). Refreshed on its own ~80ms tick so it animates between decode passes.
-            var geomTick by remember { mutableStateOf(0) }
-            LaunchedEffect(granted) {
-                while (granted) { geomTick++; kotlinx.coroutines.delay(80) }
-            }
-            run {
-                geomTick // read so this recomposes on the tick
-                val corners = com.localghost.app.qr.QrSampler.ScanGeom.corners
-                if (foundLink == null && corners != null && corners.size == 4 && quadLooksSquare(corners)) {
-                    val fw = com.localghost.app.qr.QrSampler.ScanGeom.frameW
-                    val fh = com.localghost.app.qr.QrSampler.ScanGeom.frameH
-                    val rot = com.localghost.app.qr.QrSampler.ScanGeom.rotation
-                    Canvas(Modifier.fillMaxSize()) {
-                        val q = mapPointsToView(corners, fw, fh, rot, size.width, size.height)
-                        val pulse = 0.5f + 0.5f * kotlin.math.sin(geomTick * 0.25f)
-                        drawReticle(q, TerminalGreen, pulse)
-                    }
-                }
-            }
-
-            // AR overlay: the ghost drawn over the code, because the code decoded
-            // but it is not the way in. The orbit phase advances on its own clock (~100ms) so the ghost
-            // flies even between decode passes. The finder points come from the analysis frame (image
-            // space); we map them to this Canvas's view space. HONEST NOTE: the mapping is the part to
-            // verify on a real device , camera resolution vs preview size vs rotation is the classic
-            // source of an offset or mirrored overlay and cannot be confirmed by reasoning alone.
-            var orbit by remember { mutableStateOf(0f) }
-            LaunchedEffect(quip != null) {
-                while (quip != null) {
-                    orbit += 0.18f
-                    kotlinx.coroutines.delay(100)
-                }
-            }
-            // Rage ramps toward 1 while a wrong code is in view and decays when it leaves, so the ghost
-            // visibly gets angrier the longer you keep showing it the wrong code, then calms down.
-            var rage by remember { mutableStateOf(0f) }
-            LaunchedEffect(granted) {
-                while (granted) {
-                    rage = if (quip != null) (rage + 0.022f).coerceAtMost(1f) else (rage - 0.04f).coerceAtLeast(0f)
-                    kotlinx.coroutines.delay(50)
-                }
-            }
-            overlay?.let { ov ->
+        // FEEDBACK RETICLE: whenever the detector has locked onto a code's position this frame
+        // (ScanGeom.corners is set), draw a clean pulsing corner-bracket square around it, so the
+        // person can see "yes, I'm seeing a code, hold steady" even while the decode is still being
+        // worked out. It tracks the detected quad; it is feedback, not the decode verdict (that is
+        // the ghost). Refreshed on its own ~80ms tick so it animates between decode passes.
+        var geomTick by remember { mutableStateOf(0) }
+        LaunchedEffect(granted) {
+            while (granted) { geomTick++; kotlinx.coroutines.delay(80) }
+        }
+        run {
+            geomTick // read so this recomposes on the tick
+            val corners = com.localghost.app.qr.QrSampler.ScanGeom.corners
+            if (foundLink == null && corners != null && corners.size == 4 && quadLooksSquare(corners)) {
+                val fw = com.localghost.app.qr.QrSampler.ScanGeom.frameW
+                val fh = com.localghost.app.qr.QrSampler.ScanGeom.frameH
+                val rot = com.localghost.app.qr.QrSampler.ScanGeom.rotation
                 Canvas(Modifier.fillMaxSize()) {
-                    val pts = mapFindersToView(ov, size.width, size.height)
-                    // On a fresh frame capture, flash a green tick right on the code , the "we saw THIS
-                    // one" confirmation Vlad asked for, drawn where the phone is actually pointed. Brief
-                    // (matches frameFlashAt's ~450ms window) so it acknowledges without obscuring the next.
-                    if (pts.size == 3 && System.currentTimeMillis() - frameFlashAt < 450L) {
-                        val minX = pts.minOf { it.x }; val maxX = pts.maxOf { it.x }
-                        val minY = pts.minOf { it.y }; val maxY = pts.maxOf { it.y }
-                        val cx = (minX + maxX) / 2f; val cy = (minY + maxY) / 2f
-                        val r = (maxX - minX).coerceAtLeast(60f) * 0.28f
-                        drawCircle(TerminalGreen.copy(alpha = 0.22f), r * 1.7f, androidx.compose.ui.geometry.Offset(cx, cy))
-                        val sw = r * 0.28f
-                        drawLine(TerminalGreen, androidx.compose.ui.geometry.Offset(cx - r * 0.55f, cy),
-                            androidx.compose.ui.geometry.Offset(cx - r * 0.1f, cy + r * 0.5f), sw, cap = androidx.compose.ui.graphics.StrokeCap.Round)
-                        drawLine(TerminalGreen, androidx.compose.ui.geometry.Offset(cx - r * 0.1f, cy + r * 0.5f),
-                            androidx.compose.ui.geometry.Offset(cx + r * 0.6f, cy - r * 0.5f), sw, cap = androidx.compose.ui.graphics.StrokeCap.Round)
-                    }
-                    // Only the WRONG-code ghost is drawn over the code. A successful scan is handled by the
-                    // full-screen celebration layer at the end, so nothing is drawn on the code on success.
-                    if (pts.size == 3 && quip != null) {
-                        // No bracket , just the ghost, getting ANGRIER the longer you keep showing it
-                        // rubbish. `rage` ramps toward 1 while a wrong code is in view (and decays
-                        // otherwise); it reddens the ghost, grows it, shakes it harder, and pushes a red
-                        // glow out behind it. The thing we scanned pops up above and mouths off.
-                        val minX = pts.minOf { it.x }; val maxX = pts.maxOf { it.x }
-                        val minY = pts.minOf { it.y }
-                        val cx = (minX + maxX) / 2f
-                        val pad = 24f
-                        val angry = androidx.compose.ui.graphics.lerp(Warning, AngryRed, rage)
-                        val ghostS = 54f + rage * 34f
-                        val jx = kotlin.math.sin(orbit * (3.1f + rage * 3f)) * (6f + rage * 14f)
-                        val jy = kotlin.math.cos(orbit * (2.7f + rage * 3f)) * (4f + rage * 10f)
-                        val gx = cx + jx
-                        val gy = minY - pad - ghostS * 1.3f + jy
-                        // Spooky backdrop: a deep void heart with a faint breathing mist ring, so the ghost
-                        // reads over a bright or busy camera frame AND looks like it brought its own gloom.
-                        // Drawn always, even before rage builds, so the ghost is visible the instant it appears.
-                        drawSpookyHalo(gx, gy, ghostS, angry, orbit)
-                        if (rage > 0.02f) {
-                            drawCircle(
-                                brush = androidx.compose.ui.graphics.Brush.radialGradient(
-                                    colors = listOf(AngryRed.copy(alpha = 0.45f * rage), androidx.compose.ui.graphics.Color.Transparent),
-                                    center = androidx.compose.ui.geometry.Offset(gx, gy),
-                                    radius = ghostS * 2.6f,
-                                ),
-                                radius = ghostS * 2.6f,
+                    val q = mapPointsToView(corners, fw, fh, rot, size.width, size.height)
+                    val pulse = 0.5f + 0.5f * kotlin.math.sin(geomTick * 0.25f)
+                    drawReticle(q, TerminalGreen, pulse)
+                }
+            }
+        }
+
+        // AR overlay: the ghost drawn over the code, because the code decoded
+        // but it is not the way in. The orbit phase advances on its own clock (~100ms) so the ghost
+        // flies even between decode passes. The finder points come from the analysis frame (image
+        // space); we map them to this Canvas's view space. HONEST NOTE: the mapping is the part to
+        // verify on a real device , camera resolution vs preview size vs rotation is the classic
+        // source of an offset or mirrored overlay and cannot be confirmed by reasoning alone.
+        var orbit by remember { mutableStateOf(0f) }
+        LaunchedEffect(quip != null) {
+            while (quip != null) {
+                orbit += 0.18f
+                kotlinx.coroutines.delay(100)
+            }
+        }
+        // Rage ramps toward 1 while a wrong code is in view and decays when it leaves, so the ghost
+        // visibly gets angrier the longer you keep showing it the wrong code, then calms down.
+        var rage by remember { mutableStateOf(0f) }
+        LaunchedEffect(granted) {
+            while (granted) {
+                rage = if (quip != null) (rage + 0.022f).coerceAtMost(1f) else (rage - 0.04f).coerceAtLeast(0f)
+                kotlinx.coroutines.delay(50)
+            }
+        }
+        overlay?.let { ov ->
+            Canvas(Modifier.fillMaxSize()) {
+                val pts = mapFindersToView(ov, size.width, size.height)
+                // On a fresh frame capture, flash a green tick right on the code , the "we saw THIS
+                // one" confirmation Vlad asked for, drawn where the phone is actually pointed. Brief
+                // (matches frameFlashAt's ~450ms window) so it acknowledges without obscuring the next.
+                if (pts.size == 3 && System.currentTimeMillis() - frameFlashAt < 450L) {
+                    val minX = pts.minOf { it.x }; val maxX = pts.maxOf { it.x }
+                    val minY = pts.minOf { it.y }; val maxY = pts.maxOf { it.y }
+                    val cx = (minX + maxX) / 2f; val cy = (minY + maxY) / 2f
+                    val r = (maxX - minX).coerceAtLeast(60f) * 0.28f
+                    drawCircle(TerminalGreen.copy(alpha = 0.22f), r * 1.7f, androidx.compose.ui.geometry.Offset(cx, cy))
+                    val sw = r * 0.28f
+                    drawLine(TerminalGreen, androidx.compose.ui.geometry.Offset(cx - r * 0.55f, cy),
+                        androidx.compose.ui.geometry.Offset(cx - r * 0.1f, cy + r * 0.5f), sw, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+                    drawLine(TerminalGreen, androidx.compose.ui.geometry.Offset(cx - r * 0.1f, cy + r * 0.5f),
+                        androidx.compose.ui.geometry.Offset(cx + r * 0.6f, cy - r * 0.5f), sw, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+                }
+                // Only the WRONG-code ghost is drawn over the code. A successful scan is handled by the
+                // full-screen celebration layer at the end, so nothing is drawn on the code on success.
+                if (pts.size == 3 && quip != null) {
+                    // No bracket , just the ghost, getting ANGRIER the longer you keep showing it
+                    // rubbish. `rage` ramps toward 1 while a wrong code is in view (and decays
+                    // otherwise); it reddens the ghost, grows it, shakes it harder, and pushes a red
+                    // glow out behind it. The thing we scanned pops up above and mouths off.
+                    val minX = pts.minOf { it.x }; val maxX = pts.maxOf { it.x }
+                    val minY = pts.minOf { it.y }
+                    val cx = (minX + maxX) / 2f
+                    val pad = 24f
+                    val angry = androidx.compose.ui.graphics.lerp(Warning, AngryRed, rage)
+                    val ghostS = 54f + rage * 34f
+                    val jx = kotlin.math.sin(orbit * (3.1f + rage * 3f)) * (6f + rage * 14f)
+                    val jy = kotlin.math.cos(orbit * (2.7f + rage * 3f)) * (4f + rage * 10f)
+                    val gx = cx + jx
+                    val gy = minY - pad - ghostS * 1.3f + jy
+                    // Spooky backdrop: a deep void heart with a faint breathing mist ring, so the ghost
+                    // reads over a bright or busy camera frame AND looks like it brought its own gloom.
+                    // Drawn always, even before rage builds, so the ghost is visible the instant it appears.
+                    drawSpookyHalo(gx, gy, ghostS, angry, orbit)
+                    if (rage > 0.02f) {
+                        drawCircle(
+                            brush = androidx.compose.ui.graphics.Brush.radialGradient(
+                                colors = listOf(AngryRed.copy(alpha = 0.45f * rage), androidx.compose.ui.graphics.Color.Transparent),
                                 center = androidx.compose.ui.geometry.Offset(gx, gy),
-                            )
-                        }
-                        drawAngryGhost(gx, gy, ghostS, angry, orbit, rage)
-                        val said = quip?.let { shoutFor(it) } ?: ""
-                        if (said.isNotEmpty()) {
-                            drawSpeechBubble(gx, gy - ghostS * 1.5f, said, angry, orbit)
-                        }
+                                radius = ghostS * 2.6f,
+                            ),
+                            radius = ghostS * 2.6f,
+                            center = androidx.compose.ui.geometry.Offset(gx, gy),
+                        )
+                    }
+                    drawAngryGhost(gx, gy, ghostS, angry, orbit, rage)
+                    val said = quip?.let { shoutFor(it) } ?: ""
+                    if (said.isNotEmpty()) {
+                        drawSpeechBubble(gx, gy - ghostS * 1.5f, said, angry, orbit)
                     }
                 }
             }
+        }
 
 
         // Floating title at the top, clear of the status bar and the camera cutout. Sits on a dark
@@ -1094,16 +1106,10 @@ private fun tryDecode(proxy: ImageProxy, frames: com.localghost.app.qr.FrameAsse
         val align = if (com.localghost.app.qr.QrSampler.ScanGeom.alignFound) "align+" else "align-"
         if (text == null || overlay == null) {
             ScanDiag.last = "v$ver $align f=${com.localghost.app.qr.QrSampler.ScanGeom.findersSeen}: sampled, none decoded"
-            noDecodeStreak += 1
-            // Coach only after a sustained streak (~1.5s of finders-but-no-decode), so a momentary miss
-            // does not nag. Module pixel size is the distance tell: small modules = too far to resolve.
-            if (noDecodeStreak >= 6) {
-                val mod = com.localghost.app.qr.QrSampler.ScanGeom.moduleLenPx
-                coach = when {
-                    mod in 0.1..3.0 -> "move closer , the code is too small to read"
-                    mod > 9.0 -> "move back a little , the code is too big for the frame"
-                    else -> "hold steady and tap the code to focus"
-                }
+            // Track a finders-but-no-decode streak on the shared ScanGeom so the composable can turn it
+            // into on-screen coaching (this function is top-level, with no access to composable state).
+            if (com.localghost.app.qr.QrSampler.ScanGeom.findersSeen >= 1) {
+                com.localghost.app.qr.QrSampler.ScanGeom.noDecodeStreak += 1
             }
             return ScanResult.Nothing
         }
@@ -1113,6 +1119,7 @@ private fun tryDecode(proxy: ImageProxy, frames: com.localghost.app.qr.FrameAsse
         // impossible. Erasure-path decodes ("conf"/"logo") are more willing to manufacture a consistent-
         // but-wrong payload, so those still require the two-frame confirmation downstream.
         val cleanDecode = QrMatrixDecode.lastPath == "clean"
+        com.localghost.app.qr.QrSampler.ScanGeom.noDecodeStreak = 0 // decoding works; clear any coaching
         ScanDiag.last = "v$ver $align ${QrMatrixDecode.lastPath} ${text.length}ch"
 
         // Multi-frame enrolment: a real device identity spans several QRs. If this decode is a frame,
