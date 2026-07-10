@@ -55,6 +55,18 @@ fun SyncScreen(
                         strokeCap = StrokeCap.Butt, modifier = Modifier.fillMaxWidth().height(4.dp))
                 }
             }
+            // Throughput + ETA + total-bytes progress , the "how long is this going to take" line.
+            if (sync.bytesTotal > 0) {
+                Spacer(Modifier.height(16.dp))
+                val overall = (sync.bytesSent.toFloat() / sync.bytesTotal).coerceIn(0f, 1f)
+                LinearProgressIndicator(progress = { overall }, color = TerminalGreen, trackColor = VoidLighter,
+                    strokeCap = StrokeCap.Butt, modifier = Modifier.fillMaxWidth().height(6.dp))
+                Spacer(Modifier.height(6.dp))
+                val speed = if (sync.speedBps > 0) speedStr(sync.speedBps) else "measuring…"
+                val eta = if (sync.etaSeconds > 0) etaStr(sync.etaSeconds) else "estimating…"
+                Text("${mb(sync.bytesSent)} / ${mb(sync.bytesTotal)}   ·   $speed   ·   $eta left",
+                    color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+            }
         }
         sync.status?.let {
             Spacer(Modifier.height(16.dp))
@@ -79,6 +91,18 @@ private fun bar(label: String, done: Int, total: Int) {
 
 private fun mb(bytes: Long): String =
     if (bytes < 1024 * 1024) "${bytes / 1024}KB" else "%.1fMB".format(bytes / 1024.0 / 1024.0)
+
+private fun speedStr(bps: Double): String = when {
+    bps >= 1_000_000 -> "%.1f MB/s".format(bps / 1_000_000)
+    bps >= 1_000 -> "%.0f KB/s".format(bps / 1_000)
+    else -> "%.0f B/s".format(bps)
+}
+
+private fun etaStr(seconds: Long): String = when {
+    seconds >= 3600 -> "%dh %dm".format(seconds / 3600, (seconds % 3600) / 60)
+    seconds >= 60 -> "%dm %ds".format(seconds / 60, seconds % 60)
+    else -> "${seconds}s"
+}
 
 @Composable
 private fun grantLine(label: String, value: String, ok: Boolean, warn: Boolean) {

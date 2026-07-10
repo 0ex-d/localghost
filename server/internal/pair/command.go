@@ -71,17 +71,23 @@ func Run(w io.Writer, opts Options, encodeQR func(string) (Matrix, error)) error
 	// Chunk the link into scannable frames. A real device identity (~1.4 KB) will not fit one
 	// comfortable QR, so we render a few small frames the app scans in sequence. A small link yields a
 	// single frame, so this is one code path, not a special case.
-	payload := chunkPayloadBytes
+	//
+	// staticBudget is the per-frame payload for NON-animated output (static print, or a small terminal
+	// falling back from animation). It is deliberately conservative , v8-equivalent , so printed frames
+	// stay small enough to scan off a phone screen even in a modest window. The old default was ~v12,
+	// which is exactly the density that only scanned from far away.
+	const staticBudget = 130
+	payload := staticBudget
 	animate := opts.Animate
 	if animate {
 		if cols, rows, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
 			if p, ok := frameBudget(cols, rows); ok {
 				payload = p
 			} else {
-				// Too small to rotate usefully (frames would shrink until a real link needs dozens).
-				// Print statically instead , scroll and scan, or re-run from a larger window.
+				// Too small to rotate usefully. Print statically at the conservative budget (already set
+				// above) , scroll and scan, or re-run from a larger window for the animated flow.
 				animate = false
-				fmt.Fprintln(w, "note: this terminal is small for animated QR , printing frames statically; a larger window makes this nicer")
+				fmt.Fprintln(w, "note: terminal is small for animated QR , printing small frames statically instead; a larger window enables the rotating view")
 			}
 		}
 	}

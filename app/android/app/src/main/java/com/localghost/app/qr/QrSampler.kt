@@ -59,6 +59,10 @@ object QrSampler {
         // open the fast-sampling window: a marginal code at distance often shows finders for many frames
         // before a grid ever samples, and those are exactly the frames that need more attempts per second.
         @Volatile var findersSeen: Int = 0
+        // Estimated module size in PIXELS from the last finder triple (finder width / 7). A distance
+        // proxy the UI turns into "move closer": below ~3px/module the binariser cannot resolve modules
+        // reliably, which is exactly when a dense code refuses to decode however steady you hold it.
+        @Volatile var moduleLenPx: Double = 0.0
     }
 
     /**
@@ -126,6 +130,7 @@ object QrSampler {
             if (cands.size >= MAX_GRIDS) break
             val roles = assignCorners(triple) ?: continue
             val moduleLen = estimateModuleSize(bin, width, height, roles)
+            if (moduleLen != null && moduleLen > 0) ScanGeom.moduleLenPx = moduleLen
             val nFromTiming = countVersionFromTiming(bin, width, height, roles, moduleLen)
             // Version candidates per triple , the decoder is the judge, same principle as the triples
             // themselves. Timing used to be a single bet, and close to a monitor it loses in a

@@ -85,6 +85,8 @@ fun QrScanScreen(
     var frameProgress by remember { mutableStateOf<Pair<Int, Int>?>(null) }
     var capturedFrames by remember { mutableStateOf<Set<Int>>(emptySet()) }
     var frameFlashAt by remember { mutableStateOf(0L) } // timestamp of the last new-frame pulse
+    var noDecodeStreak by remember { mutableStateOf(0) } // consecutive frames: finders seen, nothing decoded
+    var coach by remember { mutableStateOf<String?>(null) } // "move closer" / "hold steady" hint, or null
     var enrolAnim by remember { mutableStateOf(0f) } // 0..1 over the animation
     // Two-frame confirmation gate. A live scanner runs many decode attempts per frame (8 orientations,
     // several versions and biases); very occasionally one lands a Reed-Solomon miscorrection that is
@@ -216,7 +218,11 @@ fun QrScanScreen(
                 // clocks between decodes, so the rate itself is not felt.
                 val now = System.currentTimeMillis()
                 val codeInView = now - timing.lastDetectAt < DETECT_WINDOW_MS
-                val interval = if (codeInView) 180L else 400L
+                // Field-tuned down from 180/400: flat-out sampling heats the phone into thermal
+                // throttle, which FEELS like the scanner getting worse the longer you try. 250ms hot
+                // still lands ~12 attempts per rotating frame (3.2s hold); 600ms is plenty to notice
+                // a code entering view within a blink.
+                val interval = if (codeInView) 250L else 600L
                 if (now - timing.lastDecodeAt < interval) {
                     proxy.close()
                     return@setAnalyzer
@@ -254,6 +260,7 @@ fun QrScanScreen(
                             if (result.clean || pendingPayload == payload) {
                                 status = "found ${result.link.host}"
                                 quip = null
+                                coach = null; noDecodeStreak = 0
                                 foundLink = result.link
                             } else {
                                 status = "reading…"
@@ -278,6 +285,7 @@ fun QrScanScreen(
                         }
                     }
                     is ScanResult.Frames -> {
+                        noDecodeStreak = 0; coach = null
                         // Mid-capture of a multi-frame identity. Anchor the overlay, show progress, and on
                         // a NEWLY captured frame fire a brief success pulse + haptic so each scan feels
                         // acknowledged. Already-scanned frames just keep their checkmark, no re-pulse.
@@ -308,10 +316,30 @@ fun QrScanScreen(
                     }
                 }
             }
-            provider.unbindAll()
-            camera = provider.bindToLifecycle(
-                lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis
-            )
+            // Bind with a short retry. On a COLD first launch the camera device can still be held by
+            // the OS (or the just-granted permission has not fully propagated), and bindToLifecycle
+            // throws , which, uncaught, left a dead preview that only worked when you reopened the
+            // scanner (second time the camera is free and permission is already settled). This is that
+            // "open it twice" bug. A few spaced retries make the first open succeed.
+            var bound = false
+            var lastErr: Exception? = null
+            repeat(5) { attempt ->
+                if (bound) return@repeat
+                try {
+                    provider.unbindAll()
+                    camera = provider.bindToLifecycle(
+                        lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis
+                    )
+                    bound = true
+                } catch (e: Exception) {
+                    lastErr = e
+                    kotlinx.coroutines.delay(250L * (attempt + 1)) // 250, 500, 750, 1000ms backoff
+                }
+            }
+            if (!bound) {
+                status = "camera busy , tap to retry"
+                ScanDiag.last = "camera bind failed: ${lastErr?.javaClass?.simpleName}"
+            }
         }
 
         // Full-bleed camera preview. The AR overlays and the text panels float over it. Tapping focuses
@@ -499,6 +527,14 @@ fun QrScanScreen(
                     .padding(horizontal = 12.dp, vertical = 8.dp)
             ) {
                 Text("> $status", color = TerminalGreen, style = MaterialTheme.typography.labelMedium)
+                // Coaching hint: shown only during a sustained no-decode streak (see the analyser). It is
+                // the actionable version of the silent technical diag , tells the person what to DO.
+                coach?.let { c ->
+                    Spacer(Modifier.height(4.dp))
+                    Text("! $c", color = Warning, textAlign = TextAlign.Center,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.fillMaxWidth())
+                }
                 // Multi-frame enrolment progress: one pip per frame, filled + checked once captured. A
                 // just-captured frame briefly brightens (frameFlashAt), so each scan visibly lands.
                 frameProgress?.let { (_, want) ->
@@ -1058,6 +1094,17 @@ private fun tryDecode(proxy: ImageProxy, frames: com.localghost.app.qr.FrameAsse
         val align = if (com.localghost.app.qr.QrSampler.ScanGeom.alignFound) "align+" else "align-"
         if (text == null || overlay == null) {
             ScanDiag.last = "v$ver $align f=${com.localghost.app.qr.QrSampler.ScanGeom.findersSeen}: sampled, none decoded"
+            noDecodeStreak += 1
+            // Coach only after a sustained streak (~1.5s of finders-but-no-decode), so a momentary miss
+            // does not nag. Module pixel size is the distance tell: small modules = too far to resolve.
+            if (noDecodeStreak >= 6) {
+                val mod = com.localghost.app.qr.QrSampler.ScanGeom.moduleLenPx
+                coach = when {
+                    mod in 0.1..3.0 -> "move closer , the code is too small to read"
+                    mod > 9.0 -> "move back a little , the code is too big for the frame"
+                    else -> "hold steady and tap the code to focus"
+                }
+            }
             return ScanResult.Nothing
         }
         // Whether the decode was CLEAN (plain Reed-Solomon, no erasures). A clean decode of a code that

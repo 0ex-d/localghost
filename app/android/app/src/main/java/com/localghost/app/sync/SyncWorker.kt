@@ -29,9 +29,9 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
 
         val engine = SyncEngine(applicationContext)
         val noop = object : SyncEngine.Progress {
-            override fun onStart(kind: MediaKind, total: Int) {}
+            override fun onStart(kind: MediaKind, total: Int, totalBytes: Long) {}
             override fun onItemStart(kind: MediaKind, name: String, index: Int, total: Int, size: Long) {}
-            override fun onItemBytes(kind: MediaKind, read: Long, size: Long) {}
+            override fun onItemBytes(kind: MediaKind, read: Long, size: Long, runBytesSent: Long, speedBps: Double, etaSeconds: Long) {}
             override fun onItemDone(kind: MediaKind, sent: Int, total: Int) {}
             override fun onDone(result: CommandResult) {}
         }

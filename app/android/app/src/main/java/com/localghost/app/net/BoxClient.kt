@@ -1,4 +1,7 @@
 package com.localghost.app.net
+import com.localghost.app.security.BoxConfig
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.flowOn
 import com.localghost.app.security.SessionStore
 
 import android.content.Context
@@ -120,7 +123,12 @@ object BoxClient {
                 if (expSec > 0) SessionStore.write(ctx, tok, expSec)
             }
         } catch (e: Exception) {
-            emit(UnlockSnapshot.failed("could not reach the box: ${e.message}"))
+            // Diagnostic: include the URL actually being contacted and the exception class, so a
+            // "cannot reach" failure says WHICH host/port failed and HOW (connection refused vs TLS
+            // handshake vs not-enrolled) instead of a generic dead-end.
+            val target = BoxConfig.read(ctx)?.baseUrl ?: "<not enrolled>"
+            val kind = e.javaClass.simpleName
+            emit(UnlockSnapshot.failed("could not reach $target [$kind: ${e.message}]"))
             return@flow
         }
         while (true) {
@@ -135,7 +143,8 @@ object BoxClient {
             if (snap.done || snap.failed != null) break
             delay(1000) // poll cadence: once a second
         }
-    }
+    }.flowOn(Dispatchers.IO) // ALL blocking HttpsURLConnection I/O off the main thread (else
+    //                          NetworkOnMainThreadException before the request even leaves the phone)
 
     /** Back-compat one-shot: unlocks and resolves when the stream reaches done. */
     suspend fun submitPin(ctx: Context, pin: String): Session {
@@ -147,7 +156,7 @@ object BoxClient {
     }
 
     /** Poll the box for the current unlock stage states, mapping the JSON to the app enums. */
-    private fun pollUnlock(ctx: Context): Map<UnlockStage, StageState> {
+    private suspend fun pollUnlock(ctx: Context): Map<UnlockStage, StageState> {
         val resp = BoxHttp.getJson(ctx, "/v1/unlock/poll")
         val out = mutableMapOf<UnlockStage, StageState>()
         val arr = resp.optJSONArray("stages") ?: return out
@@ -361,16 +370,23 @@ object BoxClient {
     }
 
     // --- sync ---
-    suspend fun nextCameraCommand(kind: MediaKind): Command {
-        delay(200); return Command.SyncCamera(kind, Cursor.BEGINNING)
-    }
+    /** What to sync next. The cursor is LOCAL (SyncCursor prefs): the box does not yet track per-device
+     *  positions, so the phone remembers where it got to and never re-sends the whole camera roll. */
+    suspend fun nextCameraCommand(ctx: Context, kind: MediaKind): Command =
+        Command.SyncCamera(kind, com.localghost.app.sync.SyncCursor.get(ctx, kind))
 
+    /** REAL upload: stream the photo bytes to secd's spool endpoint over the pinned mTLS channel.
+     *  202 Accepted = spooled for ghost.framed. The box ignores the name on purpose (it trusts only
+     *  the bytes + their EXIF); it is kept here for progress display. */
     suspend fun ingest(
+        ctx: Context,
         @Suppress("UNUSED_PARAMETER") kind: MediaKind,
         @Suppress("UNUSED_PARAMETER") name: String,
         body: InputStream,
-    ): Boolean {
-        val buf = ByteArray(64 * 1024); while (true) { if (body.read(buf) < 0) break }; return true
+    ): Boolean = try {
+        BoxHttp.postStream(ctx, "/v1/frames/upload", body, "image/*") == 202
+    } catch (e: Exception) {
+        false // network blip mid-photo: not confirmed, cursor does not advance, next run retries it
     }
 
     // --- persona / pins (scoped to the mounted persona) ---
@@ -510,10 +526,15 @@ object BoxClient {
      * chat and later swept by camera sync becomes one memory, extracted once.
      */
     suspend fun ingestAttachment(
+        ctx: Context,
         @Suppress("UNUSED_PARAMETER") att: Attachment,
         body: java.io.InputStream,
-    ): Boolean {
-        val buf = ByteArray(64 * 1024); while (true) { if (body.read(buf) < 0) break }; return true
+    ): Boolean = try {
+        // Same endpoint, same raw bytes as camera sync , so the content hash matches on the box and
+        // framed dedups the chat copy against the camera-swept copy into ONE memory.
+        BoxHttp.postStream(ctx, "/v1/frames/upload", body, "application/octet-stream") == 202
+    } catch (e: Exception) {
+        false
     }
 
     suspend fun report(@Suppress("UNUSED_PARAMETER") result: CommandResult) {}

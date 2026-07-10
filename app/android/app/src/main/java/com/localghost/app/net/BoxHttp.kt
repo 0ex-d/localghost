@@ -1,6 +1,8 @@
 package com.localghost.app.net
 
 import android.content.Context
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import com.localghost.app.security.BoxConfig
 import com.localghost.app.security.SessionStore
 import org.json.JSONObject
@@ -45,19 +47,37 @@ object BoxHttp {
         return conn
     }
 
-    /** GET returning the parsed JSON object. */
-    fun getJson(ctx: Context, path: String): JSONObject {
+    /** GET returning the parsed JSON object. Runs on Dispatchers.IO , HttpsURLConnection blocks, and
+     *  on the main thread that is an instant NetworkOnMainThreadException before the request is sent. */
+    suspend fun getJson(ctx: Context, path: String): JSONObject = withContext(Dispatchers.IO) {
         val conn = open(ctx, path, "GET")
-        return readJson(conn)
+        readJson(conn)
     }
 
-    /** POST a JSON body, returning the parsed JSON response. */
-    fun postJson(ctx: Context, path: String, body: JSONObject): JSONObject {
+    /**
+     * POST a raw byte stream (a photo, exactly as shot) and return the HTTP status code. Chunked
+     * streaming mode , a phone photo is multi-MB and must never be buffered whole in RAM; 64KB chunks
+     * flow from the MediaStore stream straight onto the mTLS socket. The box (secd) spools the same
+     * bytes to disk without parsing them; parsing happens in ghost.framed behind the front door.
+     */
+    suspend fun postStream(ctx: Context, path: String, body: java.io.InputStream, contentType: String = "application/octet-stream"): Int = withContext(Dispatchers.IO) {
+        val conn = open(ctx, path, "POST")
+        conn.doOutput = true
+        conn.setChunkedStreamingMode(64 * 1024)
+        conn.setRequestProperty("Content-Type", contentType)
+        conn.outputStream.use { out -> body.copyTo(out, 64 * 1024) }
+        val code = conn.responseCode
+        conn.disconnect()
+        code
+    }
+
+    /** POST a JSON body, returning the parsed JSON response. On Dispatchers.IO (see getJson). */
+    suspend fun postJson(ctx: Context, path: String, body: JSONObject): JSONObject = withContext(Dispatchers.IO) {
         val conn = open(ctx, path, "POST")
         conn.doOutput = true
         conn.setRequestProperty("Content-Type", "application/json")
         conn.outputStream.use { it.write(body.toString().toByteArray()) }
-        return readJson(conn)
+        readJson(conn)
     }
 
     /**
@@ -65,7 +85,7 @@ object BoxHttp {
      * resume. The caller owns the stream and must close it. The underlying connection is closed when
      * the stream is exhausted/closed by the caller's use{} block.
      */
-    fun openStream(ctx: Context, path: String, offset: Long): java.io.InputStream {
+    suspend fun openStream(ctx: Context, path: String, offset: Long): java.io.InputStream = withContext(Dispatchers.IO) {
         val conn = open(ctx, path, "GET")
         if (offset > 0) {
             conn.setRequestProperty("Range", "bytes=$offset-")
@@ -75,7 +95,7 @@ object BoxHttp {
             conn.disconnect()
             throw java.io.IOException("box returned HTTP $code for $path")
         }
-        return conn.inputStream
+        conn.inputStream
     }
 
     private fun readJson(conn: HttpsURLConnection): JSONObject {

@@ -404,19 +404,8 @@ func (s *System) InstallServices(units []setup.SystemdUnit) error {
 		if _, err := os.Stat(src); err != nil {
 			return fmt.Errorf("service binary %s not found in %s (run make box first): %w", u.Name, s.ExecDir, err)
 		}
-		// Atomic replace: copy to a temp file in the SAME directory, then rename over the target. A
-		// plain copy-over-in-place fails with "text file busy" (ETXTBSY) when the service is running ,
-		// the kernel refuses to open a live executable for writing. rename(2) swaps the directory entry
-		// to the new inode while the old one keeps executing until the process restarts, so the update
-		// always succeeds and the running secd is undisturbed until systemd restarts it.
-		dst := filepath.Join(setup.SystemBinDir, u.Name)
-		tmp := dst + ".new"
-		if err := copyFile(src, tmp, 0o755); err != nil {
+		if err := copyFile(src, filepath.Join(setup.SystemBinDir, u.Name), 0o755); err != nil {
 			return fmt.Errorf("stage %s into %s: %w", u.Name, setup.SystemBinDir, err)
-		}
-		if err := os.Rename(tmp, dst); err != nil {
-			_ = os.Remove(tmp)
-			return fmt.Errorf("replace %s: %w", dst, err)
 		}
 	}
 	for _, u := range units {

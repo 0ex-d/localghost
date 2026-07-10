@@ -388,7 +388,7 @@ class MainActivity : ComponentActivity() {
         // and the box dedups if camera sync later sweeps the same file.
         lifecycleScope.launch {
             runCatching {
-                contentResolver.openInputStream(uri)?.use { BoxClient.ingestAttachment(a, it) }
+                contentResolver.openInputStream(uri)?.use { BoxClient.ingestAttachment(this@MainActivity, a, it) }
             }
         }
     }
@@ -845,7 +845,7 @@ class MainActivity : ComponentActivity() {
                     NotifyState.setMuted(this@MainActivity, bs.notificationsMuted)
                     sync = sync.copy(notificationsMuted = bs.notificationsMuted)
                 }
-            } else error = "Could not reach your box"
+            } else if (error == null) error = "Could not reach your box"
         }
     }
 
@@ -884,14 +884,17 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             var photos = 0; var videos = 0
             val progress = object : SyncEngine.Progress {
-                override fun onStart(kind: MediaKind, total: Int) {
-                    sync = if (kind == MediaKind.PHOTO) sync.copy(photoTotal = total) else sync.copy(videoTotal = total)
+                override fun onStart(kind: MediaKind, total: Int, totalBytes: Long) {
+                    sync = if (kind == MediaKind.PHOTO)
+                        sync.copy(photoTotal = total, bytesTotal = totalBytes, bytesSent = 0, speedBps = 0.0, etaSeconds = 0)
+                    else sync.copy(videoTotal = total, bytesTotal = totalBytes, bytesSent = 0, speedBps = 0.0, etaSeconds = 0)
                 }
                 override fun onItemStart(kind: MediaKind, name: String, index: Int, total: Int, size: Long) {
                     sync = sync.copy(curName = name)
                     if (kind == MediaKind.VIDEO) sync = sync.copy(curVideoName = name, curVideoRead = 0, curVideoSize = size)
                 }
-                override fun onItemBytes(kind: MediaKind, read: Long, size: Long) {
+                override fun onItemBytes(kind: MediaKind, read: Long, size: Long, runBytesSent: Long, speedBps: Double, etaSeconds: Long) {
+                    sync = sync.copy(bytesSent = runBytesSent, speedBps = speedBps, etaSeconds = etaSeconds)
                     if (kind == MediaKind.VIDEO) sync = sync.copy(curVideoRead = read, curVideoSize = size)
                 }
                 override fun onItemDone(kind: MediaKind, sent: Int, total: Int) {

@@ -17,4 +17,10 @@ data class SyncUiState(
     val curVideoName: String = "",
     val curVideoRead: Long = 0,
     val curVideoSize: Long = 0,
+    // Throughput + ETA. bytesSent is the running total this run; bytesTotal is the estimated total to
+    // send (sum of item sizes). speedBps is a smoothed bytes/sec. etaSeconds is derived from the two.
+    val bytesSent: Long = 0,
+    val bytesTotal: Long = 0,
+    val speedBps: Double = 0.0,
+    val etaSeconds: Long = 0,
 )

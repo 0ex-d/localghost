@@ -28,11 +28,17 @@ object CameraReader {
         "${c.bucket} = ? AND (${c.date} > ? OR (${c.date} = ? AND ${c.id} > ?))" to
         arrayOf("Camera", after.dateTaken.toString(), after.dateTaken.toString(), after.id.toString())
 
-    fun count(ctx: Context, kind: MediaKind, after: Cursor): Int {
+    /** Returns (item count, total bytes) so the UI can show a real ETA, not just an item counter. */
+    fun count(ctx: Context, kind: MediaKind, after: Cursor): Pair<Int, Long> {
         val c = cols(kind)
         val (sel, args) = selectionArgs(c, after)
-        ctx.contentResolver.query(c.collection, arrayOf(c.id), sel, args, null)?.use { return it.count }
-        return 0
+        ctx.contentResolver.query(c.collection, arrayOf(c.id, c.size), sel, args, null)?.use { cur ->
+            val sizeCol = cur.getColumnIndexOrThrow(c.size)
+            var n = 0; var bytes = 0L
+            while (cur.moveToNext()) { n++; bytes += cur.getLong(sizeCol) }
+            return n to bytes
+        }
+        return 0 to 0L
     }
 
     fun syncFrom(
