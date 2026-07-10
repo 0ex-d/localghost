@@ -137,6 +137,28 @@ func (b *backend) StartCache(slot int) error {
 	sockPath := filepath.Join(mount, "run", "watchd.sock")
 	b.watch = watchd.NewClient(sockPath)
 
+	// Heal volume permissions for the run user BEFORE spawning watchd. Provisioning wrote
+	// services.conf as root 0600, so watchd (dropped to the run user) died in 2ms with
+	// "read services.conf: permission denied" , the exit-status-1 zombie. watchd also needs logs/
+	// (its rotlog) and run/ (its control socket) to exist and be writable. Doing this here, at the
+	// point of use, heals EXISTING volumes too, not only fresh provisions.
+	if cred := userCredential(b.runUser); cred != nil {
+		uid, gid := int(cred.Uid), int(cred.Gid)
+		if err := os.Chown(filepath.Join(mount, "services.conf"), uid, gid); err != nil {
+			secdLog.Warn("chown services.conf for run user", "fn", "StartCache", "err", err)
+		}
+		for _, d := range []string{"logs", "run", "bin", "conf"} {
+			dir := filepath.Join(mount, d)
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				secdLog.Warn("ensure volume dir", "fn", "StartCache", "dir", dir, "err", err)
+				continue
+			}
+			if err := os.Chown(dir, uid, gid); err != nil {
+				secdLog.Warn("chown volume dir for run user", "fn", "StartCache", "dir", dir, "err", err)
+			}
+		}
+	}
+
 	// Spawn watchd from the volume's bin dir. It runs as the run-user (or inherits secd's root if
 	// unset , but provisioning sets it). watchd opens its own log + socket.
 	proc, err := b.spawnWatchd(mount)
