@@ -869,6 +869,14 @@ class MainActivity : ComponentActivity() {
         sync = sync.copy(status = null, isError = false)
         if (!hasImages() || !hasVideo()) { AppSettings.setEverAskedMedia(this, true); mediaLauncher.launch(imagePerms); return }
         if (!hasLocation()) { locationLauncher.launch(Manifest.permission.ACCESS_MEDIA_LOCATION); return }
+        // Manual SYNC NOW means "reconcile everything I have with the box", so reset the local cursor:
+        // the box dedupes by content hash, so re-offering already-uploaded items is cheap and idempotent
+        // (they get 202'd and skipped), while a cursor left stale by an earlier run , which would make
+        // the whole roll invisible , can never strand photos. The 15-min background worker keeps its
+        // incremental cursor; only this explicit tap does a full reconcile.
+        com.localghost.app.sync.SyncCursor.reset(this, MediaKind.PHOTO)
+        com.localghost.app.sync.SyncCursor.reset(this, MediaKind.VIDEO)
+        android.util.Log.i("LocalGhost", "manual sync: cursor reset, reconciling full roll")
         runSync()
     }
 
