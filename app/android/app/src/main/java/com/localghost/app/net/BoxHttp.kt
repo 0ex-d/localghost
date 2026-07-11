@@ -60,11 +60,14 @@ object BoxHttp {
      * flow from the MediaStore stream straight onto the mTLS socket. The box (secd) spools the same
      * bytes to disk without parsing them; parsing happens in ghost.framed behind the front door.
      */
-    suspend fun postStream(ctx: Context, path: String, body: java.io.InputStream, contentType: String = "application/octet-stream"): Int = withContext(Dispatchers.IO) {
+    suspend fun postStream(ctx: Context, path: String, body: java.io.InputStream, contentType: String = "application/octet-stream", takenAtMs: Long = 0): Int = withContext(Dispatchers.IO) {
         val conn = open(ctx, path, "POST")
         conn.doOutput = true
         conn.setChunkedStreamingMode(64 * 1024)
         conn.setRequestProperty("Content-Type", contentType)
+        // Taken-timestamp hint: the box uses it as the fallback taken time for media whose bytes
+        // carry none (videos have no EXIF). A HINT, not trusted identity , content hash stays the id.
+        if (takenAtMs > 0) conn.setRequestProperty("X-Ghost-Taken", takenAtMs.toString())
         conn.outputStream.use { out -> body.copyTo(out, 64 * 1024) }
         val code = conn.responseCode
         conn.disconnect()

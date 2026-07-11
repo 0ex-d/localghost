@@ -23,11 +23,21 @@ class SyncEngine(private val ctx: Context) {
     }
 
     private suspend fun exec(cmd: Command.SyncCamera, progress: Progress) {
-        val (total, totalBytes) = withContext(Dispatchers.IO) { CameraReader.count(ctx, cmd.kind, cmd.after) }
+        // WHERE WAS I: ask the box for the newest taken_at it has archived for this kind, and fast-
+        // forward the local cursor to it if the box is ahead (killed app, reinstall, cursor loss). The
+        // local cursor stays authoritative when it is ahead (uploads the box has not processed yet).
+        val (photoMs, videoMs) = BoxClient.framesLatest(ctx)
+        val boxMs = if (cmd.kind == MediaKind.PHOTO) photoMs else videoMs
+        val after = if (boxMs > cmd.after.dateTaken) {
+            android.util.Log.i("LocalGhost", "sync ${cmd.kind}: box is ahead (box=$boxMs local=${cmd.after.dateTaken}), fast-forwarding cursor")
+            SyncCursor.advance(ctx, cmd.kind, boxMs, 0)
+            Cursor(boxMs, 0)
+        } else cmd.after
+        val (total, totalBytes) = withContext(Dispatchers.IO) { CameraReader.count(ctx, cmd.kind, after) }
         // The one line that explains a "0 items" sync: was the camera roll EMPTY after the cursor
         // (query/permission/cursor issue), or full but nothing CONFIRMED (upload issue)? Both look
         // identical on screen without this.
-        android.util.Log.i("LocalGhost", "sync ${cmd.kind}: $total items ($totalBytes bytes) after cursor (${cmd.after.dateTaken},${cmd.after.id})")
+        android.util.Log.i("LocalGhost", "sync ${cmd.kind}: $total items ($totalBytes bytes) after cursor (${after.dateTaken},${after.id})")
         progress.onStart(cmd.kind, total, totalBytes)
         val meter = SyncMeter(totalBytes)
         var index = 0
@@ -37,9 +47,9 @@ class SyncEngine(private val ctx: Context) {
         var sawFailure = false // once an item fails, freeze the cursor so the gap is retried next run
         val result = withContext(Dispatchers.IO) {
             CameraReader.syncFrom(
-                ctx, cmd.kind, cmd.after,
+                ctx, cmd.kind, after,
                 send = { item, stream ->
-                    val ok = kotlinx.coroutines.runBlocking { BoxClient.ingest(ctx, cmd.kind, item.name, stream) }
+                    val ok = kotlinx.coroutines.runBlocking { BoxClient.ingest(ctx, cmd.kind, item.name, stream, item.dateTaken) }
                     if (!ok) sawFailure = true
                     // Advance the cursor only while the run is still a CONTIGUOUS success streak. Items
                     // upload oldest-first; if #11 failed, we must not advance past it even though #12+

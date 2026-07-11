@@ -74,6 +74,38 @@ type NotifStore struct {
 	rd          map[int]*apparedis.ReadWrite // per-slot ghost_rw redis connection
 }
 
+// FramesLatest reports the newest taken_at per media kind in the slot's frames table , the box-side
+// "where was I" for the phone's sync. The app seeds its local cursor from this at sync start, so a
+// killed/reinstalled app resumes from what the box ACTUALLY HAS instead of re-offering the whole
+// camera roll. Zero values mean the table is empty (or predates the kind column) , the app then falls
+// back to its local cursor.
+func (s *NotifStore) FramesLatest(slot int) (photoTs, videoTs int64, err error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return 0, 0, err
+	}
+	rows, err := c.Query("SELECT kind, COALESCE(MAX(taken_at),0) FROM frames GROUP BY kind")
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, v := range rows.Vals {
+		if len(v) < 2 || v[0] == nil || v[1] == nil {
+			continue
+		}
+		ts, perr := strconv.ParseInt(*v[1], 10, 64)
+		if perr != nil {
+			continue
+		}
+		switch *v[0] {
+		case "photo":
+			photoTs = ts
+		case "video":
+			videoTs = ts
+		}
+	}
+	return photoTs, videoTs, nil
+}
+
 func NewNotifStore(pgSocketFor func(slot int) string) *NotifStore {
 	return &NotifStore{
 		pgSocketFor: pgSocketFor,

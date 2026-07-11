@@ -10,8 +10,14 @@ object AppSettings {
     private const val PREFS = "lg_settings"
     private const val KEY_MOBILE_SYNC = "allow_mobile_sync"
     private const val KEY_ASKED_MEDIA = "ever_asked_media"
+    private const val KEY_LAST_AUTOSYNC = "last_autosync_at"
 
     private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    /** Epoch millis of the last AUTOMATIC sync kick, so returning to the app does not restart sync. */
+    fun lastAutoSyncAt(ctx: Context): Long = prefs(ctx).getLong(KEY_LAST_AUTOSYNC, 0L)
+    fun setLastAutoSyncAt(ctx: Context, at: Long) =
+        prefs(ctx).edit().putLong(KEY_LAST_AUTOSYNC, at).apply()
 
     /** false = Wi-Fi only (default). true = also sync on 4G/5G. */
     fun allowMobileSync(ctx: Context): Boolean = prefs(ctx).getBoolean(KEY_MOBILE_SYNC, false)

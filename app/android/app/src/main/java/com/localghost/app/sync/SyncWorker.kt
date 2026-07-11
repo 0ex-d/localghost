@@ -62,8 +62,14 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                 totalCount = total
                 setProgressAsync(androidx.work.Data.Builder()
                     .putInt("done", doneCount).putInt("total", totalCount).build())
+                // Show the notification from the SCAN phase onward , previously it only became visible
+                // once bytes started flowing, so the checking/skipping stretch looked like nothing was
+                // happening at all when the app was backgrounded.
+                try { setForegroundAsync(foregroundInfo(doneCount, totalCount, 0)) } catch (_: Exception) {}
             }
-            override fun onItemStart(kind: MediaKind, name: String, index: Int, total: Int, size: Long) {}
+            override fun onItemStart(kind: MediaKind, name: String, index: Int, total: Int, size: Long) {
+                try { setForegroundAsync(foregroundInfo(doneCount, totalCount, 0)) } catch (_: Exception) {}
+            }
             override fun onItemBytes(kind: MediaKind, read: Long, size: Long, runBytesSent: Long, speedBps: Double, etaSeconds: Long) {
                 try { setForegroundAsync(foregroundInfo(doneCount, totalCount, runBytesSent)) } catch (_: Exception) {}
             }

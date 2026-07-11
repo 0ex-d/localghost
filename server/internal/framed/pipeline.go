@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -146,6 +147,15 @@ func (p *Pipeline) processOne(path string) (string, error) {
 	meta := exif.Parse(raw) // zero values if absent; a photo without EXIF still archives
 
 	taken := meta.TakenAt
+	if taken.IsZero() {
+		// The spool NAME may carry the phone's taken-timestamp hint (…-t<epochMillis>, appended by
+		// secd from the X-Ghost-Taken header). This is the primary fallback for VIDEOS , they have no
+		// EXIF, and their container (moov atom) parser is future work , and for stills whose EXIF was
+		// stripped. Hint over mtime: mtime is when the UPLOAD landed, the hint is when it was SHOT.
+		if ms := takenHintFromName(path); ms > 0 {
+			taken = time.UnixMilli(ms).UTC()
+		}
+	}
 	if taken.IsZero() {
 		// Fall back to file mtime (the upload's) , honest approximation, better than epoch.
 		if fi, err := os.Stat(path); err == nil {
@@ -357,4 +367,19 @@ func extFor(format, orig string) string {
 		}
 		return ".bin"
 	}
+}
+
+// takenHintFromName extracts the -t<epochMillis> suffix secd appends to spool names when the phone
+// supplied X-Ghost-Taken. Zero when absent or malformed.
+func takenHintFromName(path string) int64 {
+	base := filepath.Base(path)
+	i := strings.LastIndex(base, "-t")
+	if i < 0 || i+2 >= len(base) {
+		return 0
+	}
+	ms, err := strconv.ParseInt(base[i+2:], 10, 64)
+	if err != nil || ms <= 0 {
+		return 0
+	}
+	return ms
 }

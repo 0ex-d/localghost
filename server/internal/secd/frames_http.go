@@ -68,6 +68,32 @@ func (s *Server) handleFrameUpload(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted) // accepted for processing; framed does the rest asynchronously
 }
 
+// handleFramesLatest reports the newest taken_at per kind on the box , the app's "where was I". The
+// phone seeds its sync cursor from this, so a killed or reinstalled app resumes from what the box
+// actually has instead of re-offering the whole roll.
+func (s *Server) handleFramesLatest(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) {
+		secdLog.Warn("frames/latest rejected: invalid session", "fn", "handleFramesLatest", "bearerPresent", bearer(r) != "")
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	photoTs, videoTs, err := s.notif.FramesLatest(mounted)
+	if err != nil {
+		secdLog.Warn("frames/latest query failed", "fn", "handleFramesLatest", "err", err)
+		s.appearsDown(w)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"photoTakenAt":%d,"videoTakenAt":%d}`, photoTs, videoTs)
+}
+
 // handleLocations accepts a JSON batch of location points ({"source":..,"points":[{ts,lat,lon}..]})
 // and spools it. secd does not parse it; framed validates and drops malformed batches.
 func (s *Server) handleLocations(w http.ResponseWriter, r *http.Request) {
@@ -109,6 +135,22 @@ func spoolBody(dir string, r *http.Request, maxBytes int64) (int64, error) {
 	var rb [6]byte
 	_, _ = rand.Read(rb[:])
 	name := fmt.Sprintf("%d-%s", time.Now().UnixNano(), hex.EncodeToString(rb[:]))
+	// Taken-timestamp HINT from the phone (X-Ghost-Taken, epoch millis). Folded into the spool
+	// filename as a -t suffix , secd still never parses content, and framed treats it as the
+	// FALLBACK taken time when the bytes carry none (videos have no EXIF; their container metadata
+	// parser is future work). Digits-only sanitisation: a hostile header cannot inject a path.
+	if taken := r.Header.Get("X-Ghost-Taken"); taken != "" {
+		clean := true
+		for _, ch := range taken {
+			if ch < '0' || ch > '9' {
+				clean = false
+				break
+			}
+		}
+		if clean && len(taken) <= 20 {
+			name += "-t" + taken
+		}
+	}
 	part := filepath.Join(dir, name+".part")
 	f, err := os.OpenFile(part, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o640)
 	if err != nil {

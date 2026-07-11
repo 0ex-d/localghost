@@ -93,6 +93,10 @@ private sealed interface Screen {
     data object Shell : Screen
 }
 
+// Do not auto-kick a full sync more than once every 5 minutes, no matter how often the app is
+// foregrounded or unlocked. Manual SYNC NOW bypasses this; the 15-min periodic worker is unaffected.
+private const val AUTO_SYNC_COOLDOWN_MS = 5 * 60 * 1000L
+
 class MainActivity : ComponentActivity() {
 
     private var screen by mutableStateOf<Screen>(Screen.Gate)
@@ -647,8 +651,15 @@ class MainActivity : ComponentActivity() {
     private fun maybeAutoSync() {
         if (autoSyncTried) return
         autoSyncTried = true
+        // Cooldown: even across lock/unlock cycles (which reset autoSyncTried), do not kick a fresh
+        // full sync more than once every few minutes. Returning to the app should not restart sync ,
+        // the periodic 15-min worker and the cursor already keep the box current. A manual SYNC NOW
+        // still bypasses this (it calls syncNow directly).
+        val now = System.currentTimeMillis()
+        val last = AppSettings.lastAutoSyncAt(this)
+        if (now - last < AUTO_SYNC_COOLDOWN_MS) return
         if (hasImages() && hasLocation() && isUnmetered() && !sync.busy) {
-            // Durable path , survives the user locking the phone right after the app opens.
+            AppSettings.setLastAutoSyncAt(this, now)
             sync = sync.copy(busy = true, status = "Syncing in the background , you can lock the phone")
             com.localghost.app.sync.SyncWorker.syncNow(this)
             observeSyncWork()

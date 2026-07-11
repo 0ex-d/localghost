@@ -385,6 +385,18 @@ object BoxClient {
     }
 
     // --- sync ---
+    /** The box's "where was I": newest taken_at per kind already archived. The sync seeds its local
+     *  cursor from this, so a killed or reinstalled app resumes from what the box HAS instead of
+     *  re-offering the whole roll. Returns (photoMs, videoMs); (0,0) on any failure , caller falls
+     *  back to the local cursor alone. Box stores seconds; the cursor speaks millis, hence *1000. */
+    suspend fun framesLatest(ctx: Context): Pair<Long, Long> = try {
+        val r = BoxHttp.getJson(ctx, "/v1/frames/latest")
+        (r.optLong("photoTakenAt", 0) * 1000) to (r.optLong("videoTakenAt", 0) * 1000)
+    } catch (e: Exception) {
+        android.util.Log.w("LocalGhost", "frames/latest unavailable: ${e.message}")
+        0L to 0L
+    }
+
     /** What to sync next. The cursor is LOCAL (SyncCursor prefs): the box does not yet track per-device
      *  positions, so the phone remembers where it got to and never re-sends the whole camera roll. */
     suspend fun nextCameraCommand(ctx: Context, kind: MediaKind): Command =
@@ -398,8 +410,9 @@ object BoxClient {
         @Suppress("UNUSED_PARAMETER") kind: MediaKind,
         name: String,
         body: InputStream,
+        takenAtMs: Long = 0,
     ): Boolean = try {
-        val code = BoxHttp.postStream(ctx, "/v1/frames/upload", body, "image/*")
+        val code = BoxHttp.postStream(ctx, "/v1/frames/upload", body, "image/*", takenAtMs)
         if (code != 202) {
             // The box answered but refused. 503 = appears-down (bad session / locked / not enrolled
             // right); anything else is unexpected. Named in logcat so a failing sync says WHY.
