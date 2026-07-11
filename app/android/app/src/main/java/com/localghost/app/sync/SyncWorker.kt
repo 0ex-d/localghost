@@ -35,6 +35,14 @@ import java.util.concurrent.TimeUnit
  */
 class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
 
+    private val manual: Boolean get() = inputData.getBoolean(KEY_MANUAL, false)
+
+    // WorkManager calls this to promote the worker to a foreground service. Providing it (not just
+    // calling setForeground inside doWork) is what makes the ongoing notification appear reliably ,
+    // including when the app is in the foreground and for expedited work on Android 12+. Without this
+    // override the promotion could be skipped and the notification never showed.
+    override suspend fun getForegroundInfo(): ForegroundInfo = foregroundInfo(0, 0, 0)
+
     override suspend fun doWork(): Result {
         val granted = ContextCompat.checkSelfPermission(
             applicationContext, Manifest.permission.READ_MEDIA_IMAGES
@@ -80,22 +88,34 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
     private fun foregroundInfo(done: Int, total: Int, curBytes: Long): ForegroundInfo {
         val ctx = applicationContext
         val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        // Two channels: MANUAL is DEFAULT importance so a sync the user just started shows at the top of
+        // the shade with the ghost logo; AUTO is MIN importance so the 15-min background syncs are
+        // effectively invisible (required foreground notification, but no intrusion).
+        val channel = if (manual) CHANNEL_MANUAL else CHANNEL_AUTO
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             nm.createNotificationChannel(
-                NotificationChannel(CHANNEL, "Sync", NotificationManager.IMPORTANCE_LOW)
+                NotificationChannel(CHANNEL_MANUAL, "Sync (manual)", NotificationManager.IMPORTANCE_DEFAULT)
+            )
+            nm.createNotificationChannel(
+                NotificationChannel(CHANNEL_AUTO, "Sync (background)", NotificationManager.IMPORTANCE_MIN)
             )
         }
         val text = when {
             total > 0 -> "Uploading to your box… $done / $total"
             else -> "Syncing to your box…"
         }
-        val builder = NotificationCompat.Builder(ctx, CHANNEL)
-            .setContentTitle("LocalGhost")
+        // Tapping the notification opens the app.
+        val openApp = ctx.packageManager.getLaunchIntentForPackage(ctx.packageName)?.let {
+            android.app.PendingIntent.getActivity(ctx, 0, it,
+                android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT)
+        }
+        val builder = NotificationCompat.Builder(ctx, channel)
+            .setContentTitle(if (manual) "LocalGhost , syncing now" else "LocalGhost")
             .setContentText(text)
-            .setSmallIcon(android.R.drawable.stat_sys_upload)
+            .setSmallIcon(com.localghost.app.R.drawable.ic_ghost_notif) // the ghost logo, monochrome notif variant
             .setOngoing(true)
-            .setSilent(true)
-        // Determinate bar over item count , the "54 / 2932" the user actually wants to watch shrink.
+            .setSilent(!manual) // manual can make its initial sound/heads-up; auto is always silent
+            .setContentIntent(openApp)
         if (total > 0) builder.setProgress(total, done, false)
         val notif: Notification = builder.build()
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -108,7 +128,9 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
     companion object {
         private const val NAME = "localghost.sync"
         private const val NOW_NAME = "localghost.sync.now"
-        private const val CHANNEL = "localghost.sync"
+        private const val CHANNEL_MANUAL = "localghost.sync.manual"
+        private const val CHANNEL_AUTO = "localghost.sync.auto"
+        private const val KEY_MANUAL = "manual"
         private const val NOTIF_ID = 4711
 
         /** Schedule (or reschedule) the periodic sync with the current network setting. */
@@ -124,11 +146,14 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         /**
          * Fire a one-shot sync NOW that survives the screen locking. Expedited so it starts immediately
          * rather than waiting for a WorkManager batch window. This is what SYNC NOW calls instead of an
-         * Activity coroutine , the Activity coroutine died the moment the screen locked.
+         * Activity coroutine , the Activity coroutine died the moment the screen locked. manual=true
+         * gives it the visible "Sync running" notification with the ghost logo; the periodic sync passes
+         * manual=false and stays quiet.
          */
         fun syncNow(ctx: Context) {
             val request = OneTimeWorkRequestBuilder<SyncWorker>()
                 .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
+                .setInputData(androidx.work.Data.Builder().putBoolean(KEY_MANUAL, true).build())
                 .build()
             WorkManager.getInstance(ctx).enqueueUniqueWork(
                 NOW_NAME, ExistingWorkPolicy.KEEP, request) // KEEP: a tap while one runs does not double it

@@ -24,21 +24,28 @@ class SyncEngine(private val ctx: Context) {
 
     private suspend fun exec(cmd: Command.SyncCamera, progress: Progress) {
         val (total, totalBytes) = withContext(Dispatchers.IO) { CameraReader.count(ctx, cmd.kind, cmd.after) }
+        // The one line that explains a "0 items" sync: was the camera roll EMPTY after the cursor
+        // (query/permission/cursor issue), or full but nothing CONFIRMED (upload issue)? Both look
+        // identical on screen without this.
+        android.util.Log.i("LocalGhost", "sync ${cmd.kind}: $total items ($totalBytes bytes) after cursor (${cmd.after.dateTaken},${cmd.after.id})")
         progress.onStart(cmd.kind, total, totalBytes)
         val meter = SyncMeter(totalBytes)
         var index = 0
         var curSize = 0L
         var doneBytes = 0L   // bytes from items already CONFIRMED sent this run
         var curRead = 0L
+        var sawFailure = false // once an item fails, freeze the cursor so the gap is retried next run
         val result = withContext(Dispatchers.IO) {
             CameraReader.syncFrom(
                 ctx, cmd.kind, cmd.after,
                 send = { item, stream ->
                     val ok = kotlinx.coroutines.runBlocking { BoxClient.ingest(ctx, cmd.kind, item.name, stream) }
-                    // Advance the local cursor ONLY on a confirmed (202) upload , an unconfirmed item is
-                    // retried next run. CameraReader iterates oldest-first, so advancing per item keeps the
-                    // cursor exactly at the last thing the box definitely has.
-                    if (ok) SyncCursor.advance(ctx, cmd.kind, item.dateTaken, item.id)
+                    if (!ok) sawFailure = true
+                    // Advance the cursor only while the run is still a CONTIGUOUS success streak. Items
+                    // upload oldest-first; if #11 failed, we must not advance past it even though #12+
+                    // succeed, or #11 would fall behind the cursor and never retry. Once anything has
+                    // failed this run, stop advancing , the next run resumes at the first gap.
+                    if (ok && !sawFailure) SyncCursor.advance(ctx, cmd.kind, item.dateTaken, item.id)
                     ok
                 },
                 onItemStart = { item ->
@@ -53,6 +60,7 @@ class SyncEngine(private val ctx: Context) {
                 onProgress = { sent -> doneBytes += curSize; progress.onItemDone(cmd.kind, sent, total) },
             )
         }
+        android.util.Log.i("LocalGhost", "sync ${cmd.kind} finished: ${result.itemsSent} confirmed of $total")
         BoxClient.report(result)
         progress.onDone(result)
     }

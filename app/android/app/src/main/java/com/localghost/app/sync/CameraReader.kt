@@ -26,7 +26,7 @@ object CameraReader {
 
     private fun selectionArgs(c: Cols, after: Cursor) =
         "${c.bucket} = ? AND (${c.date} > ? OR (${c.date} = ? AND ${c.id} > ?))" to
-        arrayOf("Camera", after.dateTaken.toString(), after.dateTaken.toString(), after.id.toString())
+                arrayOf("Camera", after.dateTaken.toString(), after.dateTaken.toString(), after.id.toString())
 
     /** Returns (item count, total bytes) so the UI can show a real ETA, not just an item counter. */
     fun count(ctx: Context, kind: MediaKind, after: Cursor): Pair<Int, Long> {
@@ -56,6 +56,7 @@ object CameraReader {
         val sort = "${c.date} ASC, ${c.id} ASC"
 
         var sent = 0
+        var failed = 0
         var bytes = 0L
         try {
             ctx.contentResolver.query(c.collection, projection, sel, args, sort)?.use { cur ->
@@ -78,12 +79,23 @@ object CameraReader {
                         confirmed
                     } ?: false
 
-                    if (ok) { sent++; onProgress(sent) } else break
+                    if (ok) {
+                        sent++
+                        onProgress(sent)
+                    } else {
+                        // A single item failing (transient 503, network blip, one unreadable file) must NOT
+                        // abort the whole batch , the old `break` here stopped the entire photo sync at the
+                        // first hiccup (e.g. 10/2943 then it gave up). Skip this one and keep going; its
+                        // cursor was not advanced (see the caller), so it is retried on the next run.
+                        failed++
+                        android.util.Log.w("LocalGhost", "sync ${kind}: item ${item.name} not confirmed, skipping (retried next run)")
+                    }
                 }
             }
         } catch (e: Exception) {
             return CommandResult(Stream.CAMERA, kind, sent, bytes, error = e.message)
         }
+        if (failed > 0) android.util.Log.i("LocalGhost", "sync $kind: $sent sent, $failed skipped (will retry)")
         return CommandResult(Stream.CAMERA, kind, sent, bytes)
     }
 
