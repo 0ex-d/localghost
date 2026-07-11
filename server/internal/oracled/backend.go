@@ -63,10 +63,32 @@ func (b *llamaBackend) Name() string { return b.cfg.ModelName }
 // queue never dispatches at a model still loading its weights. weights-load for a 12B Q4 model takes
 // seconds to tens of seconds, so the wait is generous.
 func (b *llamaBackend) Start(ctx context.Context) error {
+	// Pre-flight the paths. Without this, a missing model means llama-server starts, fails its load,
+	// dies, and oracled burns the full 90s health wait before reporting a vague "not healthy" , when
+	// the real answer was knowable in a millisecond with the exact path named.
+	if fi, err := os.Stat(b.cfg.ModelPath); err != nil {
+		return fmt.Errorf("model weights not found at %s , place the gguf under <mount>/ai-models/ or set modelPath in conf/ghost.oracled.conf: %w", b.cfg.ModelPath, err)
+	} else if fi.Size() < 1<<20 {
+		return fmt.Errorf("model file at %s is %d bytes , that is not a model (interrupted download?)", b.cfg.ModelPath, fi.Size())
+	}
+	if _, err := exec.LookPath(b.cfg.BinPath); err != nil {
+		if _, serr := os.Stat(b.cfg.BinPath); serr != nil {
+			return fmt.Errorf("llama-server binary not found at %s , install it or set llamaBin in conf: %w", b.cfg.BinPath, serr)
+		}
+	}
 	args := []string{
 		"-m", b.cfg.ModelPath,
 		"--host", "127.0.0.1",
 		"--port", strconv.Itoa(b.cfg.Port),
+	}
+	if b.cfg.MmprojPath != "" {
+		// Optional: a configured-but-missing projector degrades to TEXT-ONLY with a loud warning
+		// instead of handing llama-server a dead path and dying entirely. Photo captioning needs the
+		// projector; everything else does not.
+		if _, err := os.Stat(b.cfg.MmprojPath); err != nil {
+			slog.Warn("mmproj not found , starting TEXT-ONLY (no image understanding)", "fn", "Start", "path", b.cfg.MmprojPath)
+			b.cfg.MmprojPath = ""
+		}
 	}
 	if b.cfg.MmprojPath != "" {
 		args = append(args, "--mmproj", b.cfg.MmprojPath)

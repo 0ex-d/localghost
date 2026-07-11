@@ -11,6 +11,7 @@ package secd
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -159,6 +160,13 @@ func (b *backend) StartCache(slot int) error {
 		}
 	}
 
+	// Ingest provisioning-staged model weights onto the encrypted volume. tools/stage_models.sh
+	// places ggufs at <state>/staging/ai-models (the volume does not exist pre-unlock, so staging on
+	// the OS disk is the only provision-time option); this moves them into <mount>/ai-models BEFORE
+	// watchd spawns the cohort, so oracled's eager llama-server start finds its weights on the very
+	// first unlock. Runs only when staging is non-empty , a no-op forever after.
+	b.ingestStagedModels(mount)
+
 	// Spawn watchd from the volume's bin dir. It runs as the run-user (or inherits secd's root if
 	// unset , but provisioning sets it). watchd opens its own log + socket.
 	proc, err := b.spawnWatchd(mount)
@@ -200,6 +208,75 @@ func (b *backend) StartCache(slot int) error {
 // control socket , run as the service user, so the whole on-volume tree has one owner. watchd runs in
 // its own process group so a secd restart does not kill it (secd stops it explicitly on lock). Because
 // watchd already runs as the user, it does NOT need to drop the daemons itself , they inherit its uid.
+// ingestStagedModels moves gguf files staged by tools/stage_models.sh onto the encrypted volume.
+// Copy + remove (staging is on a different filesystem), chown to the run user, per-file logging. The
+// staged copies were PLAINTEXT on the OS disk , that exposure is inherent to staging before the
+// volume exists, which is why this runs at the first opportunity and removes them.
+func (b *backend) ingestStagedModels(mount string) {
+	staging := filepath.Join(filepath.Dir(filepath.Dir(mount)), "staging", "ai-models")
+	entries, err := os.ReadDir(staging)
+	if err != nil || len(entries) == 0 {
+		return // nothing staged , the usual case
+	}
+	dst := filepath.Join(mount, "ai-models")
+	if err := os.MkdirAll(dst, 0o750); err != nil {
+		secdLog.Error("model ingest: cannot create ai-models on volume", "fn", "ingestStagedModels", "err", err)
+		return
+	}
+	cred := userCredential(b.runUser)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		srcPath := filepath.Join(staging, e.Name())
+		dstPath := filepath.Join(dst, e.Name())
+		t0 := time.Now()
+		if err := copyFileSync(srcPath, dstPath); err != nil {
+			secdLog.Error("model ingest failed , staged copy kept for retry next unlock",
+				"fn", "ingestStagedModels", "file", e.Name(), "err", err)
+			continue
+		}
+		if cred != nil {
+			if err := os.Chown(dstPath, int(cred.Uid), int(cred.Gid)); err != nil {
+				secdLog.Warn("model ingest: chown", "fn", "ingestStagedModels", "file", e.Name(), "err", err)
+			}
+		}
+		if err := os.Remove(srcPath); err != nil {
+			secdLog.Warn("model ingest: staged copy not removed", "fn", "ingestStagedModels", "file", e.Name(), "err", err)
+		}
+		secdLog.Info("model ingested onto encrypted volume", "fn", "ingestStagedModels",
+			"file", e.Name(), "took", time.Since(t0).Round(time.Millisecond).String())
+	}
+	if cred != nil {
+		_ = os.Chown(dst, int(cred.Uid), int(cred.Gid))
+	}
+}
+
+// copyFileSync copies src to dst with an fsync , model weights are multi-GB and the whole point is
+// that they survive; a torn copy that "succeeded" would fail oracled's size pre-flight confusingly.
+func copyFileSync(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		_ = os.Remove(dst)
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		_ = out.Close()
+		_ = os.Remove(dst)
+		return err
+	}
+	return out.Close()
+}
+
 func (b *backend) spawnWatchd(mount string) (*os.Process, error) {
 	bin := filepath.Join(mount, "bin", "ghost.watchd")
 	// Fail loudly if the binary is not there/executable , "exec then die silently" wastes a debugging

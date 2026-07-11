@@ -313,7 +313,9 @@ else
     echo "    unlock hard-stops rather than falling back. Pick the tier deliberately here."
     echo
     echo " E) Enrol + unlock: scan the QR ghost-setup renders (scanning IS enrolment), then unlock with the"
-    echo "    main PIN from the app. See tools/README.md steps 6-8 for models, the bundle, and the checks."
+    echo "    main PIN from the app. Inference from nothing:  sudo ./tools/setup_llama.sh --models /path/with/ggufs"
+    echo "    (builds llama.cpp in /opt/localghost/llama.cpp, stages weights; unlock ingests them)."
+    echo "    See tools/README.md steps 6-8 for models, the bundle, and the checks."
     echo " ------------------------------------------------------------------"
 fi
 echo "==================================================================="

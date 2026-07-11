@@ -245,7 +245,10 @@ if confirm_word "APPLY"; then
     "$REPO/bin/ghost-setup" $COMMON --apply
     echo
     echo "=== Provisioned. Next: scan the QR above with the app (scanning IS enrolment), then unlock"
-    echo "    with the main PIN. See tools/README.md steps 6-8 for models, the DB bundle, and the"
+    echo "    with the main PIN. For inference from NOTHING (builds llama.cpp, fetches + stages"
+    echo "    the model , ingested onto the volume at unlock):  sudo ./tools/setup_llama.sh --help-ish:"
+    echo "      sudo ./tools/setup_llama.sh --models /path/with/ggufs"
+    echo "    See tools/README.md steps 6-8 for models, the DB bundle, and the"
     echo "    first-unlock checks (including the PTT cold-power-cycle if the TPM is in lockout)."
 else
     echo "  Not applied. Re-run tools/setup.sh when ready; nothing was changed."

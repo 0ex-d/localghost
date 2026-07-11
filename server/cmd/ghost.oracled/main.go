@@ -43,6 +43,7 @@ type conf struct {
 	MmprojPath string `json:"mmprojPath"` // multimodal projector on the volume (optional)
 	ModelName  string `json:"modelName"`  // reported in responses
 	LlamaPort  int    `json:"llamaPort"`  // loopback port for the private llama-server
+	ExtraArgs  []string `json:"extraArgs"` // tuning flags appended verbatim (threads, ctx, cache types, mlock...)
 }
 
 func defaultConf(mount string) conf {
@@ -103,6 +104,7 @@ func main() {
 		ModelPath:  cfg.ModelPath,
 		MmprojPath: cfg.MmprojPath,
 		Port:       cfg.LlamaPort,
+		ExtraArgs:  cfg.ExtraArgs,
 		ModelName:  cfg.ModelName,
 	})
 	var modelReady atomic.Bool
