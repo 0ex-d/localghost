@@ -1018,7 +1018,7 @@ object QrSampler {
                     if (looksLikeAlignmentCentre(bin, w, h, xx, yy, moduleSpanPx)) {
                         val centre = darkBlobCentroid(bin, w, h, xx, yy, (moduleSpanPx).roundToInt().coerceIn(1, 8))
                         val d = (centre.x - predicted.x) * (centre.x - predicted.x) +
-                                (centre.y - predicted.y) * (centre.y - predicted.y)
+                            (centre.y - predicted.y) * (centre.y - predicted.y)
                         if (d < bestDist) { bestDist = d; best = centre }
                     }
                 }

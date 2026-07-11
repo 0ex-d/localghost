@@ -84,7 +84,18 @@ server {
     # here, not that a box is enrolled, not whether your cert is good, not whether the daemon is up.
     # It is deliberately hard to debug from the outside , which is the point.
     proxy_intercept_errors on;
-    error_page 400 401 403 404 495 496 497 502 503 504 = @down;
+    # Every nginx-generated status is folded in too , 405 (method), 408 (timeout), 413 (body too
+    # large), 414/431 (long URL/headers), 500/501/507 , or a prober could distinguish, e.g., "this
+    # host has a request-size limit" (413) from the flat 503. One status, no matter what you send.
+    error_page 400 401 403 404 405 408 413 414 431 495 496 497 500 501 502 503 504 507 = @down;
+
+    # Camera uploads: photos are multi-MB, videos run to hundreds of MB (a 4K phone clip is ~400MB+).
+    # nginx's DEFAULT client_max_body_size is 1m, which bounced every photo with a 413 BEFORE it
+    # reached ghost.secd , box journal empty while the app saw failures, the worst kind of silent.
+    # 4g matches secd's own uploadMaxBytes cap; secd remains the real enforcer, nginx must not
+    # undercut it. Only enrolled devices (valid device cert + live session) get past the 503 wall,
+    # so the size limit is a bound for trusted phones, not an abuse surface.
+    client_max_body_size 4g;
 
     location @down {
         # One plain, standard 503 for everything. We supply our own generic body so nginx never renders
@@ -101,11 +112,22 @@ server {
     # no cert, bad cert, wrong path , gets the identical 503.
     location / {
         if ($ssl_client_verify != SUCCESS) { return 503; }
-        proxy_pass https://%[2]s;
+        # secd serves plain HTTP on loopback , nginx already terminated the public TLS and this hop
+        # never leaves the box (127.0.0.1 on the encrypted host). http:// here, not https://, or nginx
+        # speaks TLS to a plaintext server and every proxied request fails into the same 503.
+        # STREAM uploads straight through. nginx's default (proxy_request_buffering on) spools the
+        # whole request body to a temp file on the OS DISK before forwarding , which would put every
+        # photo and video, PLAINTEXT, on the unencrypted disk in /var/lib/nginx tmp before it ever
+        # reaches the encrypted volume. Buffering OFF means bytes flow phone -> nginx -> secd ->
+        # encrypted volume and never rest anywhere else. 1.1 to the upstream so the stream can be
+        # chunked (1.0 cannot carry a body without a length).
+        proxy_request_buffering off;
+        proxy_http_version 1.1;
+        proxy_pass http://%[2]s;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header X-Client-Cert  $ssl_client_escaped_cert; # ghost.secd binds device -> account
-        proxy_ssl_verify off; # ghost.secd presents the box's own cert; account auth is enforced there
+        # (no proxy_ssl_* here , the upstream is plain http on loopback; account auth is enforced in secd)
     }
 }
 `, d.Domain, ghostSecdAddr)

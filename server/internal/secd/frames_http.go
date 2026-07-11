@@ -21,9 +21,11 @@ import (
 	"time"
 )
 
-// uploadMaxBytes bounds one photo upload. 64MB fits any phone photo with headroom; anything bigger is
-// either not a photo or not our problem.
-const uploadMaxBytes = 64 << 20
+// uploadMaxBytes bounds one camera upload. Photos are tens of MB; VIDEOS are the sizing case , a 4K
+// phone clip runs ~400MB a minute, so 4GiB gives multi-minute headroom. The body is STREAMED to the
+// encrypted volume (io.Copy, never held in RAM), so a big cap costs nothing in memory; the real bound
+// is volume disk, and only enrolled, session-authenticated devices reach this handler at all.
+const uploadMaxBytes = 4 << 30
 
 // locationsMaxBytes bounds one location batch. A day of 1Hz samples is ~5MB of JSON; 16MB is generous.
 const locationsMaxBytes = 16 << 20

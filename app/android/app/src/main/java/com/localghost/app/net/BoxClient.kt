@@ -381,12 +381,20 @@ object BoxClient {
     suspend fun ingest(
         ctx: Context,
         @Suppress("UNUSED_PARAMETER") kind: MediaKind,
-        @Suppress("UNUSED_PARAMETER") name: String,
+        name: String,
         body: InputStream,
     ): Boolean = try {
-        BoxHttp.postStream(ctx, "/v1/frames/upload", body, "image/*") == 202
+        val code = BoxHttp.postStream(ctx, "/v1/frames/upload", body, "image/*")
+        if (code != 202) {
+            // The box answered but refused. 503 = appears-down (bad session / locked / not enrolled
+            // right); anything else is unexpected. Named in logcat so a failing sync says WHY.
+            android.util.Log.w("LocalGhost", "ingest $name: box answered HTTP $code (expected 202)")
+        }
+        code == 202
     } catch (e: Exception) {
-        false // network blip mid-photo: not confirmed, cursor does not advance, next run retries it
+        // Do NOT eat this. Cursor does not advance (retried next run), but the reason is in logcat.
+        android.util.Log.w("LocalGhost", "ingest $name failed: ${e.javaClass.simpleName}: ${e.message}")
+        false
     }
 
     // --- persona / pins (scoped to the mounted persona) ---
@@ -527,13 +535,16 @@ object BoxClient {
      */
     suspend fun ingestAttachment(
         ctx: Context,
-        @Suppress("UNUSED_PARAMETER") att: Attachment,
+        att: Attachment,
         body: java.io.InputStream,
     ): Boolean = try {
         // Same endpoint, same raw bytes as camera sync , so the content hash matches on the box and
         // framed dedups the chat copy against the camera-swept copy into ONE memory.
-        BoxHttp.postStream(ctx, "/v1/frames/upload", body, "application/octet-stream") == 202
+        val code = BoxHttp.postStream(ctx, "/v1/frames/upload", body, "application/octet-stream")
+        if (code != 202) android.util.Log.w("LocalGhost", "attachment ${att.name}: box answered HTTP $code")
+        code == 202
     } catch (e: Exception) {
+        android.util.Log.w("LocalGhost", "attachment ${att.name} failed: ${e.javaClass.simpleName}: ${e.message}")
         false
     }
 
