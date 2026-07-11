@@ -385,6 +385,27 @@ object BoxClient {
     }
 
     // --- sync ---
+    /** One gallery entry from the box's archive. */
+    data class GalleryFrame(val hash: String, val takenAt: Long, val kind: String, val bytes: Long)
+
+    /** Page the archive newest-first. before=0 for the first page; pass the last row's takenAt to
+     *  continue. Empty list on failure or end of archive. */
+    suspend fun framesList(ctx: Context, before: Long = 0, limit: Int = 60): List<GalleryFrame> = try {
+        val r = BoxHttp.getJson(ctx, "/v1/frames/list?before=$before&limit=$limit")
+        val arr = r.optJSONArray("frames") ?: return emptyList()
+        (0 until arr.length()).mapNotNull { i ->
+            val o = arr.optJSONObject(i) ?: return@mapNotNull null
+            GalleryFrame(o.optString("hash"), o.optLong("takenAt"), o.optString("kind"), o.optLong("bytes"))
+        }
+    } catch (e: Exception) {
+        android.util.Log.w("LocalGhost", "frames/list failed: ${e.message}")
+        emptyList()
+    }
+
+    /** One thumbnail's bytes (webp or jpeg). Null when the frame has none (videos) or on failure. */
+    suspend fun frameThumb(ctx: Context, hash: String): ByteArray? =
+        BoxHttp.getBytes(ctx, "/v1/frames/thumb?hash=$hash")
+
     /** The box's "where was I": newest taken_at per kind already archived. The sync seeds its local
      *  cursor from this, so a killed or reinstalled app resumes from what the box HAS instead of
      *  re-offering the whole roll. Returns (photoMs, videoMs); (0,0) on any failure , caller falls

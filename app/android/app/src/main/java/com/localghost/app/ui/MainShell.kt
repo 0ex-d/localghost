@@ -40,6 +40,7 @@ enum class Dest(val label: String, val glyph: String) {
     NOTIFICATIONS("NOTIFICATIONS", "△"),
     HARNESS("BOX STATUS", "◉"),
     SYNC("SYNC", "⇅"),
+    GALLERY("GALLERY", "▦"),
     CODES("CODES", "⚿"),
     SETTINGS("SETTINGS", "⚙"),
     GLOSSARY("GLOSSARY", "≣"),
@@ -173,6 +174,7 @@ fun MainShell(
                         }
                         Dest.HARNESS -> HarnessScreen(daemons)
                         Dest.SYNC -> SyncScreen(sync, onSync, onRequestFullAccess, onTestNotification)
+                        Dest.GALLERY -> GalleryScreen()
                         Dest.CODES -> PinManagementScreen(devices)
                         Dest.SETTINGS -> SettingsScreen(
                             allowMobileSync = allowMobileSync,
@@ -304,7 +306,7 @@ private fun DrawerPanel(
             }
 
             Spacer(Modifier.height(28.dp))
-            listOf(Dest.CHAT, Dest.CHATS, Dest.MEMORIES, Dest.HARNESS, Dest.NOTIFICATIONS, Dest.SYNC, Dest.CODES).forEach {
+            listOf(Dest.CHAT, Dest.CHATS, Dest.MEMORIES, Dest.HARNESS, Dest.NOTIFICATIONS, Dest.SYNC, Dest.GALLERY, Dest.CODES).forEach {
                 DrawerRow(it, it == current) { onSelect(it) }
             }
 

@@ -291,6 +291,10 @@ CREATE TABLE IF NOT EXISTS frames (
 -- Older databases created before kind/mime existed: add the columns if missing (idempotent).
 ALTER TABLE frames ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'unknown';
 ALTER TABLE frames ADD COLUMN IF NOT EXISTS mime TEXT NOT NULL DEFAULT '';
+-- taken_src: how taken_at was determined. Existing rows default to 'mtime' , the HONEST default,
+-- because pre-column rows fell back to upload mtime when EXIF was absent, and the where-was-I sync
+-- query must not trust those (one poisons MAX(taken_at) and the phone skips its whole roll).
+ALTER TABLE frames ADD COLUMN IF NOT EXISTS taken_src TEXT NOT NULL DEFAULT 'mtime';
 CREATE INDEX IF NOT EXISTS frames_taken_at ON frames (taken_at);
 CREATE INDEX IF NOT EXISTS frames_kind ON frames (kind);
 -- location_points: watch/phone position samples, the raw material for the daily GeoJSON path. The

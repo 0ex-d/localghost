@@ -13,11 +13,14 @@ package secd
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -92,6 +95,77 @@ func (s *Server) handleFramesLatest(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(w, `{"photoTakenAt":%d,"videoTakenAt":%d}`, photoTs, videoTs)
+}
+
+// handleFramesList pages the archived frames newest-first for the app's gallery grid.
+// GET /v1/frames/list?before=<takenAt>&limit=<n> -> {"frames":[{hash,takenAt,kind,bytes}]}
+func (s *Server) handleFramesList(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	before, _ := strconv.ParseInt(r.URL.Query().Get("before"), 10, 64)
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	rowsOut, err := s.notif.FramesList(mounted, before, limit)
+	if err != nil {
+		secdLog.Warn("frames/list query failed", "fn", "handleFramesList", "err", err)
+		s.appearsDown(w)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"frames": rowsOut})
+}
+
+// handleFrameThumb streams one thumbnail's bytes. GET /v1/frames/thumb?hash=<hash>.
+// The hash is validated hex , it is the only user input that touches a filesystem path.
+func (s *Server) handleFrameThumb(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	hash := r.URL.Query().Get("hash")
+	if len(hash) < 16 || len(hash) > 128 {
+		s.appearsDown(w)
+		return
+	}
+	for _, ch := range hash {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+			s.appearsDown(w) // not lowercase hex -> not one of our hashes; no path characters ever
+			return
+		}
+	}
+	path, err := s.notif.FrameThumbPath(mounted, hash)
+	if err != nil || path == "" {
+		s.appearsDown(w)
+		return
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		secdLog.Warn("thumb open failed", "fn", "handleFrameThumb", "path", path, "err", err)
+		s.appearsDown(w)
+		return
+	}
+	defer f.Close()
+	if strings.HasSuffix(path, ".webp") {
+		w.Header().Set("Content-Type", "image/webp")
+	} else {
+		w.Header().Set("Content-Type", "image/jpeg")
+	}
+	_, _ = io.Copy(w, f)
 }
 
 // handleLocations accepts a JSON batch of location points ({"source":..,"points":[{ts,lat,lon}..]})

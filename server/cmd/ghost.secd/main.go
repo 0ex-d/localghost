@@ -42,7 +42,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	httpSrv := &http.Server{Addr: *addr, Handler: srv.Handler()}
+	httpSrv := &http.Server{
+		Addr:    *addr,
+		Handler: srv.Handler(),
+		// ReadHeaderTimeout only , protects against a stalled header phase without touching body
+		// reads. Deliberately NO ReadTimeout/WriteTimeout: a 4K video upload streams for minutes, and
+		// a body timeout would kill it mid-flight. nginx fronts this listener and applies its own
+		// client pacing; enrolled devices are the only things that get this far.
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 
 	// Control socket for ghost-cli, on the UNENCRYPTED state dir (not the volume): secd is the one
 	// process that exists when the box is locked, so its CLI must work when locked too , `ghost-cli

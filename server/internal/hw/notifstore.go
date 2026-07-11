@@ -84,7 +84,10 @@ func (s *NotifStore) FramesLatest(slot int) (photoTs, videoTs int64, err error) 
 	if err != nil {
 		return 0, 0, err
 	}
-	rows, err := c.Query("SELECT kind, COALESCE(MAX(taken_at),0) FROM frames GROUP BY kind")
+	// Only frames whose taken time came from the CONTENT (exif) or the phone's explicit hint count
+	// toward "where was I" , an mtime-derived taken_at is upload time, and a single such row would
+	// report "latest = today" and make the phone fast-forward past its entire un-synced roll.
+	rows, err := c.Query("SELECT kind, COALESCE(MAX(taken_at),0) FROM frames WHERE taken_src IN ('exif','hint') GROUP BY kind")
 	if err != nil {
 		return 0, 0, err
 	}
@@ -104,6 +107,70 @@ func (s *NotifStore) FramesLatest(slot int) (photoTs, videoTs int64, err error) 
 		}
 	}
 	return photoTs, videoTs, nil
+}
+
+// FrameRow is one gallery entry , enough for the app to render a grid cell and ask for the thumb.
+type FrameRow struct {
+	Hash    string `json:"hash"`
+	TakenAt int64  `json:"takenAt"`
+	Kind    string `json:"kind"`
+	Bytes   int64  `json:"bytes"`
+}
+
+// FramesList pages the archive newest-first: frames with taken_at strictly BEFORE the cursor (pass 0
+// or a huge value for the first page), up to limit. The app paginates by passing the last row's
+// takenAt as the next call's before.
+func (s *NotifStore) FramesList(slot int, beforeTs int64, limit int) ([]FrameRow, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return nil, err
+	}
+	if beforeTs <= 0 {
+		beforeTs = 1 << 62
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 60
+	}
+	rows, err := c.Query(
+		"SELECT hash, taken_at, kind, bytes FROM frames WHERE taken_at < $1 ORDER BY taken_at DESC LIMIT "+strconv.Itoa(limit),
+		strconv.FormatInt(beforeTs, 10))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]FrameRow, 0, len(rows.Vals))
+	for _, v := range rows.Vals {
+		if len(v) < 4 || v[0] == nil {
+			continue
+		}
+		r := FrameRow{Hash: *v[0]}
+		if v[1] != nil {
+			r.TakenAt, _ = strconv.ParseInt(*v[1], 10, 64)
+		}
+		if v[2] != nil {
+			r.Kind = *v[2]
+		}
+		if v[3] != nil {
+			r.Bytes, _ = strconv.ParseInt(*v[3], 10, 64)
+		}
+		out = append(out, r)
+	}
+	return out, nil
+}
+
+// FrameThumbPath returns the on-volume path of a frame's thumbnail ("" if none , e.g. videos).
+func (s *NotifStore) FrameThumbPath(slot int, hash string) (string, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return "", err
+	}
+	rows, err := c.Query("SELECT thumb_path FROM frames WHERE hash = $1", hash)
+	if err != nil {
+		return "", err
+	}
+	if len(rows.Vals) == 0 || len(rows.Vals[0]) == 0 || rows.Vals[0][0] == nil {
+		return "", nil
+	}
+	return *rows.Vals[0][0], nil
 }
 
 func NewNotifStore(pgSocketFor func(slot int) string) *NotifStore {

@@ -26,6 +26,7 @@ type Frame struct {
 	ReceivedAt  int64
 	Kind        string // "photo" | "video" | "unknown", from content sniffing
 	MIME        string // best-effort content type, e.g. "image/jpeg", "video/mp4"
+	TakenSrc    string // "exif" | "hint" | "mtime" , how TakenAt was determined; mtime is NOT trusted for sync resume
 }
 
 // Store wraps a ghost_rw poltergres connection for one slot's database.
@@ -47,11 +48,11 @@ func (s *Store) Ping() error { return s.db.Ping() }
 // hash is the identity, so re-uploading the same photo is a no-op.
 func (s *Store) InsertFrame(f Frame) error {
 	return s.db.Exec(
-		`INSERT INTO frames (hash, taken_at, lat, lon, has_gps, archive_path, preview_path, thumb_path, bytes, source, received_at, kind, mime)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+		`INSERT INTO frames (hash, taken_at, lat, lon, has_gps, archive_path, preview_path, thumb_path, bytes, source, received_at, kind, mime, taken_src)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 		 ON CONFLICT (hash) DO NOTHING`,
 		f.Hash, f.TakenAt, f.Lat, f.Lon, f.HasGPS,
-		f.ArchivePath, f.PreviewPath, f.ThumbPath, f.Bytes, f.Source, f.ReceivedAt, f.Kind, f.MIME)
+		f.ArchivePath, f.PreviewPath, f.ThumbPath, f.Bytes, f.Source, f.ReceivedAt, f.Kind, f.MIME, f.TakenSrc)
 }
 
 // HasFrame reports whether a hash is already archived (dedupe before doing any work).

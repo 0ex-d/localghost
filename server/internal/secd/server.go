@@ -158,6 +158,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/notifications/answer", s.handleNotificationAnswer)
 	mux.HandleFunc("/v1/frames/upload", s.handleFrameUpload)
 	mux.HandleFunc("/v1/frames/latest", s.handleFramesLatest) // where-was-I for the app's sync cursor
+	mux.HandleFunc("/v1/frames/list", s.handleFramesList)     // gallery paging, newest first
+	mux.HandleFunc("/v1/frames/thumb", s.handleFrameThumb)    // one thumbnail's bytes
 	mux.HandleFunc("/v1/locations", s.handleLocations)
 	mux.HandleFunc("/v1/models", s.handleModels)
 	mux.HandleFunc("/v1/models/", s.handleModelBytes) // /v1/models/{id}

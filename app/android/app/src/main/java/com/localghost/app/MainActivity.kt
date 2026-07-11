@@ -661,7 +661,8 @@ class MainActivity : ComponentActivity() {
         if (hasImages() && hasLocation() && isUnmetered() && !sync.busy) {
             AppSettings.setLastAutoSyncAt(this, now)
             sync = sync.copy(busy = true, status = "Syncing in the background , you can lock the phone")
-            com.localghost.app.sync.SyncWorker.syncNow(this)
+            // Auto path: SILENT notification channel , the loud "syncing now" one is for the button.
+            com.localghost.app.sync.SyncWorker.syncNow(this, manual = false)
             observeSyncWork()
         }
     }
@@ -883,7 +884,13 @@ class MainActivity : ComponentActivity() {
     // Observe the one-shot background sync so the UI reflects its finish even though the upload runs in
     // the worker, not here. WorkManager's LiveData survives config changes; when the work leaves RUNNING
     // we clear busy and show a done/failed line. Progress detail lives in the foreground notification.
+    private var syncObserved = false
     private fun observeSyncWork() {
+        // Observe ONCE. This is called from every manual and auto sync kick; each call previously
+        // stacked another LiveData observer on the same unique work, so state writes multiplied with
+        // every sync of the session.
+        if (syncObserved) return
+        syncObserved = true
         val wm = androidx.work.WorkManager.getInstance(this)
         wm.getWorkInfosForUniqueWorkLiveData("localghost.sync.now").observe(this) { infos ->
             val info = infos?.firstOrNull() ?: return@observe
@@ -891,7 +898,13 @@ class MainActivity : ComponentActivity() {
             // same N/total the notification shows, so "54 / 2932" is visible in-app and off-screen alike.
             val done = info.progress.getInt("done", -1)
             val total = info.progress.getInt("total", -1)
-            if (total > 0) sync = sync.copy(photoDone = done, photoTotal = total)
+            val kind = info.progress.getString("kind") ?: "PHOTO"
+            // Route counts to the RIGHT bar , the worker syncs photos then videos through the same
+            // progress channel, and unrouted counts painted video numbers onto the PHOTOS bar.
+            if (total > 0) sync = if (kind == "VIDEO")
+                sync.copy(videoDone = done, videoTotal = total)
+            else
+                sync.copy(photoDone = done, photoTotal = total)
             when (info.state) {
                 androidx.work.WorkInfo.State.SUCCEEDED ->
                     sync = sync.copy(busy = false, isError = false, status = "Sync complete , copies are on your box")

@@ -19,15 +19,19 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"image"
+	"io"
 	"image/jpeg"
 	_ "image/png" // registered so image.Decode handles PNG uploads
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/LocalGhostDao/localghost/server/internal/exif"
@@ -77,6 +81,11 @@ type Pipeline struct {
 	dirs  Dirs
 	store *Store
 	log   *slog.Logger
+	// mu serializes drains: the poll tick and an operator's `ghost-cli ghost.framed drain` can fire
+	// concurrently, and two goroutines processing the same spool file double-read it, collide on the
+	// archive rename, and write duplicate previews. Hash dedup makes it harmless to the DATA, but the
+	// races are noisy and pure waste , one drain at a time.
+	mu sync.Mutex
 	// notifySearch, when set, hands each archived photo to the search layer (ghost.searchd ingest).
 	// Best-effort by design: search indexing is derived state , a failure is logged and the photo is
 	// still archived; searchd's rebuild re-covers anything missed.
@@ -93,6 +102,8 @@ func (p *Pipeline) OnArchived(fn func(archivePath string, takenAt int64)) { p.no
 // DrainIncoming processes every pending upload, oldest first, one at a time. Returns how many were
 // processed. Called on start (resume after lock/crash) and on each poll tick.
 func (p *Pipeline) DrainIncoming() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	entries, err := os.ReadDir(p.dirs.Incoming)
 	if err != nil {
 		return 0
@@ -102,8 +113,20 @@ func (p *Pipeline) DrainIncoming() int {
 	done := 0
 	daysTouched := map[string]bool{}
 	for _, e := range entries {
-		if e.IsDir() || strings.HasSuffix(e.Name(), ".part") {
-			continue // .part = secd still writing; picked up next tick once renamed
+		if e.IsDir() {
+			continue
+		}
+		if strings.HasSuffix(e.Name(), ".part") {
+			// .part = secd still writing , normally renamed on completion. But if secd died mid-spool
+			// (crash, lock during upload) the .part is orphaned FOREVER: framed skips .part files, so
+			// without this sweep they accumulate on the volume until the disk guard notices. An hour
+			// is generous , no legitimate spool write takes that long (4GiB cap / any sane link).
+			if fi, ferr := e.Info(); ferr == nil && time.Since(fi.ModTime()) > time.Hour {
+				if rerr := os.Remove(filepath.Join(p.dirs.Incoming, e.Name())); rerr == nil {
+					p.log.Info("swept orphaned .part (secd died mid-spool)", "fn", "DrainIncoming", "name", e.Name(), "age", time.Since(fi.ModTime()).Round(time.Minute).String())
+				}
+			}
+			continue
 		}
 		day, err := p.processOne(filepath.Join(p.dirs.Incoming, e.Name()))
 		if err != nil {
@@ -125,12 +148,33 @@ func (p *Pipeline) DrainIncoming() int {
 // processOne handles a single upload. Returns the YYYY-MM-DD day the photo belongs to (for path
 // rebuild), or "" if the file was a duplicate or not an image.
 func (p *Pipeline) processOne(path string) (string, error) {
-	raw, err := os.ReadFile(path)
+	// MEMORY DISCIPLINE: never load a whole file blind. Videos run to hundreds of MB (upload cap is
+	// 4GiB), and the old ReadFile here meant one long clip could balloon the daemon's heap on a box
+	// that also needs RAM for the model. Everything cheap works from a STREAM or the HEAD: the hash
+	// streams, the sniffer needs 12 bytes, EXIF lives in the leading segment. Only PHOTOS (tens of MB
+	// at worst, needed in full for preview decode) get read whole , and only after the sniff says so.
+	fi, err := os.Stat(path)
 	if err != nil {
 		return "", err
 	}
-	sum := sha256.Sum256(raw)
-	hash := hex.EncodeToString(sum[:16]) // 128 bits is plenty for a personal archive's identity
+	fileBytes := fi.Size()
+
+	src, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	head := make([]byte, 64<<10) // sniff needs 12 bytes; JPEG/HEIC EXIF sits in the leading segment
+	n, _ := io.ReadFull(src, head)
+	head = head[:n]
+
+	hasher := sha256.New()
+	hasher.Write(head)
+	if _, err := io.Copy(hasher, src); err != nil { // stream the rest , constant memory at any size
+		_ = src.Close()
+		return "", fmt.Errorf("hash stream: %w", err)
+	}
+	_ = src.Close()
+	hash := hex.EncodeToString(hasher.Sum(nil)[:16]) // 128 bits is plenty for a personal archive's identity
 
 	if dup, err := p.store.HasFrame(hash); err == nil && dup {
 		// Already archived (re-sent upload). Drop the incoming copy; the archive has the bytes.
@@ -139,14 +183,26 @@ func (p *Pipeline) processOne(path string) (string, error) {
 		return "", nil
 	}
 
+	// Sniff from the head, then load FULL bytes only for photos (preview decode needs pixels).
+	sniff := Sniff(head)
+	var raw []byte
+	if sniff.Kind == KindPhoto || sniff.Kind == KindUnknown {
+		if raw, err = os.ReadFile(path); err != nil {
+			return "", err
+		}
+	}
+
 	// Decode config only , cheap validation + format sniff without decoding pixels yet.
 	cfgFmt := ""
-	if _, f, err := image.DecodeConfig(bytes.NewReader(raw)); err == nil {
-		cfgFmt = f
+	if raw != nil {
+		if _, f, derr := image.DecodeConfig(bytes.NewReader(raw)); derr == nil {
+			cfgFmt = f
+		}
 	}
-	meta := exif.Parse(raw) // zero values if absent; a photo without EXIF still archives
+	meta := exif.Parse(head) // EXIF lives in the leading segment; zero values if absent
 
 	taken := meta.TakenAt
+	takenSrc := "exif" // how taken was determined , recorded so consumers know what to trust
 	if taken.IsZero() {
 		// The spool NAME may carry the phone's taken-timestamp hint (…-t<epochMillis>, appended by
 		// secd from the X-Ghost-Taken header). This is the primary fallback for VIDEOS , they have no
@@ -154,10 +210,14 @@ func (p *Pipeline) processOne(path string) (string, error) {
 		// stripped. Hint over mtime: mtime is when the UPLOAD landed, the hint is when it was SHOT.
 		if ms := takenHintFromName(path); ms > 0 {
 			taken = time.UnixMilli(ms).UTC()
+			takenSrc = "hint"
 		}
 	}
 	if taken.IsZero() {
-		// Fall back to file mtime (the upload's) , honest approximation, better than epoch.
+		// Fall back to file mtime (the upload's) , honest approximation, better than epoch. Recorded
+		// as "mtime" so the where-was-I query NEVER trusts it: an mtime taken_at is upload time, and
+		// one such row would poison MAX(taken_at) and make the phone skip its whole remaining roll.
+		takenSrc = "mtime"
 		if fi, err := os.Stat(path); err == nil {
 			taken = fi.ModTime().UTC()
 		} else {
@@ -168,10 +228,7 @@ func (p *Pipeline) processOne(path string) (string, error) {
 
 	// MOVE the original, untouched, into the archive. Same filesystem, so os.Rename is atomic , the
 	// photo is never in two places or zero places.
-	// Identify the file by its CONTENT, not its (extensionless) spool name. This decides photo vs
-	// video, the archive extension, and whether image previews even apply.
-	sniff := Sniff(raw)
-	// cfgFmt still comes from the image decoder for the preview path; sniff is the authority for kind.
+	// sniff (from the head, above) is the authority for kind; cfgFmt for the preview path.
 	ext := sniff.Ext
 	if ext == ".bin" && cfgFmt != "" {
 		// image.DecodeConfig recognised a still the sniffer did not name , prefer its extension.
@@ -211,8 +268,8 @@ func (p *Pipeline) processOne(path string) (string, error) {
 		Hash: hash, TakenAt: taken.UTC().Unix(),
 		Lat: meta.Lat, Lon: meta.Lon, HasGPS: meta.HasGPS,
 		ArchivePath: archPath, PreviewPath: prevPath, ThumbPath: thumbPath,
-		Bytes: int64(len(raw)), Source: "phone", ReceivedAt: time.Now().UTC().Unix(),
-		Kind: kindStr, MIME: sniff.MIME,
+		Bytes: fileBytes, Source: "phone", ReceivedAt: time.Now().UTC().Unix(),
+		Kind: kindStr, MIME: sniff.MIME, TakenSrc: takenSrc,
 	}
 	if err := p.store.InsertFrame(f); err != nil {
 		// Archive holds the bytes; the record can be replayed by reprocess. Loud, not fatal.
@@ -237,19 +294,45 @@ func (p *Pipeline) makePreviews(raw []byte, hash string) (prev, thumb string) {
 		p.log.Warn("preview decode failed", "fn", "makePreviews", "hash", hash, "err", err)
 		return "", ""
 	}
+	// JPEG first (pure Go, always works), then converted to WebP when cwebp is on the box , Go has no
+	// WebP ENCODER (stdlib and x/image decode only; pure-Go third-party encoders are lossless-only,
+	// which is LARGER than JPEG for photos). cwebp is one `apt install webp` away; when absent the
+	// gallery serves the JPEGs and nothing breaks. ~30% smaller thumbs when present.
 	write := func(dir string, edge int) string {
 		out := filepath.Join(dir, hash+".jpg")
 		f, err := os.OpenFile(out, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
 		if err != nil {
 			return ""
 		}
-		defer f.Close()
 		if err := jpeg.Encode(f, downscale(img, edge), &jpeg.Options{Quality: jpegQuality}); err != nil {
+			_ = f.Close()
 			return ""
+		}
+		_ = f.Close()
+		if webp := toWebP(out); webp != "" {
+			_ = os.Remove(out) // webp replaced it; keep exactly one preview file per size
+			return webp
 		}
 		return out
 	}
 	return write(p.dirs.Preview, previewEdge), write(p.dirs.Thumb, thumbEdge)
+}
+
+// toWebP converts a JPEG on disk to WebP next to it using the cwebp binary. Empty string when cwebp
+// is not installed or fails , the caller keeps the JPEG. Deliberately an OPTIONAL enhancer: no Go
+// dependency, no hard requirement on the box, one `apt install webp` turns it on.
+func toWebP(jpgPath string) string {
+	bin, err := exec.LookPath("cwebp")
+	if err != nil {
+		return ""
+	}
+	out := strings.TrimSuffix(jpgPath, ".jpg") + ".webp"
+	cmd := exec.Command(bin, "-quiet", "-q", "78", jpgPath, "-o", out)
+	if err := cmd.Run(); err != nil {
+		_ = os.Remove(out)
+		return ""
+	}
+	return out
 }
 
 // locBatch is the spool file secd writes for a location upload.
@@ -260,6 +343,8 @@ type locBatch struct {
 
 // DrainLocations ingests spooled location batches and rebuilds the days they touch.
 func (p *Pipeline) DrainLocations() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	entries, err := os.ReadDir(p.dirs.IncomingLoc)
 	if err != nil {
 		return 0

@@ -49,6 +49,16 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         ) == PackageManager.PERMISSION_GRANTED
         if (!granted) return Result.success()
 
+        // ONE sync at a time, process-wide. The periodic worker and the one-shot (manual/auto) live in
+        // DIFFERENT WorkManager unique-work namespaces, so WorkManager happily runs both concurrently ,
+        // two uploaders racing the same cursor, double-uploading, and showing two notifications. If a
+        // sync is already running, this one simply yields; the running one covers the work.
+        if (!syncRunning.compareAndSet(false, true)) {
+            android.util.Log.i("LocalGhost", "sync already running, this worker yields")
+            return Result.success()
+        }
+        try {
+
         // Go foreground immediately so the OS lets us keep the CPU + network while locked.
         setForeground(foregroundInfo(0, 0, 0))
 
@@ -59,8 +69,10 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         // same counts as WorkManager progress data so an observing Activity can fill its bar.
         val progress = object : SyncEngine.Progress {
             override fun onStart(kind: MediaKind, total: Int, totalBytes: Long) {
+                doneCount = 0 // fresh counter per kind , photo counts must not bleed into the video bar
                 totalCount = total
                 setProgressAsync(androidx.work.Data.Builder()
+                    .putString("kind", kind.name)
                     .putInt("done", doneCount).putInt("total", totalCount).build())
                 // Show the notification from the SCAN phase onward , previously it only became visible
                 // once bytes started flowing, so the checking/skipping stretch looked like nothing was
@@ -76,6 +88,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             override fun onItemDone(kind: MediaKind, sent: Int, total: Int) {
                 doneCount = sent; totalCount = total
                 setProgressAsync(androidx.work.Data.Builder()
+                    .putString("kind", kind.name)
                     .putInt("done", doneCount).putInt("total", totalCount).build())
                 try { setForegroundAsync(foregroundInfo(doneCount, totalCount, 0)) } catch (_: Exception) {}
             }
@@ -88,6 +101,9 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         } catch (e: Exception) {
             android.util.Log.w("LocalGhost", "background sync failed, will retry: ${e.message}")
             Result.retry()
+        }
+        } finally {
+            syncRunning.set(false)
         }
     }
 
@@ -132,6 +148,8 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
     }
 
     companion object {
+        /** Process-wide "a sync is running" latch shared by the periodic and one-shot workers. */
+        private val syncRunning = java.util.concurrent.atomic.AtomicBoolean(false)
         private const val NAME = "localghost.sync"
         private const val NOW_NAME = "localghost.sync.now"
         private const val CHANNEL_MANUAL = "localghost.sync.manual"
@@ -144,6 +162,10 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             val net = if (AppSettings.allowMobileSync(ctx)) NetworkType.CONNECTED else NetworkType.UNMETERED
             val request = PeriodicWorkRequestBuilder<SyncWorker>(15, TimeUnit.MINUTES)
                 .setConstraints(Constraints.Builder().setRequiredNetworkType(net).build())
+                // Without an initial delay the FIRST periodic run fires the moment it is scheduled ,
+                // i.e. at app start, right alongside the auto-sync one-shot , two simultaneous
+                // uploads and two notifications. First periodic run waits a full interval.
+                .setInitialDelay(15, TimeUnit.MINUTES)
                 .build()
             WorkManager.getInstance(ctx).enqueueUniquePeriodicWork(
                 NAME, ExistingPeriodicWorkPolicy.UPDATE, request)
@@ -156,10 +178,10 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
          * gives it the visible "Sync running" notification with the ghost logo; the periodic sync passes
          * manual=false and stays quiet.
          */
-        fun syncNow(ctx: Context) {
+        fun syncNow(ctx: Context, manual: Boolean = true) {
             val request = OneTimeWorkRequestBuilder<SyncWorker>()
                 .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
-                .setInputData(androidx.work.Data.Builder().putBoolean(KEY_MANUAL, true).build())
+                .setInputData(androidx.work.Data.Builder().putBoolean(KEY_MANUAL, manual).build())
                 .build()
             WorkManager.getInstance(ctx).enqueueUniqueWork(
                 NOW_NAME, ExistingWorkPolicy.KEEP, request) // KEEP: a tap while one runs does not double it

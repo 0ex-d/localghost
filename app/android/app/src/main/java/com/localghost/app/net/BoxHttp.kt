@@ -49,6 +49,17 @@ object BoxHttp {
 
     /** GET returning the parsed JSON object. Runs on Dispatchers.IO , HttpsURLConnection blocks, and
      *  on the main thread that is an instant NetworkOnMainThreadException before the request is sent. */
+    /** GET raw bytes (thumbnails). Null on any failure , gallery cells just stay empty. */
+    suspend fun getBytes(ctx: Context, path: String): ByteArray? = withContext(Dispatchers.IO) {
+        try {
+            val conn = open(ctx, path, "GET")
+            if (conn.responseCode != 200) { conn.disconnect(); return@withContext null }
+            conn.inputStream.use { it.readBytes() }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     suspend fun getJson(ctx: Context, path: String): JSONObject = withContext(Dispatchers.IO) {
         val conn = open(ctx, path, "GET")
         readJson(conn)
