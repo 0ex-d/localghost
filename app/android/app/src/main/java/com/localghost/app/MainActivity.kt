@@ -358,7 +358,7 @@ class MainActivity : ComponentActivity() {
         if (!LocalModel.ensureLoaded(this@MainActivity)) {
             messages.add(Message(Message.Role.GHOST,
                 "No box, and no on-phone model installed. I can't answer right now. " +
-                "Reconnect to your box, or install a local model for offline replies."))
+                        "Reconnect to your box, or install a local model for offline replies."))
             streaming = false
             return
         }
@@ -908,8 +908,10 @@ class MainActivity : ComponentActivity() {
             engine.runCamera(MediaKind.PHOTO, progress)
             engine.runCamera(MediaKind.VIDEO, progress)
             refreshGrants()
+            // itemsSent counts CONFIRMED (202) uploads. "0 confirmed" with items present means the box
+            // refused or was unreachable , the per-item reason is in logcat under the LocalGhost tag.
             sync = sync.copy(busy = false, isError = false, curVideoSize = 0,
-                status = "Done — $photos photos, $videos videos (stubbed — no box yet)")
+                status = "Done — $photos photos, $videos videos confirmed on the box")
         }
     }
 }

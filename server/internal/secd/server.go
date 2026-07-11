@@ -149,6 +149,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/unlock/poll", s.handleUnlockPoll)
 	mux.HandleFunc("/v1/lock", s.handleLock)
 	mux.HandleFunc("/v1/info", s.handleInfo)
+	mux.HandleFunc("/v1/status", s.handleStatus) // supervised-daemon roster for the app's Box Status screen
 	mux.HandleFunc("/v1/notifications", s.handleNotifications)
 	mux.HandleFunc("/v1/notifications/mute", s.handleMute)
 	mux.HandleFunc("/v1/notifications/list", s.handleNotificationList)

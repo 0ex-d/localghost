@@ -158,6 +158,21 @@ object BoxClient {
     /** Poll the box for the current unlock stage states, mapping the JSON to the app enums. */
     private suspend fun pollUnlock(ctx: Context): Map<UnlockStage, StageState> {
         val resp = BoxHttp.getJson(ctx, "/v1/unlock/poll")
+        // THE KEY EXCHANGE HAPPENS HERE, not on the unlock POST. The box issues the session token once,
+        // on the poll that reports a successful unlock (token + expiresAt ride alongside the stages).
+        // This parse used to read ONLY the stages and drop the token on the floor , the box unlocked,
+        // the app never had a session, and every authenticated call after (status, settings, uploads)
+        // hit the appears-down 503. Capture and persist it the moment it appears.
+        val tok = resp.optString("token", "")
+        if (tok.isNotBlank()) {
+            val expSec = parseRfc3339ToEpochSec(resp.optString("expiresAt", ""))
+            if (expSec > 0) {
+                SessionStore.write(ctx, tok, expSec)
+                android.util.Log.i("LocalGhost", "session stored from unlock poll, expires epoch $expSec")
+            } else {
+                android.util.Log.w("LocalGhost", "unlock poll carried a token but expiresAt did not parse: '${resp.optString("expiresAt", "")}'")
+            }
+        }
         val out = mutableMapOf<UnlockStage, StageState>()
         val arr = resp.optJSONArray("stages") ?: return out
         for (i in 0 until arr.length()) {
@@ -238,7 +253,7 @@ object BoxClient {
         val att = if (attachments.isEmpty()) "" else "I can see your ${attachments.size} attachment(s) too. "
         val reach = if (caps.reachBeyondBox) "(reaching beyond the box for this one) " else ""
         val reply = reach + att + "Drawing on your memories: about \"$prompt\" — here is what I can piece " +
-            "together from your synced life. (Stubbed; ghost.synthd will retrieve and generate.)"
+                "together from your synced life. (Stubbed; ghost.synthd will retrieve and generate.)"
         for (word in reply.split(" ")) { emit(ChatChunk.Token("$word ")); delay(35) }
         emit(ChatChunk.Done)
     }
