@@ -32,11 +32,17 @@ const locationsMaxBytes = 16 << 20
 // image bytes, exactly as shot , no multipart, no re-encode, no inspection. framed archives the same
 // bytes it receives here.
 func (s *Server) handleFrameUpload(w http.ResponseWriter, r *http.Request) {
+	// Every rejection logs its reason server-side. The WIRE response stays the uniform appears-down
+	// 503 (no information leaks to the caller), but the journal must say why an upload bounced ,
+	// a silent 503 here cost a debugging session: the app just sees "failed" and the box said nothing.
 	if !s.session.Valid(bearer(r)) {
+		hasBearer := bearer(r) != ""
+		secdLog.Warn("frame upload rejected: invalid session", "fn", "handleFrameUpload", "bearerPresent", hasBearer, "remote", r.RemoteAddr)
 		s.appearsDown(w)
 		return
 	}
 	if r.Method != http.MethodPost {
+		secdLog.Warn("frame upload rejected: wrong method", "fn", "handleFrameUpload", "method", r.Method)
 		s.appearsDown(w)
 		return
 	}
@@ -44,15 +50,19 @@ func (s *Server) handleFrameUpload(w http.ResponseWriter, r *http.Request) {
 	mounted := s.mounted
 	s.mu.Unlock()
 	if mounted < 0 {
+		secdLog.Warn("frame upload rejected: box locked", "fn", "handleFrameUpload")
 		s.appearsDown(w) // locked box takes nothing; the app queues and retries after unlock
 		return
 	}
 	dir := filepath.Join(s.cfg.StateDir, "mnt", fmt.Sprintf("slot%d", mounted), "frames", "incoming")
-	if err := spoolBody(dir, r, uploadMaxBytes); err != nil {
-		secdLog.Warn("frame upload spool failed", "fn", "handleFrameUpload", "err", err)
+	t0 := time.Now()
+	n, err := spoolBody(dir, r, uploadMaxBytes)
+	if err != nil {
+		secdLog.Warn("frame upload spool failed", "fn", "handleFrameUpload", "dir", dir, "err", err)
 		http.Error(w, "upload failed", http.StatusInsufficientStorage)
 		return
 	}
+	secdLog.Info("frame spooled", "fn", "handleFrameUpload", "bytes", n, "took", time.Since(t0).String())
 	w.WriteHeader(http.StatusAccepted) // accepted for processing; framed does the rest asynchronously
 }
 
@@ -60,10 +70,12 @@ func (s *Server) handleFrameUpload(w http.ResponseWriter, r *http.Request) {
 // and spools it. secd does not parse it; framed validates and drops malformed batches.
 func (s *Server) handleLocations(w http.ResponseWriter, r *http.Request) {
 	if !s.session.Valid(bearer(r)) {
+		secdLog.Warn("location upload rejected: invalid session", "fn", "handleLocations", "bearerPresent", bearer(r) != "", "remote", r.RemoteAddr)
 		s.appearsDown(w)
 		return
 	}
 	if r.Method != http.MethodPost {
+		secdLog.Warn("location upload rejected: wrong method", "fn", "handleLocations", "method", r.Method)
 		s.appearsDown(w)
 		return
 	}
@@ -71,23 +83,26 @@ func (s *Server) handleLocations(w http.ResponseWriter, r *http.Request) {
 	mounted := s.mounted
 	s.mu.Unlock()
 	if mounted < 0 {
+		secdLog.Warn("location upload rejected: box locked", "fn", "handleLocations")
 		s.appearsDown(w)
 		return
 	}
 	dir := filepath.Join(s.cfg.StateDir, "mnt", fmt.Sprintf("slot%d", mounted), "frames", "incoming-locations")
-	if err := spoolBody(dir, r, locationsMaxBytes); err != nil {
-		secdLog.Warn("location spool failed", "fn", "handleLocations", "err", err)
+	n, err := spoolBody(dir, r, locationsMaxBytes)
+	if err != nil {
+		secdLog.Warn("location spool failed", "fn", "handleLocations", "dir", dir, "err", err)
 		http.Error(w, "upload failed", http.StatusInsufficientStorage)
 		return
 	}
+	secdLog.Info("locations spooled", "fn", "handleLocations", "bytes", n)
 	w.WriteHeader(http.StatusAccepted)
 }
 
 // spoolBody streams the request body to a fresh .part file in dir, fsyncs, and renames it live. The
 // name is arrival-ordered (nanosecond timestamp) plus random hex so concurrent uploads never collide.
-func spoolBody(dir string, r *http.Request, maxBytes int64) error {
+func spoolBody(dir string, r *http.Request, maxBytes int64) (int64, error) {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return err
+		return 0, fmt.Errorf("create spool dir: %w", err)
 	}
 	var rb [6]byte
 	_, _ = rand.Read(rb[:])
@@ -95,22 +110,26 @@ func spoolBody(dir string, r *http.Request, maxBytes int64) error {
 	part := filepath.Join(dir, name+".part")
 	f, err := os.OpenFile(part, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o640)
 	if err != nil {
-		return err
+		return 0, fmt.Errorf("create .part: %w", err)
 	}
 	body := http.MaxBytesReader(nil, r.Body, maxBytes)
-	if _, err := io.Copy(f, body); err != nil {
+	n, err := io.Copy(f, body)
+	if err != nil {
 		_ = f.Close()
 		_ = os.Remove(part)
-		return err
+		return 0, fmt.Errorf("stream body (after %d bytes): %w", n, err)
 	}
 	if err := f.Sync(); err != nil { // the bytes are the photo; make sure they hit the disk
 		_ = f.Close()
 		_ = os.Remove(part)
-		return err
+		return 0, fmt.Errorf("fsync: %w", err)
 	}
 	if err := f.Close(); err != nil {
 		_ = os.Remove(part)
-		return err
+		return 0, fmt.Errorf("close: %w", err)
 	}
-	return os.Rename(part, filepath.Join(dir, name)) // the commit: framed only sees completed files
+	if err := os.Rename(part, filepath.Join(dir, name)); err != nil { // the commit
+		return 0, fmt.Errorf("commit rename: %w", err)
+	}
+	return n, nil
 }

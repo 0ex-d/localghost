@@ -40,8 +40,17 @@ green() { printf '\033[32m%s\033[0m' "$1"; }
 red()   { printf '\033[31m%s\033[0m' "$1"; }
 dim()   { printf '\033[2m%s\033[0m'  "$1"; }
 
+# The volume is mounted inside ghost.secd's PRIVATE MOUNT NAMESPACE , a deliberate design choice: the
+# host mount table never shows the decrypted volume, and other host processes cannot casually see it.
+# So if the run dir is not visible here but secd is running, re-exec this script INSIDE secd's
+# namespace. Root can always enter deliberately; nothing enters casually.
 if [ ! -d "$RUN_DIR" ]; then
-    echo "run dir $RUN_DIR not present , is the box unlocked? (secd mounts the volume on unlock)"
+    SECD_PID="$(pidof ghost.secd || true)"
+    if [ -n "$SECD_PID" ] && [ -z "${GHOST_NS_ENTERED:-}" ]; then
+        exec env GHOST_NS_ENTERED=1 nsenter -t "$SECD_PID" -m "$0" "$@"
+    fi
+    echo "run dir $RUN_DIR not present , is the box unlocked? (secd mounts the volume on unlock,"
+    echo "inside its own mount namespace; this script auto-enters it when secd is running)"
     exit 1
 fi
 
@@ -93,11 +102,11 @@ for svc in $CHECK; do
 done
 
 # secd separately , its socket is on the unencrypted state dir, reachable even pre-unlock.
-SECD_SOCK="${GHOST_SECD_SOCK:-/var/lib/ghost/run/ghost.secd.sock}"
+# secd resolves its own state-dir socket (ghost-cli special-cases it), so call it plainly , no flags.
 printf '\n=== ghost.secd (state dir) ===\n'
-if [ -S "$SECD_SOCK" ] && "$CLI" ghost.secd --run-dir="$(dirname "$SECD_SOCK")" ping >/dev/null 2>&1; then
+if "$CLI" ghost.secd ping >/dev/null 2>&1; then
     printf '  %s   ' "$(green UP)"
-    "$CLI" ghost.secd --run-dir="$(dirname "$SECD_SOCK")" status 2>/dev/null | head -1 || echo ""
+    "$CLI" ghost.secd status 2>/dev/null | head -1 || echo ""
 else
     printf '  %s   (secd is the root daemon , if this is down the box is locked or crashed)\n' "$(red DOWN)"
 fi

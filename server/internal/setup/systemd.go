@@ -100,6 +100,15 @@ func renderUnit(name, execDir string, cfg DaemonConfig) string {
 	// no home access, a real /dev (needed for /dev/mapper, loop, the raw disk, and the TPM when
 	// present). We deliberately do NOT set ProtectSystem=strict or a DeviceAllow whitelist , the first
 	// blocks the mount syscall and /run writes, the second denies /dev/mapper which cryptsetup needs.
+	//
+	// DELIBERATE: ProtectHome / ProtectKernelTunables give secd a PRIVATE MOUNT NAMESPACE, so the
+	// decrypted volume exists only inside secd's namespace , the host mount table never shows it, and
+	// other host processes cannot even see that a volume is mounted, let alone read it. The daemons
+	// inherit the namespace and work normally. This is a privacy feature, not an accident. The ops
+	// consequence: host-side tools must deliberately enter the namespace ,
+	//   sudo nsenter -t "$(pidof ghost.secd)" -m <command>
+	// , which is what tools/health.sh does automatically. Root can always get in; the point is that
+	// nothing gets in casually.
 	fmt.Fprintf(&b, "ProtectHome=yes\n")
 	fmt.Fprintf(&b, "PrivateDevices=no\n")
 	fmt.Fprintf(&b, "ProtectKernelTunables=yes\n")
