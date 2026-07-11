@@ -25,9 +25,18 @@ if [ -z "$SRC" ] || [ ! -d "$SRC" ]; then
     exit 2
 fi
 
-STAGING=/var/lib/ghost/staging/ai-models
+STAGING="${GHOST_STAGING_DIR:-/var/lib/ghost/staging}/ai-models"
 mkdir -p "$STAGING"
-chmod 700 /var/lib/ghost/staging "$STAGING"
+chmod 700 "$(dirname "$STAGING")" "$STAGING"
+# secd's unlock ingest reads /var/lib/ghost/staging/ai-models specifically. If staging was pointed at
+# a bigger disk, leave a symlink at the default path so the ingest still finds it , the link itself
+# costs nothing on /var.
+DEFAULT_STAGING=/var/lib/ghost/staging/ai-models
+if [ "$STAGING" != "$DEFAULT_STAGING" ]; then
+    mkdir -p /var/lib/ghost/staging
+    ln -sfn "$STAGING" "$DEFAULT_STAGING"
+    echo "-- staging at $STAGING (symlinked from $DEFAULT_STAGING for the unlock ingest)"
+fi
 
 # 1. Stop anything already serving a model , a leftover llama-server holds the RAM the cohort needs,
 #    and two copies of 12B weights in memory ends with the OOM killer choosing for you.
@@ -55,16 +64,39 @@ elif ! command -v llama-server >/dev/null 2>&1; then
     echo "!! no llama-server on PATH and none provided , oracled will name this at unlock" >&2
 fi
 
-# 3. Stage the weights.
+# 3. Stage the weights , ONLY what LocalGhost uses, never "every gguf in the dir". A source dir can
+#    hold a person's whole model zoo (a 19GB DeepSeek staged onto a 19GB /var partition filled it to
+#    100% and broke journald , learned the hard way). Files are matched by the conf-default names;
+#    override the list with GHOST_MODEL_FILES="a.gguf b.gguf" for non-default conf.
+WANTED="${GHOST_MODEL_FILES:-gemma-4-12b-it-Q4_K_M.gguf mmproj-F16.gguf embeddinggemma-300m-q8.gguf}"
+
+# Free-space preflight on the staging filesystem , /var is often a small separate partition, and
+# filling it takes the whole system's logging and databases down with it.
+NEED=0
+for name in $WANTED; do
+    [ -e "$SRC/$name" ] && NEED=$((NEED + $(stat -c%s "$SRC/$name")))
+done
+AVAIL=$(df --output=avail -B1 "$STAGING" | tail -1)
+if [ "$NEED" -gt 0 ] && [ "$AVAIL" -lt $((NEED + 1073741824)) ]; then  # need + 1GB headroom
+    echo "!! not enough space on $(df --output=target "$STAGING" | tail -1): need $((NEED / 1048576))MB + 1GB headroom, have $((AVAIL / 1048576))MB" >&2
+    echo "   Options: point staging elsewhere (GHOST_STAGING_DIR=/big/disk/path $0 ...), or , if the" >&2
+    echo "   box is already UNLOCKED , skip staging and copy straight onto the volume via tools/ns.sh." >&2
+    exit 5
+fi
+
 COUNT=0
-for f in "$SRC"/*.gguf; do
-    [ -e "$f" ] || continue
-    SIZE=$(stat -c%s "$f")
-    if [ "$SIZE" -lt 1048576 ]; then
-        echo "!! skipping $(basename "$f") , ${SIZE} bytes is not a model (interrupted download?)" >&2
+for name in $WANTED; do
+    f="$SRC/$name"
+    if [ ! -e "$f" ]; then
+        echo "-- $name not in $SRC (fine if your conf does not use it)"
         continue
     fi
-    echo "-- staging $(basename "$f") ($((SIZE / 1048576))MB)"
+    SIZE=$(stat -c%s "$f")
+    if [ "$SIZE" -lt 1048576 ]; then
+        echo "!! skipping $name , ${SIZE} bytes is not a model (interrupted download?)" >&2
+        continue
+    fi
+    echo "-- staging $name ($((SIZE / 1048576))MB)"
     cp "$f" "$STAGING/"
     COUNT=$((COUNT + 1))
 done
