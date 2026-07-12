@@ -117,6 +117,64 @@ func (s *Server) handleFramesLatest(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, `{"photoTakenAt":%d,"videoTakenAt":%d}`, photoTs, videoTs)
 }
 
+// handleFramesExists , the pre-upload existence check. POST {"hashes":[...]} -> {"have":[...]}. The
+// phone skips streaming any file whose content hash the box confirms , turning a re-offered 400MB
+// video into a few bytes of request. Hashes are STRICT lowercase hex (the only user input reaching a
+// SQL IN list, validated here to the character); anything malformed is dropped, not queried.
+func (s *Server) handleFramesExists(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) {
+		secdLog.Warn("frames/exists rejected: invalid session", "fn", "handleFramesExists", "bearerPresent", bearer(r) != "")
+		s.appearsDown(w)
+		return
+	}
+	if r.Method != http.MethodPost {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	var req struct {
+		Hashes []string `json:"hashes"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.appearsDown(w)
+		return
+	}
+	clean := make([]string, 0, len(req.Hashes))
+	for _, h := range req.Hashes {
+		if len(h) != 32 {
+			continue
+		}
+		ok := true
+		for _, ch := range h {
+			if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			clean = append(clean, h)
+		}
+	}
+	have, err := s.notif.FramesHave(mounted, clean)
+	if err != nil {
+		secdLog.Warn("frames/exists query failed", "fn", "handleFramesExists", "err", err)
+		s.appearsDown(w)
+		return
+	}
+	out := make([]string, 0, len(have))
+	for h := range have {
+		out = append(out, h)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string][]string{"have": out})
+}
+
 // handleFramesList pages the archived frames newest-first for the app's gallery grid.
 // GET /v1/frames/list?before=<takenAt>&limit=<n> -> {"frames":[{hash,takenAt,kind,bytes}]}
 func (s *Server) handleFramesList(w http.ResponseWriter, r *http.Request) {

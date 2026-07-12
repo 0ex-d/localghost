@@ -400,6 +400,19 @@ object BoxClient {
     }
 
     // --- sync ---
+    /** Which of these content hashes the box already has. EMPTY on any failure , the caller then
+     *  uploads everything, because skipping on uncertainty is how photos get silently lost, while
+     *  uploading a duplicate costs only bandwidth (the box dedups by the same hash). */
+    suspend fun framesHave(ctx: Context, hashes: List<String>): Set<String> = try {
+        val body = org.json.JSONObject().put("hashes", org.json.JSONArray(hashes))
+        val r = BoxHttp.postJson(ctx, "/v1/frames/exists", body)
+        val arr = r.optJSONArray("have") ?: return emptySet()
+        (0 until arr.length()).mapNotNull { arr.optString(it).takeIf { h -> h.isNotBlank() } }.toSet()
+    } catch (e: Exception) {
+        android.util.Log.w("LocalGhost", "frames/exists failed (will upload everything): ${e.message}")
+        emptySet()
+    }
+
     /** One gallery entry from the box's archive. */
     data class GalleryFrame(val hash: String, val takenAt: Long, val kind: String, val bytes: Long)
 

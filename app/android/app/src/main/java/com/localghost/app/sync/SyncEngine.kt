@@ -48,6 +48,17 @@ class SyncEngine(private val ctx: Context) {
         val result = withContext(Dispatchers.IO) {
             CameraReader.syncFrom(
                 ctx, cmd.kind, after,
+                alreadyHave = { item ->
+                    // Hash locally, ask the box. False on ANY doubt (hash failure, request failure ,
+                    // framesHave already returns empty on error) so uncertainty uploads. A confirmed
+                    // hit advances the cursor below via the same contiguous-streak rule: the send
+                    // lambda is never called for it, so advance here under the same conditions.
+                    val h = CameraReader.hashOf(ctx, item)
+                    val onBox = h != null &&
+                        kotlinx.coroutines.runBlocking { BoxClient.framesHave(ctx, listOf(h)) }.contains(h)
+                    if (onBox && !sawFailure) SyncCursor.advance(ctx, cmd.kind, item.dateTaken, item.id)
+                    onBox
+                },
                 send = { item, stream ->
                     val ok = kotlinx.coroutines.runBlocking { BoxClient.ingest(ctx, cmd.kind, item.name, stream, item.dateTaken) }
                     if (!ok) sawFailure = true

@@ -46,6 +46,7 @@ object CameraReader {
         kind: MediaKind,
         after: Cursor,
         send: (Item, InputStream) -> Boolean,
+        alreadyHave: (Item) -> Boolean,
         onItemStart: (Item) -> Unit,
         onBytes: (read: Long) -> Unit,
         onProgress: (sent: Int) -> Unit,
@@ -57,6 +58,7 @@ object CameraReader {
 
         var sent = 0
         var failed = 0
+        var skippedExisting = 0
         var bytes = 0L
         try {
             ctx.contentResolver.query(c.collection, projection, sel, args, sort)?.use { cur ->
@@ -72,6 +74,18 @@ object CameraReader {
                         cur.getLong(dateCol), id, cur.getLong(sizeCol))
 
                     onItemStart(item)
+                    // PRE-UPLOAD EXISTENCE CHECK: hash the file locally (a local read , seconds for a
+                    // video) and ask the box before streaming it (minutes for a video). alreadyHave
+                    // returns false on ANY doubt , hash failure, check failure , so uncertainty
+                    // always falls through to a real upload; skipping only ever happens on the box's
+                    // explicit confirmation. A confirmed-existing item counts as sent: it IS on the
+                    // box, and the cursor should advance past it exactly as if just uploaded.
+                    if (alreadyHave(item)) {
+                        sent++
+                        onProgress(sent)
+                        skippedExisting++
+                        continue
+                    }
                     val ok = ctx.contentResolver.openInputStream(item.uri)?.use { stream ->
                         val counting = CountingStream(stream, onBytes)
                         val confirmed = send(item, counting)
@@ -95,8 +109,28 @@ object CameraReader {
         } catch (e: Exception) {
             return CommandResult(Stream.CAMERA, kind, sent, bytes, error = e.message)
         }
+        if (skippedExisting > 0) android.util.Log.i("LocalGhost", "sync $kind: $skippedExisting already on box, upload skipped")
         if (failed > 0) android.util.Log.i("LocalGhost", "sync $kind: $sent sent, $failed skipped (will retry)")
         return CommandResult(Stream.CAMERA, kind, sent, bytes)
+    }
+
+    /** Content hash in EXACTLY framed's format , hex(sha256(bytes)[:16]), 32 lowercase hex chars ,
+     *  so a phone-side hash matches the box's archive identity byte for byte. Null on read failure
+     *  (callers treat null as "not known to exist" and upload). */
+    fun hashOf(ctx: Context, item: Item): String? = try {
+        ctx.contentResolver.openInputStream(item.uri)?.use { stream ->
+            val md = java.security.MessageDigest.getInstance("SHA-256")
+            val buf = ByteArray(64 * 1024)
+            while (true) {
+                val n = stream.read(buf)
+                if (n < 0) break
+                md.update(buf, 0, n)
+            }
+            md.digest().copyOfRange(0, 16).joinToString("") { b -> "%02x".format(b) }
+        }
+    } catch (e: Exception) {
+        android.util.Log.w("LocalGhost", "hash of ${item.name} failed: ${e.message}")
+        null
     }
 
     private class CountingStream(

@@ -157,6 +157,35 @@ func (s *NotifStore) FramesList(slot int, beforeTs int64, limit int) ([]FrameRow
 	return out, nil
 }
 
+// FramesHave reports which of the given content hashes are already archived , the pre-upload
+// existence check. The phone hashes a file locally (cheap) and skips the upload (expensive: a 4K
+// video is hundreds of MB) for anything the box confirms. Input hashes are validated hex by the
+// caller; this builds an IN list, capped, and returns the subset present.
+func (s *NotifStore) FramesHave(slot int, hashes []string) (map[string]bool, error) {
+	have := map[string]bool{}
+	if len(hashes) == 0 {
+		return have, nil
+	}
+	if len(hashes) > 200 {
+		hashes = hashes[:200]
+	}
+	c, err := s.pg(slot)
+	if err != nil {
+		return nil, err
+	}
+	in := "'" + strings.Join(hashes, "','") + "'" // caller validated: lowercase hex only, no quoting risk
+	rows, err := c.Query("SELECT hash FROM frames WHERE hash IN (" + in + ")")
+	if err != nil {
+		return nil, err
+	}
+	for _, v := range rows.Vals {
+		if len(v) > 0 && v[0] != nil {
+			have[*v[0]] = true
+		}
+	}
+	return have, nil
+}
+
 // FrameThumbPath returns the on-volume path of a frame's thumbnail ("" if none , e.g. videos).
 func (s *NotifStore) FrameThumbPath(slot int, hash string) (string, error) {
 	c, err := s.pg(slot)
