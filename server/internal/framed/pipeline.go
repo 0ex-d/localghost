@@ -370,6 +370,13 @@ func (p *Pipeline) DrainLocations() int {
 		full := filepath.Join(p.dirs.IncomingLoc, e.Name())
 		b, err := os.ReadFile(full)
 		if err != nil {
+			// Same rate-limited visibility as DrainIncoming: a systemic problem (permissions) across
+			// many spooled batches must not be silent, and must not flood either.
+			failed++
+			if failed <= 3 {
+				p.log.Warn("location batch unreadable, leaving for retry", "fn", "DrainLocations",
+					"file", e.Name(), "err", err)
+			}
 			continue
 		}
 		var batch locBatch
@@ -391,6 +398,9 @@ func (p *Pipeline) DrainLocations() int {
 			daysTouched[time.Unix(pt.TS, 0).UTC().Format("2006-01-02")] = true
 		}
 		done++
+	}
+	if failed > 3 {
+		p.log.Warn("location drain failures suppressed", "fn", "DrainLocations", "failedTotal", failed)
 	}
 	for day := range daysTouched {
 		p.RebuildDay(day)
