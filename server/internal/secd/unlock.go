@@ -237,6 +237,8 @@ func stageName(st profile.Stage) string {
 		return "START_CACHE"
 	case profile.StageDaemons:
 		return "DAEMONS"
+	case profile.StageModel:
+		return "MODEL"
 	case profile.StageReady:
 		return "READY"
 	case profile.StageStopServices:

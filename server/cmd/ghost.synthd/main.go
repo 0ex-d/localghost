@@ -28,9 +28,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/LocalGhostDao/localghost/server/internal/ctlsock"
 	"github.com/LocalGhostDao/localghost/server/internal/ghosthealth"
+	"github.com/LocalGhostDao/localghost/server/internal/oracle"
 	"github.com/LocalGhostDao/localghost/server/internal/rotlog"
 	"github.com/LocalGhostDao/localghost/server/internal/svcconf"
 	"github.com/LocalGhostDao/localghost/server/internal/synth"
@@ -118,6 +120,33 @@ func main() {
 		// ready: whether the index is actually queryable (cued's SocketClient.Ready reads this).
 		ctl.Handle("ready", func(json.RawMessage) (ctlsock.Response, error) {
 			data, _ := json.Marshal(map[string]bool{"ready": engine.Ready()})
+			return ctlsock.Response{OK: true, Data: data}, nil
+		})
+		// chat: the app's question -> oracled -> answer. TODAY a PURE PASSTHROUGH , synthd adds no
+		// context because the index is empty. This is deliberately the seam where retrieval joins:
+		// when the corpus exists, this handler looks up relevant memories and injects them into the
+		// prompt before oracled sees it, with zero change to secd or the app. Interactive priority ,
+		// a person is waiting.
+		oc := oracle.NewClient(runDir, 120*time.Second)
+		ctl.Handle("chat", func(args json.RawMessage) (ctlsock.Response, error) {
+			var q struct {
+				Prompt string `json:"prompt"`
+				Think  string `json:"think"`
+			}
+			if err := json.Unmarshal(args, &q); err != nil {
+				return ctlsock.Response{}, err
+			}
+			resp, err := oc.Infer(oracle.Request{
+				Capability: "chat",
+				Class:      oracle.ClassLocalSmall,
+				Priority:   oracle.PriorityInteractive,
+				Input:      q.Prompt,
+				Think:      q.Think,
+			})
+			if err != nil {
+				return ctlsock.Response{}, err
+			}
+			data, _ := json.Marshal(resp)
 			return ctlsock.Response{OK: true, Data: data}, nil
 		})
 		// index-stats: operator view of the corpus (empty today).

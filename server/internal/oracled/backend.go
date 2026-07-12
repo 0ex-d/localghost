@@ -146,9 +146,10 @@ func (b *llamaBackend) Infer(ctx context.Context, req oracle.Request) (oracle.Re
 	if len(req.Images) > 0 {
 		return b.inferMultimodal(ctx, req)
 	}
-	payload := map[string]any{"prompt": req.Input}
-	if req.MaxTokens > 0 {
-		payload["n_predict"] = req.MaxTokens
+	prompt, budget := applyThink(req.Think, req.Input, req.MaxTokens)
+	payload := map[string]any{"prompt": prompt}
+	if budget > 0 {
+		payload["n_predict"] = budget
 	}
 	if req.Temperature > 0 {
 		payload["temperature"] = req.Temperature
@@ -176,7 +177,9 @@ func (b *llamaBackend) Infer(ctx context.Context, req oracle.Request) (oracle.Re
 
 // inferMultimodal builds an OpenAI-style chat completion with image content parts.
 func (b *llamaBackend) inferMultimodal(ctx context.Context, req oracle.Request) (oracle.Response, error) {
-	content := []map[string]any{{"type": "text", "text": req.Input}}
+	promptText, mmBudget := applyThink(req.Think, req.Input, req.MaxTokens)
+	req.MaxTokens = mmBudget
+	content := []map[string]any{{"type": "text", "text": promptText}}
 	for _, imgPath := range req.Images {
 		raw, err := os.ReadFile(imgPath)
 		if err != nil {
@@ -255,4 +258,25 @@ func (b *llamaBackend) Stop() {
 		<-done
 	}
 	b.proc = nil
+}
+
+// applyThink turns the Think level into an instruction prefix and a token budget. Prompted
+// deliberation, honestly: "brief" asks for short working then the answer, "deep" for thorough
+// reasoning first. Budgets only apply when the caller left MaxTokens at the backend default , an
+// explicit caller budget always wins.
+func applyThink(level, input string, maxTokens int) (string, int) {
+	switch level {
+	case "brief":
+		if maxTokens == 0 {
+			maxTokens = 768
+		}
+		return "Think through this briefly before answering , a few lines of reasoning, then a clear answer.\n\n" + input, maxTokens
+	case "deep":
+		if maxTokens == 0 {
+			maxTokens = 2048
+		}
+		return "Reason through this carefully and at length before answering. Work step by step, consider what could be wrong, then give your best answer.\n\n" + input, maxTokens
+	default:
+		return input, maxTokens
+	}
 }

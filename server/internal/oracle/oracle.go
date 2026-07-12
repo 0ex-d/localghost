@@ -40,6 +40,11 @@ type Request struct {
 	Priority    Priority `json:"priority"`    // background vs interactive
 	Input       string   `json:"input"`       // the prompt/content
 	Images      []string `json:"images,omitempty"` // volume paths of images for multimodal requests (captioning)
+	// Think is PROMPTED deliberation depth: "" (answer directly), "brief" (think, then answer), or
+	// "deep" (reason at length before answering). HONEST MECHANICS: gemma has no native reasoning
+	// API, so oracled implements this as an instruction prefix plus a larger token budget , the model
+	// is asked to show its working, not switched into a different mode.
+	Think       string   `json:"think,omitempty"`
 	MaxTokens   int      `json:"maxTokens"`   // 0 = backend default
 	Temperature float64  `json:"temperature"` // 0 = backend default
 	DeadlineMS  int      `json:"deadlineMS"`  // 0 = no deadline; else drop if not STARTED within this

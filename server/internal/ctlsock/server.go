@@ -130,6 +130,11 @@ func (s *Server) handle(conn net.Conn) {
 	}
 	resp, err := h(req.Args)
 	if err != nil {
+		// Log in THIS service's own log, not only on the wire back to the caller. Before this, a
+		// daemon's command failure (e.g. synthd's chat forward to oracled timing out) appeared only
+		// in the CALLER's log , the daemon that actually failed stayed silent about it, and its log
+		// read as if nothing ever went wrong. Every ctlsock service gets this line for free.
+		s.log.Warn("command failed", "fn", "handle", "cmd", req.Cmd, "err", err)
 		resp = Response{OK: false, Err: err.Error()}
 	}
 	_ = json.NewEncoder(conn).Encode(resp)

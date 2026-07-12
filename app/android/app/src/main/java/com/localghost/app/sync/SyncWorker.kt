@@ -48,6 +48,10 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             applicationContext, Manifest.permission.READ_MEDIA_IMAGES
         ) == PackageManager.PERMISSION_GRANTED
         if (!granted) return Result.success()
+        if (AppSettings.syncPaused(applicationContext)) {
+            android.util.Log.i("LocalGhost", "sync paused by user , skipping (periodic and one-shot both honor this)")
+            return Result.success()
+        }
 
         // ONE sync at a time, process-wide. The periodic worker and the one-shot (manual/auto) live in
         // DIFFERENT WorkManager unique-work namespaces, so WorkManager happily runs both concurrently ,

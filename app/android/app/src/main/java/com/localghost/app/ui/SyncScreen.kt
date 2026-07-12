@@ -1,5 +1,6 @@
 package com.localghost.app.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -7,6 +8,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.unit.dp
@@ -18,10 +20,26 @@ fun SyncScreen(
     onSync: () -> Unit,
     onRequestFullAccess: () -> Unit,
     onTestNotification: () -> Unit,
+    onTogglePause: () -> Unit = {},
 ) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp)) {
-        SectionLabel("SYNC")
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically) {
+            SectionLabel("SYNC")
+            // Top-right pause: honored by BOTH the 15-min periodic worker and the auto/manual
+            // one-shots (the worker checks the flag before doing anything). Resume does not itself
+            // start a sync , the next trigger (button, app open, timer) does.
+            Text(if (sync.paused) "[ RESUME ]" else "[ PAUSE ]",
+                color = if (sync.paused) Warning else TerminalGreen,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.clickable { onTogglePause() })
+        }
         Spacer(Modifier.height(8.dp))
+        if (sync.paused) {
+            Text("! sync is paused , nothing uploads until you resume", color = Warning,
+                style = MaterialTheme.typography.bodySmall)
+            Spacer(Modifier.height(8.dp))
+        }
         Text("New photos and videos are copied to the box every 15 minutes over Wi-Fi, and " +
              "when you open the app. Originals stay on your phone; copies live on your box. " +
              "Nothing is uploaded anywhere else.",

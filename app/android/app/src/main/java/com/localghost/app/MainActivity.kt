@@ -129,6 +129,7 @@ class MainActivity : ComponentActivity() {
     private var conversations by mutableStateOf<List<Conversation>>(emptyList())
     private var activeConvId by mutableStateOf<String?>(null)
     private var allowMobileSyncState by mutableStateOf(false)
+    var thinkLevelState by mutableStateOf("")
     private val downloadProgress = mutableStateMapOf<String, Pair<Long, Long>>()
     private var installedModels by mutableStateOf<List<String>>(emptyList())
     private var activeModel by mutableStateOf<String?>(null)
@@ -184,6 +185,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        com.localghost.app.net.BoxClient.appCtx = applicationContext
+        sync = sync.copy(paused = AppSettings.syncPaused(this))
+        thinkLevelState = AppSettings.thinkLevel(this)
         AppLock.ensureKey()
         Notifications.ensureChannel(this)
         PollWorker.schedule(this)
@@ -277,10 +281,18 @@ class MainActivity : ComponentActivity() {
                         onPermAction = ::onPermAction,
                         pending = pending,
                         lifeContext = lifeContext, memories = memories, daemons = daemons,
-                        sync = sync, onSync = ::startSync,
+                        sync = sync, onSync = ::startSync, onTogglePause = ::toggleSyncPause,
                         onRequestFullAccess = { AppSettings.setEverAskedMedia(this, true); launchForResult(mediaLauncher, imagePerms) },
                         onTestNotification = ::testNotification,
                         allowMobileSync = allowMobileSyncState,
+                        thinkLevel = thinkLevelState,
+                        onCycleThink = {
+                            val next = when (AppSettings.thinkLevel(this)) {
+                                "" -> "brief"; "brief" -> "deep"; else -> ""
+                            }
+                            AppSettings.setThinkLevel(this, next)
+                            thinkLevelState = next
+                        },
                         onToggleMobileSync = ::setMobileSync,
                         onToggleMute = ::setMute,
                         boxConnected = !localOnly,
@@ -915,6 +927,13 @@ class MainActivity : ComponentActivity() {
                 else -> {} // ENQUEUED / RUNNING / BLOCKED: keep the "syncing in background" line
             }
         }
+    }
+
+    private fun toggleSyncPause() {
+        val now = !AppSettings.syncPaused(this)
+        AppSettings.setSyncPaused(this, now)
+        sync = sync.copy(paused = now)
+        android.util.Log.i("LocalGhost", if (now) "sync paused" else "sync resumed")
     }
 
     // --- sync (manual; allowed on any network) ---

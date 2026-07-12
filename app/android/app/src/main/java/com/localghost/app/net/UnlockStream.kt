@@ -21,6 +21,7 @@ enum class UnlockStage(val label: String) {
     START_DB("starting database"),
     START_CACHE("starting cache"),
     DAEMONS("starting services"),
+    MODEL("loading model"),
     READY("ready"),
 
     // Teardown stages, mirroring the mount in reverse. Shown on lock so the spin-down is visible and

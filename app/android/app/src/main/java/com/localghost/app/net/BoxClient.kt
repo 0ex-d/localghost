@@ -86,6 +86,9 @@ data class LifeContext(
  * data so every surface feels alive before ghost.secd exists.
  */
 object BoxClient {
+    /** Application context for calls made from context-free seams (the chat Flow). Set once at app
+     *  start; application context only, never an Activity , no leak. */
+    @Volatile var appCtx: android.content.Context? = null
 
     private const val CADENCE_MS = 15 * 60 * 1000L
 
@@ -190,6 +193,7 @@ object BoxClient {
         "START_DB" -> UnlockStage.START_DB
         "START_CACHE" -> UnlockStage.START_CACHE
         "DAEMONS" -> UnlockStage.DAEMONS
+        "MODEL" -> UnlockStage.MODEL
         "READY" -> UnlockStage.READY
         else -> null
     }
@@ -244,17 +248,28 @@ object BoxClient {
         @Suppress("UNUSED_PARAMETER") attachments: List<Attachment> = emptyList(),
         @Suppress("UNUSED_PARAMETER") caps: ChatCapabilities = ChatCapabilities(),
     ): Flow<ChatChunk> = flow {
-        delay(400)
-        emit(ChatChunk.Memories(listOf(
-            "Galapagos dive log - Isabela",
-            "Photos: Rome with Cristina, April",
-            "Voice note: boat idea, last week",
-        )))
-        val att = if (attachments.isEmpty()) "" else "I can see your ${attachments.size} attachment(s) too. "
-        val reach = if (caps.reachBeyondBox) "(reaching beyond the box for this one) " else ""
-        val reply = reach + att + "Drawing on your memories: about \"$prompt\" — here is what I can piece " +
-            "together from your synced life. (Stubbed; ghost.synthd will retrieve and generate.)"
-        for (word in reply.split(" ")) { emit(ChatChunk.Token("$word ")); delay(35) }
+        // REAL end-to-end: the box's own model answers , app -> secd -> ghost.synthd (the retrieval
+        // seam, a passthrough until the memory index exists , NO context is injected yet, so answers
+        // come from the model alone) -> ghost.oracled -> llama-server on the encrypted volume.
+        // Non-streaming v1: the full answer arrives, then renders word-by-word. NO fake memories ,
+        // the Memories chunk returns when synthd actually retrieves some.
+        val ctx = appCtx ?: run { emit(ChatChunk.Token("(app context missing)")); emit(ChatChunk.Done); return@flow }
+        val think = com.localghost.app.settings.AppSettings.thinkLevel(ctx)
+        val body = org.json.JSONObject().put("prompt", prompt).put("think", think)
+        val resp = try {
+            BoxHttp.postJson(ctx, "/v1/chat", body)
+        } catch (e: Exception) {
+            android.util.Log.w("LocalGhost", "chat failed: ${e.message}")
+            emit(ChatChunk.Token("The box did not answer , it may be locked, or the model is still loading. Check Box Status."))
+            emit(ChatChunk.Done)
+            return@flow
+        }
+        val out = resp.optString("output", "")
+        if (out.isBlank()) {
+            emit(ChatChunk.Token("The model returned nothing , check Box Status for ghost.oracled."))
+        } else {
+            for (word in out.split(" ")) { emit(ChatChunk.Token("$word ")); delay(18) }
+        }
         emit(ChatChunk.Done)
     }
 

@@ -1,6 +1,7 @@
 package com.localghost.app.ui
 
 data class SyncUiState(
+    val paused: Boolean = false,
     val hasImages: Boolean = false,
     val hasVideo: Boolean = false,
     val hasLocation: Boolean = false,

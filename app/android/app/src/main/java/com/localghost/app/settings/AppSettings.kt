@@ -14,6 +14,16 @@ object AppSettings {
 
     private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
+    /** Deliberation depth sent with every chat: "" (direct), "brief", or "deep". */
+    fun thinkLevel(ctx: Context): String = prefs(ctx).getString("think_level", "") ?: ""
+    fun setThinkLevel(ctx: Context, level: String) =
+        prefs(ctx).edit().putString("think_level", level).apply()
+
+    /** Sync pause: honored by BOTH the periodic worker and the auto/manual one-shots. */
+    fun syncPaused(ctx: Context): Boolean = prefs(ctx).getBoolean("sync_paused", false)
+    fun setSyncPaused(ctx: Context, paused: Boolean) =
+        prefs(ctx).edit().putBoolean("sync_paused", paused).apply()
+
     /** Epoch millis of the last AUTOMATIC sync kick, so returning to the app does not restart sync. */
     fun lastAutoSyncAt(ctx: Context): Long = prefs(ctx).getLong(KEY_LAST_AUTOSYNC, 0L)
     fun setLastAutoSyncAt(ctx: Context, at: Long) =

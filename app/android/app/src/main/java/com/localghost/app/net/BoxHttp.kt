@@ -115,6 +115,12 @@ object BoxHttp {
     private fun readJson(conn: HttpsURLConnection): JSONObject {
         return try {
             val code = conn.responseCode
+            if (code !in 200..299) {
+                // Named visibility for every failing call. Behavior is UNCHANGED (callers like the
+                // unlock poll rely on parse-whatever-came-back), but before this line a 503 surfaced
+                // only as downstream JSON-parse noise , the HTTP code, the actual fact, was nowhere.
+                android.util.Log.w("LocalGhost", "HTTP $code on ${conn.url.path}")
+            }
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
             val text = stream?.bufferedReader()?.use(BufferedReader::readText) ?: "{}"
             JSONObject(text)

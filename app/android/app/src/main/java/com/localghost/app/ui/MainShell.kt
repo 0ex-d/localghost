@@ -91,10 +91,13 @@ fun MainShell(
     daemons: Loadable<List<DaemonStatus>>,
     sync: SyncUiState,
     onSync: () -> Unit,
+    onTogglePause: () -> Unit = {},
     onRequestFullAccess: () -> Unit,
     onTestNotification: () -> Unit,
     allowMobileSync: Boolean,
     onToggleMobileSync: (Boolean) -> Unit,
+    thinkLevel: String = "",
+    onCycleThink: () -> Unit = {},
     onToggleMute: (Boolean) -> Unit,
     boxConnected: Boolean,
     onLock: () -> Unit,
@@ -173,12 +176,14 @@ fun MainShell(
                             NotificationsScreen(pending, hint)
                         }
                         Dest.HARNESS -> HarnessScreen(daemons)
-                        Dest.SYNC -> SyncScreen(sync, onSync, onRequestFullAccess, onTestNotification)
+                        Dest.SYNC -> SyncScreen(sync, onSync, onRequestFullAccess, onTestNotification, onTogglePause = onTogglePause)
                         Dest.GALLERY -> GalleryScreen()
                         Dest.CODES -> PinManagementScreen(devices)
                         Dest.SETTINGS -> SettingsScreen(
                             allowMobileSync = allowMobileSync,
                             onToggleMobileSync = onToggleMobileSync,
+                            thinkLevel = thinkLevel,
+                            onCycleThink = onCycleThink,
                             notificationsMuted = sync.notificationsMuted,
                             onToggleMute = onToggleMute,
                             onExport = onExport,

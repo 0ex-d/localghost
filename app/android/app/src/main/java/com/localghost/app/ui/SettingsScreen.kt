@@ -1,5 +1,6 @@
 package com.localghost.app.ui
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -17,6 +18,8 @@ import com.localghost.app.ui.theme.*
 fun SettingsScreen(
     allowMobileSync: Boolean,
     onToggleMobileSync: (Boolean) -> Unit,
+    thinkLevel: String = "",
+    onCycleThink: () -> Unit = {},
     notificationsMuted: Boolean,
     onToggleMute: (Boolean) -> Unit,
     onExport: () -> Unit,
@@ -37,6 +40,25 @@ fun SettingsScreen(
                   else "off, Wi-Fi only (recommended)",
             checked = allowMobileSync, onChange = onToggleMobileSync,
         )
+
+        Spacer(Modifier.height(24.dp))
+        SectionLabel("CHAT")
+        Spacer(Modifier.height(8.dp))
+        // Deliberation depth for every chat answer. Tapping cycles off -> brief -> deep. Honest
+        // mechanics: this asks the model to show its working (and gives it a bigger token budget) ,
+        // deeper means slower, especially on CPU.
+        Row(Modifier.fillMaxWidth().clickable { onCycleThink() }.padding(vertical = 8.dp)) {
+            Column(Modifier.weight(1f)) {
+                Text("thinking", color = GhostText, style = MaterialTheme.typography.bodyLarge)
+                Text(when (thinkLevel) {
+                    "brief" -> "brief , a few lines of reasoning first (slower)"
+                    "deep" -> "deep , thorough reasoning first (much slower)"
+                    else -> "off , answers directly (fastest)"
+                }, color = GhostTextDim, style = MaterialTheme.typography.bodySmall)
+            }
+            Text(when (thinkLevel) { "brief" -> "[ BRIEF ]"; "deep" -> "[ DEEP ]"; else -> "[ OFF ]" },
+                color = TerminalGreen, style = MaterialTheme.typography.bodyMedium)
+        }
 
         Spacer(Modifier.height(24.dp))
         SectionLabel("NOTIFICATIONS")
