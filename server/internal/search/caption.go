@@ -109,7 +109,7 @@ func (t *TagOracle) Tags(ctx context.Context, caption string) ([]string, error) 
 		Priority:   oracle.PriorityBackground,
 		Input:      TagPrompt + caption,
 		MaxTokens:  128,
-		DeadlineMS: deadline.Milliseconds(),
+		DeadlineMS: int(deadline.Milliseconds()),
 	})
 	if err != nil {
 		return nil, err

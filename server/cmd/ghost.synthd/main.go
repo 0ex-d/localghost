@@ -93,11 +93,13 @@ func chatPersist(mount string, chatID int64, role, content string) int64 {
 		}
 		chatID, _ = strconv.ParseInt(*rows.Vals[0][0], 10, 64)
 	}
-	if _, err := db.Exec(`INSERT INTO chat_messages (chat_id, role, content, ts) VALUES ($1,$2,$3,$4)`,
+	if err := db.Exec(`INSERT INTO chat_messages (chat_id, role, content, ts) VALUES ($1,$2,$3,$4)`,
 		strconv.FormatInt(chatID, 10), role, content, strconv.FormatInt(now, 10)); err != nil {
 		slog.Warn("chat append failed", "fn", "chatPersist", "err", err)
 	}
-	_, _ = db.Exec(`UPDATE chats SET updated_at = $1 WHERE id = $2`, strconv.FormatInt(now, 10), strconv.FormatInt(chatID, 10))
+	if err := db.Exec(`UPDATE chats SET updated_at = $1 WHERE id = $2`, strconv.FormatInt(now, 10), strconv.FormatInt(chatID, 10)); err != nil {
+		slog.Warn("chat touch failed", "fn", "chatPersist", "err", err)
+	}
 	return chatID
 }
 

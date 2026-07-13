@@ -214,7 +214,7 @@ func (s *NotifStore) CursorSet(slot int, device, kind string, ts, id int64) erro
 	if err != nil {
 		return err
 	}
-	_, err = c.Exec(`INSERT INTO sync_cursors (device, kind, ts, id) VALUES ($1,$2,$3,$4)
+	err = c.Exec(`INSERT INTO sync_cursors (device, kind, ts, id) VALUES ($1,$2,$3,$4)
 		ON CONFLICT (device, kind) DO UPDATE SET ts = GREATEST(sync_cursors.ts, EXCLUDED.ts),
 		id = CASE WHEN EXCLUDED.ts >= sync_cursors.ts THEN EXCLUDED.id ELSE sync_cursors.id END`,
 		device, kind, strconv.FormatInt(ts, 10), strconv.FormatInt(id, 10))

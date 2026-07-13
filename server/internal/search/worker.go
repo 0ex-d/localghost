@@ -199,7 +199,7 @@ func (w *Worker) doTags(ctx context.Context, job *Job) error {
 	}
 	// Tags into the search surface too , one extra chunk makes every tag retrievable.
 	captured := time.Unix(p.Captured, 0).UTC()
-	ids, err := w.Store.InsertChunksT0("image", p.OrigID, captured, []string{"tags: " + strings.Join(tags, ", ")})
+	ids, err := w.Store.InsertChunksT0("image", p.OrigID, captured, ChunkText("", "tags: "+strings.Join(tags, ", ")))
 	if err != nil {
 		return err
 	}
