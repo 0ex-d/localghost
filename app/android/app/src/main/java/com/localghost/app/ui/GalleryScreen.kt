@@ -147,7 +147,7 @@ private fun FrameDetailDialog(
     }
     androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
         Column(
-            Modifier.background(VoidBlack).border(1.dp, TerminalDim).padding(16.dp)
+            Modifier.background(Void).border(1.dp, TerminalDim).padding(16.dp)
                 .verticalScroll(rememberScrollState())
         ) {
             Box(Modifier.fillMaxWidth().aspectRatio(1f).background(VoidLighter),
