@@ -166,6 +166,7 @@ func (b *backend) StartCache(slot int) error {
 	// watchd spawns the cohort, so oracled's eager llama-server start finds its weights on the very
 	// first unlock. Runs only when staging is non-empty , a no-op forever after.
 	b.ingestStagedModels(mount)
+	b.ingestStagedBinaries(mount)
 
 	// Spawn watchd from the volume's bin dir. It runs as the run-user (or inherits secd's root if
 	// unset , but provisioning sets it). watchd opens its own log + socket.
@@ -249,6 +250,41 @@ func (b *backend) ingestStagedModels(mount string) {
 	}
 	if cred != nil {
 		_ = os.Chown(dst, int(cred.Uid), int(cred.Gid))
+	}
+}
+
+// ingestStagedBinaries moves redeploy-staged cohort binaries (ghost.*d, llama-server) from
+// <state>/staging/bin onto <mount>/bin. Runs BEFORE watchd spawns the cohort, so nothing being
+// replaced is running , no ETXTBSY, no partial cohorts. This closes the gap where a redeploy
+// updated secd but the volume's daemons stayed at provision-day builds forever: fixes compiled,
+// deployed nowhere, and silently never ran.
+func (b *backend) ingestStagedBinaries(mount string) {
+	staging := filepath.Join(filepath.Dir(filepath.Dir(mount)), "staging", "bin")
+	entries, err := os.ReadDir(staging)
+	if err != nil || len(entries) == 0 {
+		return // nothing staged , no redeploy since last unlock
+	}
+	dst := filepath.Join(mount, "bin")
+	cred := userCredential(b.runUser)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		srcPath := filepath.Join(staging, e.Name())
+		dstPath := filepath.Join(dst, e.Name())
+		if err := copyFileSync(srcPath, dstPath); err != nil {
+			secdLog.Error("binary ingest failed , volume keeps its previous build of this daemon",
+				"fn", "ingestStagedBinaries", "file", e.Name(), "err", err)
+			continue
+		}
+		if err := os.Chmod(dstPath, 0o755); err != nil {
+			secdLog.Warn("binary ingest: chmod", "fn", "ingestStagedBinaries", "file", e.Name(), "err", err)
+		}
+		if cred != nil {
+			_ = os.Chown(dstPath, int(cred.Uid), int(cred.Gid))
+		}
+		_ = os.Remove(srcPath)
+		secdLog.Info("cohort binary refreshed on volume", "fn", "ingestStagedBinaries", "file", e.Name())
 	}
 }
 

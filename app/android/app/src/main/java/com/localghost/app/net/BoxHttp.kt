@@ -86,8 +86,9 @@ object BoxHttp {
     }
 
     /** POST a JSON body, returning the parsed JSON response. On Dispatchers.IO (see getJson). */
-    suspend fun postJson(ctx: Context, path: String, body: JSONObject): JSONObject = withContext(Dispatchers.IO) {
+    suspend fun postJson(ctx: Context, path: String, body: JSONObject, readTimeoutMs: Int = 30_000): JSONObject = withContext(Dispatchers.IO) {
         val conn = open(ctx, path, "POST")
+        conn.readTimeout = readTimeoutMs
         conn.doOutput = true
         conn.setRequestProperty("Content-Type", "application/json")
         conn.outputStream.use { it.write(body.toString().toByteArray()) }

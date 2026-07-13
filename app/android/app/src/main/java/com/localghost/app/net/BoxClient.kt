@@ -257,7 +257,9 @@ object BoxClient {
         val think = com.localghost.app.settings.AppSettings.thinkLevel(ctx)
         val body = org.json.JSONObject().put("prompt", prompt).put("think", think)
         val resp = try {
-            BoxHttp.postJson(ctx, "/v1/chat", body)
+            // Deep-think on CPU is legitimately MINUTES , the default 30s read timeout was killing
+            // real answers mid-generation and reporting "box did not answer" for a working model.
+            BoxHttp.postJson(ctx, "/v1/chat", body, readTimeoutMs = 6 * 60_000)
         } catch (e: Exception) {
             android.util.Log.w("LocalGhost", "chat failed: ${e.message}")
             emit(ChatChunk.Token("The box did not answer , it may be locked, or the model is still loading. Check Box Status."))

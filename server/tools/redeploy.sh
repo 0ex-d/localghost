@@ -64,6 +64,23 @@ install -m755 "$REPO/bin/ghost.secd" "$SYSTEM_BIN/ghost.secd.new"
 mv "$SYSTEM_BIN/ghost.secd.new" "$SYSTEM_BIN/ghost.secd"
 echo "staged $(sha256sum "$SYSTEM_BIN/ghost.secd" | cut -c1-12) -> $SYSTEM_BIN/ghost.secd"
 
+say "2b   stage the COHORT for the volume (ingested at next unlock)"
+# The ghost.*d daemons (and llama-server) live on the ENCRYPTED VOLUME and are seeded there at
+# provision , but a redeploy used to update only secd, leaving the volume's cohort permanently at
+# provision-day builds: new fixes compiled, staged nowhere, and silently never ran. Stage every
+# volume binary here; secd ingests staging/bin -> <mount>/bin during unlock, BEFORE the cohort
+# spawns, so there is no running-binary replacement problem at all.
+install -d -m700 /var/lib/ghost/staging/bin
+STAGED=0
+for f in "$REPO"/bin/ghost.* "$REPO"/bin/llama-server; do
+    [ -e "$f" ] || continue
+    base="$(basename "$f")"
+    [ "$base" = "ghost.secd" ] && continue   # secd lives in /opt, staged above, not on the volume
+    install -m755 "$f" "/var/lib/ghost/staging/bin/$base"
+    STAGED=$((STAGED + 1))
+done
+echo "staged $STAGED volume binaries -> ingested at next unlock"
+
 say "3/4  re-render + reload nginx"
 # RE-RENDER from the current template, then reload , a plain reload of a STALE config was the bug
 # that let a new client_max_body_size (needed for photo/video uploads) never reach disk while every

@@ -47,6 +47,7 @@ object CameraReader {
         after: Cursor,
         send: (Item, InputStream) -> Boolean,
         alreadyHave: (Item) -> Boolean,
+        shouldAbort: () -> Boolean,
         onItemStart: (Item) -> Unit,
         onBytes: (read: Long) -> Unit,
         onProgress: (sent: Int) -> Unit,
@@ -73,6 +74,14 @@ object CameraReader {
                     val item = Item(uri, cur.getString(nameCol) ?: "unknown",
                         cur.getLong(dateCol), id, cur.getLong(sizeCol))
 
+                    // Cooperative pause: checked PER ITEM, not just at run start. Before this, tapping
+                    // PAUSE during a long sweep did nothing visible , the flag only gated the NEXT
+                    // run, and a full-roll pass kept going for hours. Aborting between items is safe:
+                    // the cursor sits at the last confirmed item, so resume continues exactly there.
+                    if (shouldAbort()) {
+                        android.util.Log.i("LocalGhost", "sync $kind paused mid-run after $sent items")
+                        return CommandResult(Stream.CAMERA, kind, sent, bytes)
+                    }
                     onItemStart(item)
                     // PRE-UPLOAD EXISTENCE CHECK: hash the file locally (a local read , seconds for a
                     // video) and ask the box before streaming it (minutes for a video). alreadyHave

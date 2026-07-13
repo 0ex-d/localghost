@@ -27,6 +27,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -136,11 +137,21 @@ func main() {
 			if err := json.Unmarshal(args, &q); err != nil {
 				return ctlsock.Response{}, err
 			}
+			// CONTEXT INJECTION , the seam, now live-but-empty. Ask ghost.searchd for archive matches
+			// and prepend them; today the index is empty so this returns nothing and the request is a
+			// byte-identical passthrough. The moment framed's captions start flowing through ingest,
+			// chat answers become grounded in the archive with no further change here or above.
+			// Retrieval is time-boxed and failure is SILENT-but-logged: a slow or dead searchd must
+			// never stall or fail a chat that the model alone could answer.
+			input := q.Prompt
+			if ctxBlock := retrieveContext(runDir, q.Prompt); ctxBlock != "" {
+				input = ctxBlock + "\n\nUsing the context above only where it is actually relevant, answer:\n" + q.Prompt
+			}
 			resp, err := oc.Infer(oracle.Request{
 				Capability: "chat",
 				Class:      oracle.ClassLocalSmall,
 				Priority:   oracle.PriorityInteractive,
-				Input:      q.Prompt,
+				Input:      input,
 				Think:      q.Think,
 			})
 			if err != nil {
@@ -175,4 +186,56 @@ func envPort(key string) int {
 		}
 	}
 	return 0
+}
+
+// retrieveContext asks ghost.searchd for archive material matching the prompt and formats it as a
+// dated context block. Empty string when there is nothing (empty index, searchd down, timeout) , the
+// chat then proceeds exactly as a bare passthrough. 3s budget: retrieval must never hold a person's
+// question hostage. Capped small: six snippets is grounding, sixty is noise.
+func retrieveContext(runDir, prompt string) string {
+	c := ctlsock.NewClientTimeout("ghost.searchd", runDir, 3*time.Second)
+	resp, err := c.Call("search", map[string]any{"query": prompt, "limit": 6})
+	if err != nil {
+		slog.Debug("context retrieval unavailable, chat proceeds bare", "fn", "retrieveContext", "err", err)
+		return ""
+	}
+	var results []struct {
+		Label      string   `json:"label"`
+		CapturedAt int64    `json:"capturedAt"`
+		Snippets   []string `json:"snippets"`
+		OrigSource string   `json:"origSource"`
+	}
+	if err := json.Unmarshal(resp.Data, &results); err != nil || len(results) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("Context from the user's personal archive (retrieved automatically, may be irrelevant):")
+	n := 0
+	for _, r := range results {
+		line := r.Label
+		for _, sn := range r.Snippets {
+			if sn != "" {
+				line = sn
+				break
+			}
+		}
+		if line == "" {
+			continue
+		}
+		when := ""
+		if r.CapturedAt > 0 {
+			when = time.Unix(r.CapturedAt, 0).UTC().Format("2006-01-02") + ", "
+		}
+		src := r.OrigSource
+		if src == "" {
+			src = "archive"
+		}
+		b.WriteString("\n- [" + when + src + "] " + line)
+		n++
+	}
+	if n == 0 {
+		return ""
+	}
+	slog.Info("context injected into chat", "fn", "retrieveContext", "snippets", n)
+	return b.String()
 }

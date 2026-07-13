@@ -670,6 +670,12 @@ class MainActivity : ComponentActivity() {
         val now = System.currentTimeMillis()
         val last = AppSettings.lastAutoSyncAt(this)
         if (now - last < AUTO_SYNC_COOLDOWN_MS) return
+        val battery = getSystemService(android.os.BatteryManager::class.java)
+        val batteryLow = battery?.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY)?.let { it in 1..19 } == true
+        if (batteryLow) {
+            android.util.Log.i("LocalGhost", "auto sync skipped: battery low")
+            return
+        }
         if (hasImages() && hasLocation() && isUnmetered() && !sync.busy) {
             AppSettings.setLastAutoSyncAt(this, now)
             sync = sync.copy(busy = true, status = "Syncing in the background , you can lock the phone")
@@ -677,6 +683,11 @@ class MainActivity : ComponentActivity() {
             com.localghost.app.sync.SyncWorker.syncNow(this, manual = false)
             observeSyncWork()
         }
+    }
+
+    private fun isMeteredNow(): Boolean {
+        val cm = getSystemService(android.net.ConnectivityManager::class.java) ?: return false
+        return cm.isActiveNetworkMetered
     }
 
     private fun isUnmetered(): Boolean {
@@ -938,6 +949,14 @@ class MainActivity : ComponentActivity() {
 
     // --- sync (manual; allowed on any network) ---
     private fun startSync() {
+        // Wi-Fi only BY DEFAULT , the manual button included. Streaming a camera roll over 4G is a
+        // bill nobody meant to run up; the "sync over mobile data" toggle in settings is the single
+        // explicit opt-in, and it governs every path (periodic and auto via worker constraints,
+        // manual here).
+        if (!AppSettings.allowMobileSync(this) && isMeteredNow()) {
+            sync = sync.copy(status = "on mobile data , enable 'sync over mobile data' in settings, or join Wi-Fi")
+            return
+        }
         sync = sync.copy(status = null, isError = false)
         if (!hasImages() || !hasVideo()) { AppSettings.setEverAskedMedia(this, true); mediaLauncher.launch(imagePerms); return }
         if (!hasLocation()) { locationLauncher.launch(Manifest.permission.ACCESS_MEDIA_LOCATION); return }

@@ -104,7 +104,15 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             Result.success()
         } catch (e: Exception) {
             android.util.Log.w("LocalGhost", "background sync failed, will retry: ${e.message}")
-            Result.retry()
+            // BOUNDED retries. Unbounded Result.retry() turns any persistent per-run exception into
+            // an all-day scan/crash/backoff loop , invisible except as battery drain. Three attempts
+            // is honest effort; after that, stop and say so. The next scheduled/manual sync starts a
+            // fresh attempt count anyway.
+            if (runAttemptCount < 3) Result.retry()
+            else {
+                android.util.Log.w("LocalGhost", "sync failed $runAttemptCount times, giving up until next trigger")
+                Result.failure()
+            }
         }
         } finally {
             syncRunning.set(false)
@@ -165,7 +173,13 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         fun schedule(ctx: Context) {
             val net = if (AppSettings.allowMobileSync(ctx)) NetworkType.CONNECTED else NetworkType.UNMETERED
             val request = PeriodicWorkRequestBuilder<SyncWorker>(15, TimeUnit.MINUTES)
-                .setConstraints(Constraints.Builder().setRequiredNetworkType(net).build())
+                .setConstraints(Constraints.Builder()
+                    .setRequiredNetworkType(net)
+                    // A background archive job has no business draining a low battery , it can
+                    // always run later. Manual sync (the button) carries no such constraint: an
+                    // explicit human decision outranks the heuristic.
+                    .setRequiresBatteryNotLow(true)
+                    .build())
                 // Without an initial delay the FIRST periodic run fires the moment it is scheduled ,
                 // i.e. at app start, right alongside the auto-sync one-shot , two simultaneous
                 // uploads and two notifications. First periodic run waits a full interval.

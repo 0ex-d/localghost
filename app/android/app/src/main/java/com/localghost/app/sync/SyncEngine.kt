@@ -48,6 +48,7 @@ class SyncEngine(private val ctx: Context) {
         val result = withContext(Dispatchers.IO) {
             CameraReader.syncFrom(
                 ctx, cmd.kind, after,
+                shouldAbort = { com.localghost.app.settings.AppSettings.syncPaused(ctx) },
                 alreadyHave = { item ->
                     // Hash locally, ask the box. False on ANY doubt (hash failure, request failure ,
                     // framesHave already returns empty on error) so uncertainty uploads. A confirmed
