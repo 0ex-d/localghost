@@ -130,6 +130,8 @@ class MainActivity : ComponentActivity() {
     private var activeConvId by mutableStateOf<String?>(null)
     private var allowMobileSyncState by mutableStateOf(false)
     var thinkLevelState by mutableStateOf("")
+    var incognitoState by mutableStateOf(false)
+    private var currentChatId = 0L
     private val downloadProgress = mutableStateMapOf<String, Pair<Long, Long>>()
     private var installedModels by mutableStateOf<List<String>>(emptyList())
     private var activeModel by mutableStateOf<String?>(null)
@@ -286,6 +288,11 @@ class MainActivity : ComponentActivity() {
                         onTestNotification = ::testNotification,
                         allowMobileSync = allowMobileSyncState,
                         thinkLevel = thinkLevelState,
+                        incognito = incognitoState,
+                        onToggleIncognito = {
+                            incognitoState = !incognitoState
+                            if (incognitoState) currentChatId = 0L // a fresh incognito thread, nothing to append to
+                        },
                         onCycleThink = {
                             val next = when (AppSettings.thinkLevel(this)) {
                                 "" -> "brief"; "brief" -> "deep"; else -> ""
@@ -315,6 +322,7 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         sync = sync.copy(notificationsMuted = NotifyState.isMuted(this))
+        maybeAutoPrompt() // back from background on the gate: fire the fingerprint, no tap needed
     }
 
     override fun onStop() {
@@ -356,9 +364,10 @@ class MainActivity : ComponentActivity() {
     private suspend fun generateFromBox(text: String, atts: List<Attachment>) {
         var reply = ""
         var mems: List<String> = emptyList()
-        BoxClient.chat(messages.toList(), text, activeConvId, atts, chatCaps).collect { chunk ->
+        BoxClient.chat(incognito = incognitoState, chatId = if (incognitoState) 0L else currentChatId, messages.toList(), text, activeConvId, atts, chatCaps).collect { chunk ->
             when (chunk) {
                 is BoxClient.ChatChunk.Memories -> mems = chunk.ids
+                is BoxClient.ChatChunk.ChatId -> currentChatId = chunk.id
                 is BoxClient.ChatChunk.Token -> {
                     reply += chunk.text
                     if (messages.lastOrNull()?.role == Message.Role.GHOST)
@@ -765,6 +774,19 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** Coming back from the background lands on the gate , prompt the fingerprint IMMEDIATELY
+     *  instead of making the person tap UNLOCK first. Guarded so the prompt's own lifecycle (it
+     *  briefly backgrounds the activity) cannot re-fire it in a loop; a dismissed prompt leaves
+     *  the UNLOCK button as the manual fallback. */
+    private var autoPrompted = false
+    private fun maybeAutoPrompt() {
+        if (screen is Screen.Gate && !autoPrompted) {
+            autoPrompted = true
+            passBiometric()
+        }
+        if (screen !is Screen.Gate) autoPrompted = false
+    }
+
     // --- auth ---
     private fun passBiometric() {
         error = null
@@ -908,6 +930,7 @@ class MainActivity : ComponentActivity() {
     // the worker, not here. WorkManager's LiveData survives config changes; when the work leaves RUNNING
     // we clear busy and show a done/failed line. Progress detail lives in the foreground notification.
     private var syncObserved = false
+    private var runningSyncWork: String? = null
     private fun observeSyncWork() {
         // Observe ONCE. This is called from every manual and auto sync kick; each call previously
         // stacked another LiveData observer on the same unique work, so state writes multiplied with
@@ -915,8 +938,20 @@ class MainActivity : ComponentActivity() {
         if (syncObserved) return
         syncObserved = true
         val wm = androidx.work.WorkManager.getInstance(this)
-        wm.getWorkInfosForUniqueWorkLiveData("localghost.sync.now").observe(this) { infos ->
+        // Observe BOTH sync work names , the button's one-shot AND the 15-minute periodic. Before
+        // this, a background periodic run painted NOTHING on the sync screen: the UI only watched
+        // the one-shot name, so the screen sat empty while uploads visibly happened in the shade.
+        for (workName in listOf("localghost.sync.now", "localghost.sync")) {
+        wm.getWorkInfosForUniqueWorkLiveData(workName).observe(this) { infos ->
             val info = infos?.firstOrNull() ?: return@observe
+            // MERGE, don't fight: two observers feed one screen, and LiveData emits for the IDLE
+            // name too (ENQUEUED periodic, last week's SUCCEEDED one-shot). Without this gate every
+            // idle emission wiped the running one's progress , the bar flickered in and out on each
+            // item. Rule: while ANY name is RUNNING, only the RUNNING name may paint.
+            val running = info.state == androidx.work.WorkInfo.State.RUNNING
+            if (running) runningSyncWork = workName
+            if (!running && runningSyncWork != null && runningSyncWork != workName) return@observe
+            if (!running && runningSyncWork == workName) runningSyncWork = null
             // Live counts published by the worker (setProgressAsync) , fills the on-screen bar with the
             // same N/total the notification shows, so "54 / 2932" is visible in-app and off-screen alike.
             val done = info.progress.getInt("done", -1)
@@ -937,6 +972,7 @@ class MainActivity : ComponentActivity() {
                     sync = sync.copy(busy = false, status = "Sync cancelled")
                 else -> {} // ENQUEUED / RUNNING / BLOCKED: keep the "syncing in background" line
             }
+        }
         }
     }
 

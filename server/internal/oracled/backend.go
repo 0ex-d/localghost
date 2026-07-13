@@ -13,6 +13,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -46,14 +47,19 @@ type llamaBackend struct {
 	cfg    LlamaConfig
 	proc   *os.Process
 	client *http.Client
-	addr   string
+	// streamClient has NO overall timeout , a streamed deep-think runs for minutes by design, and
+	// killing it at 120s would truncate answers mid-sentence. Cancellation comes from the request
+	// context (the app hanging up propagates all the way here).
+	streamClient *http.Client
+	addr         string
 }
 
 // NewLlamaBackend prepares (does not start) the backend.
 func NewLlamaBackend(cfg LlamaConfig) *llamaBackend {
 	return &llamaBackend{
 		cfg:    cfg,
-		client: &http.Client{Timeout: 120 * time.Second}, // a 12B generation can be slow
+		client:       &http.Client{Timeout: 120 * time.Second}, // a 12B generation can be slow
+		streamClient: &http.Client{},                            // streaming: context-cancelled, never clock-killed
 		addr:   "127.0.0.1:" + strconv.Itoa(cfg.Port),
 	}
 }
@@ -151,16 +157,22 @@ func (b *llamaBackend) Infer(ctx context.Context, req oracle.Request) (oracle.Re
 		return b.inferMultimodal(ctx, req)
 	}
 	prompt, budget := applyThink(req.Think, req.Input, req.MaxTokens)
-	payload := map[string]any{"prompt": prompt}
+	// CHAT COMPLETIONS, not raw /completion , even for plain text. The raw endpoint sends the bare
+	// prompt with NO chat template, and an instruction-tuned model without its turn structure leaks
+	// template tokens into the output and rambles to the token cap (observed on device: garbage
+	// prefixes, minutes-long answers). /v1/chat/completions applies the template from the GGUF.
+	payload := map[string]any{
+		"messages": []map[string]any{{"role": "user", "content": prompt}},
+	}
 	if budget > 0 {
-		payload["n_predict"] = budget
+		payload["max_tokens"] = budget
 	}
 	if req.Temperature > 0 {
 		payload["temperature"] = req.Temperature
 	}
 	body, _ := json.Marshal(payload)
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"http://"+b.addr+"/completion", bytes.NewReader(body))
+		"http://"+b.addr+"/v1/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return oracle.Response{}, err
 	}
@@ -171,12 +183,19 @@ func (b *llamaBackend) Infer(ctx context.Context, req oracle.Request) (oracle.Re
 	}
 	defer resp.Body.Close()
 	var out struct {
-		Content string `json:"content"`
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return oracle.Response{}, err
 	}
-	return oracle.Response{Output: out.Content, Model: b.cfg.ModelName}, nil
+	if len(out.Choices) == 0 {
+		return oracle.Response{}, fmt.Errorf("chat/completions: empty choices")
+	}
+	return oracle.Response{Output: out.Choices[0].Message.Content, Model: b.cfg.ModelName}, nil
 }
 
 // inferMultimodal builds an OpenAI-style chat completion with image content parts.
@@ -283,4 +302,37 @@ func applyThink(level, input string, maxTokens int) (string, int) {
 	default:
 		return input, maxTokens
 	}
+}
+
+// StreamChat opens a streaming chat completion against the running llama-server and returns the raw
+// SSE body for the caller to translate. The chat template applies exactly as in the one-shot path;
+// applyThink shapes the prompt and budget the same way, so streamed and one-shot answers are the
+// same answer delivered differently.
+func (b *llamaBackend) StreamChat(ctx context.Context, prompt, think string) (io.ReadCloser, string, error) {
+	// No separate ready gate: if llama-server is down or still loading, the POST below fails fast
+	// (refused connection / non-200) and the caller reports it , one truth source, no stale flag.
+	p, budget := applyThink(think, prompt, 0)
+	payload := map[string]any{
+		"messages": []map[string]any{{"role": "user", "content": p}},
+		"stream":   true,
+	}
+	if budget > 0 {
+		payload["max_tokens"] = budget
+	}
+	body, _ := json.Marshal(payload)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		"http://"+b.addr+"/v1/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return nil, "", err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := b.streamClient.Do(httpReq)
+	if err != nil {
+		return nil, "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
+		return nil, "", fmt.Errorf("chat stream: http %d", resp.StatusCode)
+	}
+	return resp.Body, b.cfg.ModelName, nil
 }

@@ -113,8 +113,156 @@ func (s *Server) handleFramesLatest(w http.ResponseWriter, r *http.Request) {
 		s.appearsDown(w)
 		return
 	}
+	// Merge the stored device cursor: content-derived trust (exif/hint rows) OR the position the
+	// phone last reported , whichever is further. This is what makes an app reinstall RESUME instead
+	// of re-walking the roll: the phone's local cursor died with its prefs, the box's copy did not.
+	// NOTE units: frames store SECONDS, the device cursor stores the phone's MILLISECONDS , convert
+	// the frame side up rather than truncating the cursor down.
+	photoMs, videoMs := photoTs*1000, videoTs*1000
+	if cur, cerr := s.notif.CursorGet(mounted, "default"); cerr == nil {
+		if ts := cur["photo"]; ts > photoMs {
+			photoMs = ts
+		}
+		if ts := cur["video"]; ts > videoMs {
+			videoMs = ts
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{"photoTakenAt":%d,"videoTakenAt":%d}`, photoTs, videoTs)
+	fmt.Fprintf(w, `{"photoTakenAt":%d,"videoTakenAt":%d}`, photoMs/1000, videoMs/1000)
+}
+
+// handleSyncCursor , the phone reports its confirmed position after each run; the box remembers it
+// per device so a reinstall resumes instead of restarting. POST {"kind":"photo","ts":ms,"id":n}.
+func (s *Server) handleSyncCursor(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) {
+		s.appearsDown(w)
+		return
+	}
+	if r.Method == http.MethodGet {
+		s.handleSyncCursorGet(w, r)
+		return
+	}
+	if r.Method != http.MethodPost {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	var req struct {
+		Kind string `json:"kind"`
+		TS   int64  `json:"ts"`
+		ID   int64  `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || (req.Kind != "photo" && req.Kind != "video") {
+		s.appearsDown(w)
+		return
+	}
+	if err := s.notif.CursorSet(mounted, "default", req.Kind, req.TS, req.ID); err != nil {
+		secdLog.Warn("cursor store failed", "fn", "handleSyncCursor", "err", err)
+		s.appearsDown(w)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"ok":true}`))
+}
+
+// handleSyncCursorGet , THE cursor authority. The phone keeps NO persistent cursor: it asks here at
+// the start of every run, gets {kind:{ts,id}}, skips everything at-or-before, and reports progress
+// back via POST. One source of truth ends the split-brain class of sync bugs (reinstalls, cleared
+// prefs, diverged local state). ts is MILLISECONDS (the phone's MediaStore unit); the content-trust
+// side (exif/hint frames, stored in seconds) is scaled up and merged , id 0 on that side, which the
+// tuple comparison treats as "everything with this exact ts re-offers once", and the hash dedup
+// absorbs that overlap for free.
+func (s *Server) handleSyncCursorGet(w http.ResponseWriter, _ *http.Request) {
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	photoTs, videoTs, err := s.notif.FramesLatest(mounted)
+	if err != nil {
+		secdLog.Warn("cursor get: latest query failed", "fn", "handleSyncCursorGet", "err", err)
+		s.appearsDown(w)
+		return
+	}
+	type kcur struct {
+		TS  int64  `json:"ts"`
+		ID  int64  `json:"id"`
+		Src string `json:"src"` // which store answered , visible proof of the redis/postgres roundtrip
+	}
+	out := map[string]kcur{
+		"photo": {TS: photoTs * 1000, Src: "frames"},
+		"video": {TS: videoTs * 1000, Src: "frames"},
+	}
+	if cur, cerr := s.notif.CursorGetFull(mounted, "default"); cerr == nil {
+		for kind, c := range cur {
+			if c.TS > out[kind].TS {
+				out[kind] = kcur{TS: c.TS, ID: c.ID, Src: c.Src}
+			}
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+// handleFrameTag , user tag corrections. POST {"hash","tag","action":"add"|"remove"}. Tag text is
+// user input headed for the DB and later for prompts: lowercase, length-bounded, control chars out.
+// A remove is a TOMBSTONE server-side , the model can never re-propose what a human rejected.
+func (s *Server) handleFrameTag(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodPost {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	var req struct {
+		Hash   string `json:"hash"`
+		Tag    string `json:"tag"`
+		Action string `json:"action"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.appearsDown(w)
+		return
+	}
+	if len(req.Hash) != 32 || !isHex32(req.Hash) || (req.Action != "add" && req.Action != "remove") {
+		s.appearsDown(w)
+		return
+	}
+	tag := strings.ToLower(strings.TrimSpace(req.Tag))
+	if len(tag) < 2 || len(tag) > 24 || strings.ContainsAny(tag, "\n\t'\"") {
+		s.appearsDown(w)
+		return
+	}
+	if err := s.notif.TagSet(mounted, req.Hash, tag, req.Action); err != nil {
+		secdLog.Warn("tag set failed", "fn", "handleFrameTag", "err", err)
+		s.appearsDown(w)
+		return
+	}
+	secdLog.Info("tag corrected", "fn", "handleFrameTag", "action", req.Action)
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"ok":true}`))
+}
+
+// isHex32 , exactly 32 lowercase hex chars, the frame identity format everywhere.
+func isHex32(h string) bool {
+	for _, ch := range h {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+			return false
+		}
+	}
+	return len(h) == 32
 }
 
 // handleFramesExists , the pre-upload existence check. POST {"hashes":[...]} -> {"have":[...]}. The

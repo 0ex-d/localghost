@@ -31,6 +31,8 @@ import com.localghost.app.ui.theme.*
 fun ChatScreen(
     messages: List<Message>,
     streaming: Boolean,
+    incognito: Boolean = false,
+    onToggleIncognito: () -> Unit = {},
     localModeActive: Boolean,
     pendingAttachments: List<Attachment>,
     onSend: (String) -> Unit,
@@ -96,6 +98,14 @@ fun ChatScreen(
         // Not sendable while a reply is streaming: the round button already morphs into STOP, but the
         // keyboard's IME send action goes through canSend too , without this it could fire a second
         // generation mid-stream, interleaving two replies into the transcript.
+        // Incognito: this conversation never touches the box's chat tables. The state is visible ,
+        // an invisible privacy mode you cannot verify is worse than none.
+        Row(Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
+            Text(if (incognito) "◉ INCOGNITO , not saved" else "○ incognito off , conversation saved on the box",
+                color = if (incognito) Warning else GhostTextDim,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.clickable { onToggleIncognito() })
+        }
         val canSend = !streaming && (input.isNotBlank() || pendingAttachments.isNotEmpty())
         Column(
             Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp)

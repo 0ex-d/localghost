@@ -113,6 +113,37 @@ object BoxHttp {
         conn.inputStream
     }
 
+    /** POST JSON and stream the response line by line to [onLine] (return false to stop early).
+     *  For the chat event stream: long read timeout BETWEEN chunks (a deep-think can pause for
+     *  minutes before the first token on CPU), and disconnect on early stop so the box sees the
+     *  hang-up and cancels generation. */
+    suspend fun postStreamLines(
+        ctx: Context, path: String, body: JSONObject,
+        onLine: (String) -> Boolean,
+    ): Unit = withContext(Dispatchers.IO) {
+        val conn = open(ctx, path, "POST")
+        conn.readTimeout = 6 * 60_000
+        conn.doOutput = true
+        conn.setRequestProperty("Content-Type", "application/json")
+        conn.setRequestProperty("Accept", "text/event-stream")
+        try {
+            conn.outputStream.use { it.write(body.toString().toByteArray()) }
+            val code = conn.responseCode
+            if (code !in 200..299) {
+                android.util.Log.w("LocalGhost", "HTTP $code on $path")
+                throw java.io.IOException("HTTP $code")
+            }
+            conn.inputStream.bufferedReader().useLines { lines ->
+                for (line in lines) {
+                    if (line.isBlank()) continue
+                    if (!onLine(line)) break
+                }
+            }
+        } finally {
+            conn.disconnect()
+        }
+    }
+
     private fun readJson(conn: HttpsURLConnection): JSONObject {
         return try {
             val code = conn.responseCode
@@ -123,7 +154,9 @@ object BoxHttp {
                 android.util.Log.w("LocalGhost", "HTTP $code on ${conn.url.path}")
             }
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-            val text = stream?.bufferedReader()?.use(BufferedReader::readText) ?: "{}"
+            // 204 No Content and other empty bodies parse as an empty object , JSONObject("") throws,
+            // which made SUCCESSFUL tag edits report failure and roll back their optimistic UI update.
+            val text = (stream?.bufferedReader()?.use(BufferedReader::readText) ?: "{}").ifBlank { "{}" }
             JSONObject(text)
         } finally {
             conn.disconnect()

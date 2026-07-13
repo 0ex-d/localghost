@@ -148,6 +148,12 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             .setContentText(text)
             .setSmallIcon(com.localghost.app.R.drawable.ic_ghost_notif) // the ghost logo, monochrome notif variant
             .setOngoing(true)
+            // Show the moment the upload starts , without this, Android defers foreground-service
+            // notifications ~10 seconds, so short syncs looked like they never notified at all.
+            // setOngoing above makes it non-swipeable on Android 13 and below; 14+ lets the user
+            // swipe ANY foreground notification by system policy , the sync keeps running either
+            // way, and the notification returns on the next progress update.
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .setSilent(!manual) // manual can make its initial sound/heads-up; auto is always silent
             .setContentIntent(openApp)
         if (total > 0) builder.setProgress(total, done, false)

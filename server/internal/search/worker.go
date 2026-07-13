@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"time"
 )
 
@@ -16,6 +17,7 @@ type Worker struct {
 	Store    *Store
 	Embed    *Embedder // nil = vector-less; embed jobs are not claimed
 	Caption  Captioner
+	Tag      Tagger // nil = tags parked like vision-less captions
 	Ingester *Ingester
 	Log      *slog.Logger
 	Interval time.Duration
@@ -42,6 +44,8 @@ func (w *Worker) tick(ctx context.Context) {
 		}
 	}
 	for w.one(ctx, "caption", w.doCaption) {
+	}
+	for w.one(ctx, "tag", w.doTags) {
 	}
 	for w.one(ctx, "reconsolidate", w.doReconsolidate) {
 	}
@@ -127,7 +131,99 @@ func (w *Worker) doCaption(ctx context.Context, job *Job) error {
 	if err != nil {
 		return err
 	}
+	if err := w.Ingester.enqueueEmbeds(ids); err != nil {
+		return err
+	}
+	// Chain the tag pass , text-only over the caption we just made, so it rides the same background
+	// queue at a fraction of the vision pass's cost.
+	return w.Store.EnqueueJob("tag", map[string]any{
+		"origId": p.OrigID, "path": p.Path, "caption": caption,
+		"captured": captured.Unix(),
+	})
+}
+
+// doTags turns a caption into tag rows and a derived display name. The frame's identity (the 32-hex
+// content hash) comes from the ARCHIVE FILENAME , framed names archived files <hash>.<ext>, so the
+// path the ingest already carries is the bridge, and no schema or API grew for this.
+func (w *Worker) doTags(ctx context.Context, job *Job) error {
+	var p struct {
+		OrigID   int64  `json:"origId"`
+		Path     string `json:"path"`
+		Caption  string `json:"caption"`
+		Captured int64  `json:"captured"`
+	}
+	if err := json.Unmarshal(job.Payload, &p); err != nil {
+		return err
+	}
+	if w.Tag == nil {
+		return ErrNoVision // parks visibly, same contract as caption-without-vision
+	}
+	tags, err := w.Tag.Tags(ctx, p.Caption)
+	if err != nil {
+		return err
+	}
+	if len(tags) == 0 {
+		w.Log.Info("no tags extracted", "fn", "doTags", "origId", p.OrigID)
+		return nil
+	}
+	hash := frameHashFromPath(p.Path)
+	if hash == "" {
+		w.Log.Warn("tag pass: no frame hash in path, tags kept for search only", "fn", "doTags", "path", p.Path)
+	} else {
+		for _, tag := range tags {
+			// User corrections outrank the model FOREVER: a tag the user removed is a tombstone row
+			// (source 'user_removed'), and this NOT EXISTS keeps the model from resurrecting it.
+			if err := w.Store.db.Exec(
+				`INSERT INTO frame_tags (hash, tag, source, created_at)
+				 SELECT $1, $2, 'model', $3
+				 WHERE NOT EXISTS (SELECT 1 FROM frame_tags WHERE hash = $1 AND tag = $2)`,
+				hash, tag, time.Now().UTC().Unix()); err != nil {
+				return err
+			}
+		}
+		// Derived display name: date + the first three tags. Set only when EMPTY , a user rename
+		// (future endpoint) must never be overwritten by a background job.
+		name := time.Unix(p.Captured, 0).UTC().Format("2006-01-02")
+		n := 3
+		if len(tags) < n {
+			n = len(tags)
+		}
+		for _, t := range tags[:n] {
+			name += " " + t
+		}
+		if err := w.Store.db.Exec(
+			`UPDATE frames SET display_name = $1 WHERE hash = $2 AND (display_name IS NULL OR display_name = '')`,
+			name, hash); err != nil {
+			return err
+		}
+	}
+	// Tags into the search surface too , one extra chunk makes every tag retrievable.
+	captured := time.Unix(p.Captured, 0).UTC()
+	ids, err := w.Store.InsertChunksT0("image", p.OrigID, captured, []string{"tags: " + strings.Join(tags, ", ")})
+	if err != nil {
+		return err
+	}
 	return w.Ingester.enqueueEmbeds(ids)
+}
+
+// frameHashFromPath extracts the 32-hex content hash from an archive filename (<hash>.<ext>).
+func frameHashFromPath(path string) string {
+	base := path
+	if i := strings.LastIndexByte(base, '/'); i >= 0 {
+		base = base[i+1:]
+	}
+	if i := strings.LastIndexByte(base, '.'); i >= 0 {
+		base = base[:i]
+	}
+	if len(base) != 32 {
+		return ""
+	}
+	for _, r := range base {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return ""
+		}
+	}
+	return base
 }
 
 // doReconsolidate is spec 12 phase 2. The real regeneration belongs to the consolidation daemon

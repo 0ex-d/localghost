@@ -295,6 +295,46 @@ ALTER TABLE frames ADD COLUMN IF NOT EXISTS mime TEXT NOT NULL DEFAULT '';
 -- because pre-column rows fell back to upload mtime when EXIF was absent, and the where-was-I sync
 -- query must not trust those (one poisons MAX(taken_at) and the phone skips its whole roll).
 ALTER TABLE frames ADD COLUMN IF NOT EXISTS taken_src TEXT NOT NULL DEFAULT 'mtime';
+
+-- Per-device sync cursors. The phone's local cursor dies with every app reinstall; the box remembers
+-- for it. where-was-I answers max(trusted content time, stored cursor) , so a fresh install resumes
+-- instead of re-walking the whole roll. Keyed by device for the multi-device future; today "default".
+CREATE TABLE IF NOT EXISTS sync_cursors (
+    device TEXT NOT NULL,
+    kind   TEXT NOT NULL,
+    ts     BIGINT NOT NULL DEFAULT 0,
+    id     BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (device, kind)
+);
+
+-- Chat persistence. Incognito conversations simply never reach these tables.
+CREATE TABLE IF NOT EXISTS chats (
+    id         BIGSERIAL PRIMARY KEY,
+    title      TEXT NOT NULL DEFAULT '',
+    created_at BIGINT NOT NULL,
+    updated_at BIGINT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id      BIGSERIAL PRIMARY KEY,
+    chat_id BIGINT NOT NULL,
+    role    TEXT NOT NULL,
+    content TEXT NOT NULL,
+    ts      BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chat_messages_chat ON chat_messages (chat_id, id);
+
+-- Human-facing frame metadata. display_name is DERIVED (date + first tags) by the tag worker and
+-- only ever set when empty , a user rename wins forever. Archive files stay hash-named: bytes are
+-- the identity, names are decoration.
+ALTER TABLE frames ADD COLUMN IF NOT EXISTS display_name TEXT NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS frame_tags (
+    hash       TEXT NOT NULL,
+    tag        TEXT NOT NULL,
+    source     TEXT NOT NULL DEFAULT 'model', -- 'model' | 'user' | 'user_removed' (tombstone: model may not resurrect)
+    created_at BIGINT NOT NULL,
+    PRIMARY KEY (hash, tag)
+);
+CREATE INDEX IF NOT EXISTS frame_tags_tag ON frame_tags (tag);
 CREATE INDEX IF NOT EXISTS frames_taken_at ON frames (taken_at);
 CREATE INDEX IF NOT EXISTS frames_kind ON frames (kind);
 -- location_points: watch/phone position samples, the raw material for the daily GeoJSON path. The

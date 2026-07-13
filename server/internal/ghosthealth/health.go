@@ -66,10 +66,24 @@ type Server struct {
 	name    string
 	rep     Reporter
 	started time.Time
+	extra   []route
 }
 
 func NewServer(name string, rep Reporter) *Server {
 	return &Server{name: name, rep: rep, started: time.Now()}
+}
+
+// Handle registers an extra route on the daemon's loopback listener , the transport for daemon-to-
+// daemon STREAMING, which the one-shot ctlsock protocol cannot carry. Loopback-only binding (below)
+// keeps this inside the box; anything security-sensitive still goes through secd's edge. Must be
+// called before Serve.
+func (s *Server) Handle(pattern string, h http.HandlerFunc) {
+	s.extra = append(s.extra, route{pattern, h})
+}
+
+type route struct {
+	pattern string
+	h       http.HandlerFunc
 }
 
 // Serve binds 127.0.0.1:port ONLY and serves /health and /status until the process exits. Refuses a
@@ -83,6 +97,9 @@ func (s *Server) Serve(port int) error {
 		}
 		writeJSON(w, h)
 	})
+	for _, r := range s.extra {
+		mux.HandleFunc(r.pattern, r.h)
+	}
 	mux.HandleFunc("/status", func(w http.ResponseWriter, _ *http.Request) {
 		h := s.rep.Health()
 		if h.Name == "" {

@@ -3,12 +3,19 @@ package com.localghost.app.ui
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.border
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -29,6 +36,18 @@ import com.localghost.app.ui.theme.*
 fun GalleryScreen() {
     val ctx = LocalContext.current
     var frames by remember { mutableStateOf(listOf<BoxClient.GalleryFrame>()) }
+    var selected by remember { mutableStateOf<BoxClient.GalleryFrame?>(null) }
+
+    selected?.let { f ->
+        FrameDetailDialog(
+            frame = f,
+            onDismiss = { selected = null },
+            onTagsChanged = { hash, newTags ->
+                frames = frames.map { if (it.hash == hash) it.copy(tags = newTags) else it }
+                selected = selected?.let { s2 -> if (s2.hash == hash) s2.copy(tags = newTags) else s2 }
+            },
+        )
+    }
     var loading by remember { mutableStateOf(true) }
     var endReached by remember { mutableStateOf(false) }
     val thumbs = remember { mutableStateMapOf<String, android.graphics.Bitmap?>() }
@@ -79,7 +98,8 @@ fun GalleryScreen() {
                     }
                 }
                 Box(
-                    Modifier.aspectRatio(1f).background(VoidLighter),
+                    Modifier.aspectRatio(1f).background(VoidLighter)
+                        .clickable { selected = frame },
                     contentAlignment = Alignment.Center
                 ) {
                     val bmp = thumbs[frame.hash]
@@ -104,6 +124,91 @@ fun GalleryScreen() {
                     }
                 }
             }
+        }
+    }
+}
+
+
+/** Frame detail , the picture's identity card: derived name, date, and the TAGS, editable. Tag
+ *  removal tombstones on the box (the model never re-proposes it); adds are source 'user'. Edits
+ *  apply optimistically and roll back on failure , the box remains the truth. */
+@Composable
+private fun FrameDetailDialog(
+    frame: BoxClient.GalleryFrame,
+    onDismiss: () -> Unit,
+    onTagsChanged: (String, List<String>) -> Unit,
+) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var newTag by remember { mutableStateOf("") }
+    var bmp by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+    LaunchedEffect(frame.hash) {
+        bmp = BoxClient.frameThumb(ctx, frame.hash)?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
+    }
+    androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
+        Column(
+            Modifier.background(VoidBlack).border(1.dp, TerminalDim).padding(16.dp)
+                .verticalScroll(rememberScrollState())
+        ) {
+            Box(Modifier.fillMaxWidth().aspectRatio(1f).background(VoidLighter),
+                contentAlignment = Alignment.Center) {
+                val b = bmp
+                if (b != null) Image(bitmap = b.asImageBitmap(), contentDescription = null,
+                    contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
+                else Text(if (frame.kind == "video") "▶" else "·", color = TerminalGreen)
+            }
+            Spacer(Modifier.height(12.dp))
+            Text(
+                if (frame.name.isNotBlank()) frame.name else "(unnamed , tags pending)",
+                color = GhostText, style = MaterialTheme.typography.bodyLarge)
+            Text(
+                java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US)
+                    .format(java.util.Date(frame.takenAt * 1000)) + " · ${frame.kind}",
+                color = GhostTextDim, style = MaterialTheme.typography.bodySmall)
+            Spacer(Modifier.height(12.dp))
+            Text("TAGS", color = TerminalDim, style = MaterialTheme.typography.labelSmall)
+            Spacer(Modifier.height(6.dp))
+            if (frame.tags.isEmpty()) {
+                Text("none yet , the tag pass runs after captioning", color = GhostTextDim,
+                    style = MaterialTheme.typography.bodySmall)
+            }
+            frame.tags.forEach { tag ->
+                Row(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+                    Text("# $tag", color = TerminalGreen, modifier = Modifier.weight(1f),
+                        style = MaterialTheme.typography.bodyMedium)
+                    Text("✕", color = Warning, style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.clickable {
+                            val before = frame.tags
+                            onTagsChanged(frame.hash, before - tag) // optimistic
+                            scope.launch {
+                                if (!BoxClient.frameTag(ctx, frame.hash, tag, add = false))
+                                    onTagsChanged(frame.hash, before) // rollback , box is the truth
+                            }
+                        })
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                OutlinedTextField(
+                    value = newTag, onValueChange = { newTag = it.lowercase().take(24) },
+                    modifier = Modifier.weight(1f), singleLine = true,
+                    placeholder = { Text("add a tag", color = GhostTextDim) })
+                Spacer(Modifier.width(8.dp))
+                GhostButton("ADD", onClick = {
+                    val t = newTag.trim()
+                    if (t.length >= 2) {
+                        val before = frame.tags
+                        onTagsChanged(frame.hash, before + t) // optimistic
+                        newTag = ""
+                        scope.launch {
+                            if (!BoxClient.frameTag(ctx, frame.hash, t, add = true))
+                                onTagsChanged(frame.hash, before)
+                        }
+                    }
+                })
+            }
+            Spacer(Modifier.height(12.dp))
+            GhostButton("CLOSE", onClick = onDismiss, modifier = Modifier.fillMaxWidth())
         }
     }
 }

@@ -18,6 +18,12 @@
 package main
 
 import (
+	"bufio"
+	"sync"
+	"github.com/LocalGhostDao/localghost/server/internal/hw"
+	"github.com/LocalGhostDao/localghost/server/internal/poltergres"
+	"net/http"
+	"bytes"
 	"context"
 	"encoding/json"
 	"flag"
@@ -35,12 +41,65 @@ import (
 	"github.com/LocalGhostDao/localghost/server/internal/ghosthealth"
 	"github.com/LocalGhostDao/localghost/server/internal/oracle"
 	"github.com/LocalGhostDao/localghost/server/internal/rotlog"
+	"github.com/LocalGhostDao/localghost/server/internal/streamsock"
 	"github.com/LocalGhostDao/localghost/server/internal/svcconf"
 	"github.com/LocalGhostDao/localghost/server/internal/synth"
 	"github.com/LocalGhostDao/localghost/server/internal/synthd"
 )
 
 const service = "ghost.synthd"
+
+// chatDB is the lazy connection for chat persistence , same DB, same creds pattern as framed.
+// Nil until first non-incognito message; a connect failure logs and chats simply do not persist
+// (the conversation still works , persistence is a feature, not a dependency).
+var (
+	chatDB     *poltergres.ReadWrite
+	chatDBOnce sync.Once
+)
+
+func chatStore(mount string) *poltergres.ReadWrite {
+	chatDBOnce.Do(func() {
+		sc, err := hw.LoadServicesConfig(mount)
+		if err != nil {
+			slog.Warn("chat persistence off: services.conf", "fn", "chatStore", "err", err)
+			return
+		}
+		chatDB = poltergres.NewReadWrite(hw.SocketForMount(mount), sc.Postgres.Port, sc.Postgres.RWUser, sc.Postgres.RWPass, sc.Postgres.Name)
+	})
+	return chatDB
+}
+
+// chatPersist appends a message, creating the chat first when id is 0. Title , first words of the
+// first prompt, cheap and editable later; an oracled-generated title is a planned refinement.
+// Returns the chat id (0 = persistence unavailable). Never fails the conversation.
+func chatPersist(mount string, chatID int64, role, content string) int64 {
+	db := chatStore(mount)
+	if db == nil || content == "" {
+		return chatID
+	}
+	now := time.Now().UTC().UnixMilli()
+	if chatID == 0 {
+		title := content
+		if ws := strings.Fields(title); len(ws) > 6 {
+			title = strings.Join(ws[:6], " ") + "…"
+		}
+		if len(title) > 60 {
+			title = title[:60] + "…"
+		}
+		rows, err := db.Query(`INSERT INTO chats (title, created_at, updated_at) VALUES ($1,$2,$2) RETURNING id`, title, strconv.FormatInt(now, 10))
+		if err != nil || len(rows.Vals) == 0 || rows.Vals[0][0] == nil {
+			slog.Warn("chat create failed", "fn", "chatPersist", "err", err)
+			return 0
+		}
+		chatID, _ = strconv.ParseInt(*rows.Vals[0][0], 10, 64)
+	}
+	if _, err := db.Exec(`INSERT INTO chat_messages (chat_id, role, content, ts) VALUES ($1,$2,$3,$4)`,
+		strconv.FormatInt(chatID, 10), role, content, strconv.FormatInt(now, 10)); err != nil {
+		slog.Warn("chat append failed", "fn", "chatPersist", "err", err)
+	}
+	_, _ = db.Exec(`UPDATE chats SET updated_at = $1 WHERE id = $2`, strconv.FormatInt(now, 10), strconv.FormatInt(chatID, 10))
+	return chatID
+}
 
 func main() {
 	port := flag.Int("health-port", envPort("GHOST_HEALTH_PORT"), "loopback health/status port (required)")
@@ -82,18 +141,119 @@ func main() {
 		}
 		return ghosthealth.Health{Code: ghosthealth.OK, Name: service, Detail: d}
 	}))
-	go func() {
-		if err := srv.Serve(*port); err != nil {
-			lg.Error("health server stopped", "fn", "main", "err", err)
-		}
-	}()
-
 	runDir := os.Getenv("GHOST_RUN_DIR")
 	if runDir == "" {
 		if ld := os.Getenv("GHOST_LOG_DIR"); ld != "" {
 			runDir = filepath.Join(filepath.Dir(ld), "run")
 		}
 	}
+
+	// Streaming chat , the SAME seam as the ctlsock chat command (context gathered and injected
+	// here, transparency first on the wire), token-by-token. Event protocol downstream:
+	//   data: {"context":[...]}        first, always (empty array when nothing injected)
+	//   data: {"t":"..."}              tokens, oracled's translation of llama's SSE
+	//   data: {"done":true,"model":x}  last
+	streamMux := http.NewServeMux()
+	streamMux.HandleFunc("/chat", func(w http.ResponseWriter, r *http.Request) {
+		var q struct {
+			Prompt    string `json:"prompt"`
+			Think     string `json:"think"`
+			Incognito bool   `json:"incognito"`
+			ChatID    int64  `json:"chatId"`
+		}
+		if r.Method != http.MethodPost || json.NewDecoder(r.Body).Decode(&q) != nil || q.Prompt == "" {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		items := gatherContext(runDir, q.Prompt)
+		input := q.Prompt
+		if block := formatContext(items); block != "" {
+			input = block + "\n\nUsing the context above only where it is actually relevant, answer:\n" + q.Prompt
+		}
+		body, _ := json.Marshal(map[string]string{"prompt": input, "think": q.Think})
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
+			"http://ghost/chat", bytes.NewReader(body))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := streamsock.Client("ghost.oracled", runDir).Do(req)
+		if err != nil {
+			lg.Warn("chat stream: oracled unreachable", "fn", "chat", "err", err)
+			http.Error(w, "model unavailable", http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			lg.Warn("chat stream refused by oracled", "fn", "chat", "code", resp.StatusCode)
+			http.Error(w, "model unavailable", http.StatusBadGateway)
+			return
+		}
+		fl, _ := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		ctxEv, _ := json.Marshal(map[string]any{"context": items})
+		_, _ = w.Write([]byte("data: " + string(ctxEv) + "\n\n"))
+		if fl != nil {
+			fl.Flush()
+		}
+		// Persist the question now (incognito conversations never touch the tables); accumulate the
+		// answer from the token events while piping them through, save on done , and rewrite the
+		// done event to carry the chatId so the app can keep the conversation in one row.
+		mount := filepath.Dir(runDir)
+		chatID := q.ChatID
+		if !q.Incognito {
+			chatID = chatPersist(mount, chatID, "user", q.Prompt)
+		}
+		var answer strings.Builder
+		sc := bufio.NewScanner(resp.Body)
+		sc.Buffer(make([]byte, 64<<10), 64<<10)
+		for sc.Scan() {
+			line := sc.Text()
+			if strings.HasPrefix(line, "data: ") {
+				payload := strings.TrimPrefix(line, "data: ")
+				var tok struct {
+					T    string `json:"t"`
+					Done bool   `json:"done"`
+				}
+				if json.Unmarshal([]byte(payload), &tok) == nil {
+					if tok.T != "" {
+						answer.WriteString(tok.T)
+					}
+					if tok.Done {
+						if !q.Incognito {
+							chatID = chatPersist(mount, chatID, "assistant", answer.String())
+						}
+						var doneEv map[string]any
+						if err := json.Unmarshal([]byte(payload), &doneEv); err != nil || doneEv == nil {
+							// Our own oracled emits this event, so this is a should-never; if it
+							// happens anyway, a synthesized done beats a nil-map panic mid-stream.
+							lg.Warn("done event unparseable, synthesizing", "fn", "chat", "err", err)
+							doneEv = map[string]any{"done": true}
+						}
+						doneEv["chatId"] = chatID
+						nb, _ := json.Marshal(doneEv)
+						line = "data: " + string(nb)
+					}
+				}
+			}
+			_, _ = w.Write([]byte(line + "\n"))
+			if fl != nil {
+				fl.Flush()
+			}
+		}
+	})
+	go func() {
+		if err := streamsock.Serve(service, runDir, streamMux); err != nil {
+			lg.Error("stream socket stopped", "fn", "main", "err", err)
+		}
+	}()
+	go func() {
+		if err := srv.Serve(*port); err != nil {
+			lg.Error("health server stopped", "fn", "main", "err", err)
+		}
+	}()
 	if runDir != "" {
 		mount := filepath.Dir(runDir)
 		ctl := ctlsock.NewServer(service, runDir, lg)
@@ -250,8 +410,16 @@ func gatherContext(runDir, prompt string) []ctxItem {
 	if len(out) > 0 {
 		slog.Info("context injected into chat", "fn", "gatherContext", "items", len(out))
 	}
-	if out == nil {
-		out = []ctxItem{} // protocol: empty, never absent
+	if len(out) == 0 {
+		// SAMPLES , the index is empty (captions have not been generated yet), so these three are
+		// PLACEHOLDERS to exercise the transparency UI end to end. Every one is labeled sample and
+		// says so in why; they are NOT injected into the model's prompt (formatContext skips the
+		// sample source) , the display pipeline gets real traffic, the model gets nothing fake.
+		out = []ctxItem{
+			{When: "2026-04-12", Source: "sample", Snippet: "photo caption placeholder , captions land here once framed's backlog is processed", Why: "sample: index is empty"},
+			{When: "2026-05-03", Source: "sample", Snippet: "note placeholder , notes and voice memos will surface here", Why: "sample: index is empty"},
+			{When: "2026-06-21", Source: "sample", Snippet: "location placeholder , day summaries from your tracks", Why: "sample: index is empty"},
+		}
 	}
 	return out
 }
@@ -273,12 +441,20 @@ func formatContext(items []ctxItem) string {
 	}
 	var b strings.Builder
 	b.WriteString("Context from the user's personal archive (retrieved automatically, may be irrelevant):")
+	wrote := false
 	for _, it := range items {
+		if it.Source == "sample" {
+			continue // display-only placeholders , the model NEVER sees fake memories
+		}
+		wrote = true
 		when := ""
 		if it.When != "" {
 			when = it.When + ", "
 		}
 		b.WriteString("\n- [" + when + it.Source + "] " + it.Snippet)
+	}
+	if !wrote {
+		return ""
 	}
 	return b.String()
 }

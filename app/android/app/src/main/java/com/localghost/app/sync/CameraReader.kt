@@ -46,7 +46,8 @@ object CameraReader {
         kind: MediaKind,
         after: Cursor,
         send: (Item, InputStream) -> Boolean,
-        alreadyHave: (Item) -> Boolean,
+        checkHave: (List<String>) -> Set<String>,
+        onSkipExisting: (Item) -> Unit,
         shouldAbort: () -> Boolean,
         onItemStart: (Item) -> Unit,
         onBytes: (read: Long) -> Unit,
@@ -62,6 +63,11 @@ object CameraReader {
         var skippedExisting = 0
         var bytes = 0L
         try {
+            // Materialise the pending items first (metadata only , a few hundred bytes each), then
+            // process in GROUPS: hash the group, ONE existence round trip for all of it, then walk
+            // it with a local lookup. The per-item version made a skip-sweep feel glacial , 3000
+            // items meant 3000 HTTPS round trips; grouped, it is 75.
+            val pending = mutableListOf<Item>()
             ctx.contentResolver.query(c.collection, projection, sel, args, sort)?.use { cur ->
                 val idCol = cur.getColumnIndexOrThrow(c.id)
                 val nameCol = cur.getColumnIndexOrThrow(c.name)
@@ -71,25 +77,37 @@ object CameraReader {
                     val id = cur.getLong(idCol)
                     val base = ContentUris.withAppendedId(c.collection, id)
                     val uri = if (kind == MediaKind.PHOTO) MediaStore.setRequireOriginal(base) else base
-                    val item = Item(uri, cur.getString(nameCol) ?: "unknown",
-                        cur.getLong(dateCol), id, cur.getLong(sizeCol))
+                    pending.add(Item(uri, cur.getString(nameCol) ?: "unknown",
+                        cur.getLong(dateCol), id, cur.getLong(sizeCol)))
+                }
+            }
+            for (group in pending.chunked(40)) {
+                // Hash the group up front (photos: ~120MB of local reads, fast on flash; a video in
+                // the group pays its read here instead of later , same total I/O either way).
+                val hashes = HashMap<Long, String>()
+                for (item in group) {
+                    if (shouldAbort()) {
+                        android.util.Log.i("LocalGhost", "sync $kind paused mid-run after $sent items")
+                        return CommandResult(Stream.CAMERA, kind, sent, bytes)
+                    }
+                    hashOf(ctx, item)?.let { hashes[item.id] = it }
+                }
+                val have = checkHave(hashes.values.toList())
+                for (item in group) {
 
-                    // Cooperative pause: checked PER ITEM, not just at run start. Before this, tapping
-                    // PAUSE during a long sweep did nothing visible , the flag only gated the NEXT
-                    // run, and a full-roll pass kept going for hours. Aborting between items is safe:
-                    // the cursor sits at the last confirmed item, so resume continues exactly there.
+                    // Cooperative pause between items , resume continues from the cursor exactly.
                     if (shouldAbort()) {
                         android.util.Log.i("LocalGhost", "sync $kind paused mid-run after $sent items")
                         return CommandResult(Stream.CAMERA, kind, sent, bytes)
                     }
                     onItemStart(item)
-                    // PRE-UPLOAD EXISTENCE CHECK: hash the file locally (a local read , seconds for a
-                    // video) and ask the box before streaming it (minutes for a video). alreadyHave
-                    // returns false on ANY doubt , hash failure, check failure , so uncertainty
-                    // always falls through to a real upload; skipping only ever happens on the box's
-                    // explicit confirmation. A confirmed-existing item counts as sent: it IS on the
-                    // box, and the cursor should advance past it exactly as if just uploaded.
-                    if (alreadyHave(item)) {
+                    // Existence lookup from the group's single round trip. False on ANY doubt (hash
+                    // failed -> not in map; request failed -> empty set) so uncertainty uploads ,
+                    // skipping only ever happens on the box's explicit confirmation. A confirmed
+                    // item counts as sent and the caller advances the cursor past it.
+                    val h = hashes[item.id]
+                    if (h != null && have.contains(h)) {
+                        onSkipExisting(item)
                         sent++
                         onProgress(sent)
                         skippedExisting++

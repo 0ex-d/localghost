@@ -11,6 +11,9 @@
 package main
 
 import (
+	"bufio"
+	"strings"
+	"net/http"
 	"context"
 	"encoding/json"
 	"flag"
@@ -25,6 +28,7 @@ import (
 
 	"github.com/LocalGhostDao/localghost/server/internal/ctlsock"
 	"github.com/LocalGhostDao/localghost/server/internal/ghosthealth"
+	"github.com/LocalGhostDao/localghost/server/internal/streamsock"
 	"github.com/LocalGhostDao/localghost/server/internal/oracle"
 	"github.com/LocalGhostDao/localghost/server/internal/oracled"
 	"github.com/LocalGhostDao/localghost/server/internal/rotlog"
@@ -60,6 +64,14 @@ func defaultConf(mount string) conf {
 		LlamaPort:  18080, // loopback only; not advertised
 	}
 	return c
+}
+
+// runDirOf mirrors the cohort convention: GHOST_RUN_DIR when set, else <mount>/run.
+func runDirOf(mount string) string {
+	if rd := os.Getenv("GHOST_RUN_DIR"); rd != "" {
+		return rd
+	}
+	return filepath.Join(mount, "run")
 }
 
 func main() {
@@ -174,6 +186,72 @@ func main() {
 		return ghosthealth.Health{Code: ghosthealth.Degraded, Name: service, Detail: "model loading"}
 	})
 	srv := ghosthealth.NewServer(service, rep)
+	// Streaming chat on the service's UNIX STREAM SOCKET (streamsock) , ctlsock is one-shot and
+	// cannot stream, and a loopback TCP port would be "anything on localhost may connect"; the
+	// socket carries filesystem permissions and dies with the run dir. This path
+	// deliberately bypasses the priority queue (a person is watching tokens appear; background work
+	// arrives via ctlsock and llama-server's --parallel slots absorb the overlap). Events out are
+	// our own minimal protocol, one JSON per SSE data line: {"t":"token"} ... {"done":true,"model":x}.
+	streamMux := http.NewServeMux()
+	streamMux.HandleFunc("/chat", func(w http.ResponseWriter, r *http.Request) {
+		var q struct {
+			Prompt string `json:"prompt"`
+			Think  string `json:"think"`
+		}
+		if r.Method != http.MethodPost || json.NewDecoder(r.Body).Decode(&q) != nil || q.Prompt == "" {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		out, model, err := llama.StreamChat(r.Context(), q.Prompt, q.Think)
+		if err != nil {
+			lg.Warn("chat stream start failed", "fn", "chat", "err", err)
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer out.Close()
+		fl, _ := w.(http.Flusher)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		sc := bufio.NewScanner(out)
+		sc.Buffer(make([]byte, 64<<10), 64<<10)
+		for sc.Scan() {
+			line := sc.Text()
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			data := strings.TrimPrefix(line, "data: ")
+			if data == "[DONE]" {
+				break
+			}
+			var ev struct {
+				Choices []struct {
+					Delta struct {
+						Content string `json:"content"`
+					} `json:"delta"`
+				} `json:"choices"`
+			}
+			if json.Unmarshal([]byte(data), &ev) != nil || len(ev.Choices) == 0 {
+				continue
+			}
+			if t := ev.Choices[0].Delta.Content; t != "" {
+				b, _ := json.Marshal(map[string]string{"t": t})
+				_, _ = w.Write([]byte("data: " + string(b) + "\n\n"))
+				if fl != nil {
+					fl.Flush()
+				}
+			}
+		}
+		done, _ := json.Marshal(map[string]any{"done": true, "model": model})
+		_, _ = w.Write([]byte("data: " + string(done) + "\n\n"))
+		if fl != nil {
+			fl.Flush()
+		}
+	})
+	go func() {
+		if err := streamsock.Serve(service, runDirOf(*mount), streamMux); err != nil {
+			lg.Error("stream socket stopped", "fn", "main", "err", err)
+		}
+	}()
 	go func() {
 		if err := srv.Serve(*port); err != nil {
 			lg.Error("health server stopped", "fn", "main", "err", err)

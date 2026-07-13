@@ -98,6 +98,8 @@ fun MainShell(
     onToggleMobileSync: (Boolean) -> Unit,
     thinkLevel: String = "",
     onCycleThink: () -> Unit = {},
+    incognito: Boolean = false,
+    onToggleIncognito: () -> Unit = {},
     onToggleMute: (Boolean) -> Unit,
     boxConnected: Boolean,
     onLock: () -> Unit,
@@ -155,7 +157,7 @@ fun MainShell(
                 Box(Modifier.weight(1f).fillMaxWidth()
                     .padding(bottom = pad.calculateBottomPadding())) {
                     when (dest) {
-                        Dest.CHAT -> ChatScreen(messages, streaming, localModeActive, pendingAttachments,
+                        Dest.CHAT -> ChatScreen(incognito = incognito, onToggleIncognito = onToggleIncognito, messages, streaming, localModeActive, pendingAttachments,
                             onSend, onStopChat, { showAddSheet = true }, onClearAttachment,
                             brainLabel, brainIsBox, phoneModels, onPickBox, onPickPhoneModel,
                             { dest = Dest.MODELS })

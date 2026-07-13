@@ -146,6 +146,7 @@ func main() {
 	wk := &search.Worker{
 		Store: storeW, Embed: embedder,
 		Caption:  &search.VisionOracle{Client: oc, Timeout: 2 * time.Minute},
+		Tag:      &search.TagOracle{Client: oc, Timeout: time.Minute},
 		Ingester: ing, Log: lg,
 		Interval: time.Duration(cfg.PollSeconds) * time.Second,
 	}

@@ -3,6 +3,7 @@ package hw
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -112,10 +113,12 @@ func (s *NotifStore) FramesLatest(slot int) (photoTs, videoTs int64, err error) 
 
 // FrameRow is one gallery entry , enough for the app to render a grid cell and ask for the thumb.
 type FrameRow struct {
-	Hash    string `json:"hash"`
-	TakenAt int64  `json:"takenAt"`
-	Kind    string `json:"kind"`
-	Bytes   int64  `json:"bytes"`
+	Hash    string   `json:"hash"`
+	TakenAt int64    `json:"takenAt"`
+	Kind    string   `json:"kind"`
+	Bytes   int64    `json:"bytes"`
+	Name    string   `json:"name,omitempty"` // derived (date + tags) until a user rename exists
+	Tags    []string `json:"tags,omitempty"` // model + user tags; tombstoned removals excluded
 }
 
 // FramesList pages the archive newest-first: frames with taken_at strictly BEFORE the cursor (pass 0
@@ -133,7 +136,7 @@ func (s *NotifStore) FramesList(slot int, beforeTs int64, limit int) ([]FrameRow
 		limit = 60
 	}
 	rows, err := c.Query(
-		"SELECT hash, taken_at, kind, bytes FROM frames WHERE taken_at < $1 ORDER BY taken_at DESC LIMIT "+strconv.Itoa(limit),
+		"SELECT hash, taken_at, kind, bytes, display_name FROM frames WHERE taken_at < $1 ORDER BY taken_at DESC LIMIT "+strconv.Itoa(limit),
 		strconv.FormatInt(beforeTs, 10))
 	if err != nil {
 		return nil, err
@@ -153,9 +156,161 @@ func (s *NotifStore) FramesList(slot int, beforeTs int64, limit int) ([]FrameRow
 		if v[3] != nil {
 			r.Bytes, _ = strconv.ParseInt(*v[3], 10, 64)
 		}
+		if len(v) > 4 && v[4] != nil {
+			r.Name = *v[4]
+		}
 		out = append(out, r)
 	}
+	// One query attaches every page row's tags , per-row queries would be 60x the round trips for
+	// the same data. Tombstones ('user_removed') are how a correction outranks the model: excluded
+	// here, and the tag worker's NOT EXISTS keeps them from being re-inserted.
+	if len(out) > 0 {
+		in := "'" + out[0].Hash + "'"
+		idx := map[string]int{out[0].Hash: 0}
+		for i := 1; i < len(out); i++ {
+			in += ",'" + out[i].Hash + "'" // hashes are our own validated hex , no quoting risk
+			idx[out[i].Hash] = i
+		}
+		trows, terr := c.Query("SELECT hash, tag FROM frame_tags WHERE source != 'user_removed' AND hash IN (" + in + ") ORDER BY created_at")
+		if terr == nil {
+			for _, v := range trows.Vals {
+				if len(v) >= 2 && v[0] != nil && v[1] != nil {
+					if i, ok := idx[*v[0]]; ok {
+						out[i].Tags = append(out[i].Tags, *v[1])
+					}
+				}
+			}
+		}
+	}
 	return out, nil
+}
+
+// TagSet applies a user's tag correction. add: source 'user' (upsert over any tombstone , the user
+// changed their mind, that wins too). remove: the row becomes a 'user_removed' TOMBSTONE rather than
+// vanishing, so the model can never re-propose a tag a human explicitly rejected.
+func (s *NotifStore) TagSet(slot int, hash, tag, action string) error {
+	c, err := s.pg(slot)
+	if err != nil {
+		return err
+	}
+	now := strconv.FormatInt(time.Now().UTC().Unix(), 10)
+	switch action {
+	case "add":
+		return c.Exec(`INSERT INTO frame_tags (hash, tag, source, created_at) VALUES ($1,$2,'user',$3)
+			ON CONFLICT (hash, tag) DO UPDATE SET source = 'user', created_at = EXCLUDED.created_at`,
+			hash, tag, now)
+	case "remove":
+		return c.Exec(`INSERT INTO frame_tags (hash, tag, source, created_at) VALUES ($1,$2,'user_removed',$3)
+			ON CONFLICT (hash, tag) DO UPDATE SET source = 'user_removed', created_at = EXCLUDED.created_at`,
+			hash, tag, now)
+	}
+	return nil
+}
+
+// CursorSet stores a device's sync position , the box remembering where the phone was, so an app
+// reinstall (which wipes the phone's local cursor) resumes instead of re-walking the whole roll.
+func (s *NotifStore) CursorSet(slot int, device, kind string, ts, id int64) error {
+	c, err := s.pg(slot)
+	if err != nil {
+		return err
+	}
+	_, err = c.Exec(`INSERT INTO sync_cursors (device, kind, ts, id) VALUES ($1,$2,$3,$4)
+		ON CONFLICT (device, kind) DO UPDATE SET ts = GREATEST(sync_cursors.ts, EXCLUDED.ts),
+		id = CASE WHEN EXCLUDED.ts >= sync_cursors.ts THEN EXCLUDED.id ELSE sync_cursors.id END`,
+		device, kind, strconv.FormatInt(ts, 10), strconv.FormatInt(id, 10))
+	if err != nil {
+		return err
+	}
+	// Mirror to Redis , the read fast path AND a live exercise of apparedis on a real feature.
+	// Best effort: Postgres above is the durable truth; a Redis miss just means the next read
+	// falls back and says so (the "src" field in the cursor response makes this visible).
+	if rd, rerr := s.rds(slot); rerr == nil {
+		if serr := rd.Set("sync:cursor:"+device+":"+kind, strconv.FormatInt(ts, 10)+":"+strconv.FormatInt(id, 10)); serr != nil {
+			slog.Warn("cursor redis mirror failed (postgres holds it)", "fn", "CursorSet", "err", serr)
+		}
+	}
+	return nil
+}
+
+// CursorFull is a device's stored position for one kind , ms epoch + the last MediaStore id.
+type CursorFull struct {
+	TS  int64
+	ID  int64
+	Src string // which store answered: "redis" | "postgres"
+}
+
+// CursorGet returns the stored ts per kind for a device (ms epoch as stored by the app).
+func (s *NotifStore) CursorGet(slot int, device string) (map[string]int64, error) {
+	full, err := s.CursorGetFull(slot, device)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]int64{}
+	for k, v := range full {
+		out[k] = v.TS
+	}
+	return out, nil
+}
+
+// CursorGetFull returns ts AND id per kind , the tuple the phone resumes from. Src on each entry
+// names which store answered ("redis" fast path, "postgres" fallback) , the deliberate visible
+// roundtrip test of both datastores on a feature that actually matters.
+func (s *NotifStore) CursorGetFull(slot int, device string) (map[string]CursorFull, error) {
+	out := map[string]CursorFull{}
+	// Redis first. Both kinds present = done; any miss falls through to Postgres for everything.
+	if rd, rerr := s.rds(slot); rerr == nil {
+		hit := 0
+		for _, kind := range []string{"photo", "video"} {
+			v, ok, gerr := rd.Get("sync:cursor:" + device + ":" + kind)
+			if gerr != nil || !ok {
+				continue
+			}
+			parts := strings.SplitN(v, ":", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			ts, e1 := strconv.ParseInt(parts[0], 10, 64)
+			id, e2 := strconv.ParseInt(parts[1], 10, 64)
+			if e1 == nil && e2 == nil {
+				out[kind] = CursorFull{TS: ts, ID: id, Src: "redis"}
+				hit++
+			}
+		}
+		if hit == 2 {
+			return out, nil
+		}
+		out = map[string]CursorFull{} // partial redis view: take the durable store's word instead
+	}
+	c, err := s.pg(slot)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := c.Query("SELECT kind, ts, id FROM sync_cursors WHERE device = '" + sanitizeIdent(device) + "'")
+	if err != nil {
+		return nil, err
+	}
+	for _, v := range rows.Vals {
+		if len(v) >= 3 && v[0] != nil && v[1] != nil {
+			n, _ := strconv.ParseInt(*v[1], 10, 64)
+			var id int64
+			if v[2] != nil {
+				id, _ = strconv.ParseInt(*v[2], 10, 64)
+			}
+			out[*v[0]] = CursorFull{TS: n, ID: id, Src: "postgres"}
+		}
+	}
+	return out, nil
+}
+
+// sanitizeIdent strips anything outside [a-z0-9_-] , device ids are ours, but defense costs a line.
+func sanitizeIdent(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // FramesHave reports which of the given content hashes are already archived , the pre-upload

@@ -14,6 +14,7 @@ import com.localghost.app.sync.Cursor
 import com.localghost.app.sync.MediaKind
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.flow.flow
 import java.io.InputStream
 import org.json.JSONObject
@@ -237,57 +238,62 @@ object BoxClient {
     // --- CHAT (RAG over the life-model) ---
     sealed interface ChatChunk {
         data class Memories(val ids: List<String>) : ChatChunk
+        data class ChatId(val id: Long) : ChatChunk
         data class Token(val text: String) : ChatChunk
         data object Done : ChatChunk
     }
 
     fun chat(
+        incognito: Boolean = false,
+        chatId: Long = 0L,
         @Suppress("UNUSED_PARAMETER") history: List<Message>,
         prompt: String,
         @Suppress("UNUSED_PARAMETER") convId: String?,
         @Suppress("UNUSED_PARAMETER") attachments: List<Attachment> = emptyList(),
         @Suppress("UNUSED_PARAMETER") caps: ChatCapabilities = ChatCapabilities(),
-    ): Flow<ChatChunk> = flow {
-        // REAL end-to-end: the box's own model answers , app -> secd -> ghost.synthd (the retrieval
-        // seam, a passthrough until the memory index exists , NO context is injected yet, so answers
-        // come from the model alone) -> ghost.oracled -> llama-server on the encrypted volume.
-        // Non-streaming v1: the full answer arrives, then renders word-by-word. NO fake memories ,
-        // the Memories chunk returns when synthd actually retrieves some.
-        val ctx = appCtx ?: run { emit(ChatChunk.Token("(app context missing)")); emit(ChatChunk.Done); return@flow }
+    ): Flow<ChatChunk> = kotlinx.coroutines.flow.channelFlow {
+        // REAL STREAMING end-to-end: app -> secd -> ghost.synthd (context injection + transparency)
+        // -> ghost.oracled -> llama-server, tokens flowing back as they generate. Event protocol,
+        // one JSON per "data:" line: {"context":[...]} first (always, empty when nothing injected),
+        // {"t":"..."} per token, {"done":true,"model":x} last. NO fake word-splitting , what you see
+        // appearing is the model generating, and closing the chat cancels generation on the box.
+        val ctx = appCtx ?: run { send(ChatChunk.Token("(app context missing)")); send(ChatChunk.Done); return@channelFlow }
         val think = com.localghost.app.settings.AppSettings.thinkLevel(ctx)
-        val body = org.json.JSONObject().put("prompt", prompt).put("think", think)
-        val resp = try {
-            // Deep-think on CPU is legitimately MINUTES , the default 30s read timeout was killing
-            // real answers mid-generation and reporting "box did not answer" for a working model.
-            BoxHttp.postJson(ctx, "/v1/chat", body, readTimeoutMs = 6 * 60_000)
+        try {
+            BoxHttp.postStreamLines(ctx, "/v1/chat",
+                org.json.JSONObject().put("prompt", prompt).put("think", think)
+                    .put("incognito", incognito).put("chatId", chatId)) { line ->
+                if (!line.startsWith("data: ")) return@postStreamLines true
+                val o = try { org.json.JSONObject(line.removePrefix("data: ")) } catch (_: Exception) { return@postStreamLines true }
+                when {
+                    o.has("context") -> {
+                        val arr = o.optJSONArray("context")
+                        if (arr != null && arr.length() > 0) {
+                            val mems = (0 until arr.length()).mapNotNull { i ->
+                                val c = arr.optJSONObject(i) ?: return@mapNotNull null
+                                val when_ = c.optString("when", "")
+                                val snip = c.optString("snippet", "")
+                                if (snip.isBlank()) null
+                                else (if (when_.isNotBlank()) "$when_ , " else "") + c.optString("source", "archive") + ": " + snip
+                            }
+                            if (mems.isNotEmpty()) channel.trySendBlocking(ChatChunk.Memories(mems))
+                        }
+                        true
+                    }
+                    o.has("t") -> { channel.trySendBlocking(ChatChunk.Token(o.optString("t"))); true }
+                    o.optBoolean("done") -> {
+                        val cid = o.optLong("chatId", 0L)
+                        if (cid > 0) channel.trySendBlocking(ChatChunk.ChatId(cid))
+                        false
+                    }
+                    else -> true
+                }
+            }
         } catch (e: Exception) {
             android.util.Log.w("LocalGhost", "chat failed: ${e.message}")
-            emit(ChatChunk.Token("The box did not answer , it may be locked, or the model is still loading. Check Box Status."))
-            emit(ChatChunk.Done)
-            return@flow
+            send(ChatChunk.Token("The box did not answer , it may be locked, or the model is still loading. Check Box Status."))
         }
-        // TRANSPARENCY: the box tells us exactly what context it injected and why , show it before
-        // the answer, the way the old stub faked it, except now every line is real. Empty array =
-        // the model answered from its own knowledge alone, and we say nothing rather than pretend.
-        val ctxArr = resp.optJSONArray("context")
-        if (ctxArr != null && ctxArr.length() > 0) {
-            val memories = (0 until ctxArr.length()).mapNotNull { i ->
-                val o = ctxArr.optJSONObject(i) ?: return@mapNotNull null
-                val when_ = o.optString("when", "")
-                val src = o.optString("source", "archive")
-                val snip = o.optString("snippet", "")
-                if (snip.isBlank()) null
-                else (if (when_.isNotBlank()) "$when_ , " else "") + "$src: $snip"
-            }
-            if (memories.isNotEmpty()) emit(ChatChunk.Memories(memories))
-        }
-        val out = resp.optString("output", "")
-        if (out.isBlank()) {
-            emit(ChatChunk.Token("The model returned nothing , check Box Status for ghost.oracled."))
-        } else {
-            for (word in out.split(" ")) { emit(ChatChunk.Token("$word ")); delay(18) }
-        }
-        emit(ChatChunk.Done)
+        send(ChatChunk.Done)
     }
 
     // --- conversations (history, stored on the box) ---
@@ -417,10 +423,37 @@ object BoxClient {
     }
 
     // --- sync ---
+    /** The box's authoritative cursor per kind , the ONLY cursor. (0,0) on any failure: the run
+     *  then re-offers from the beginning and the hash dedup absorbs it , slow but never wrong. */
+    suspend fun getCursor(ctx: Context, kind: MediaKind): com.localghost.app.sync.Cursor = try {
+        val r = BoxHttp.getJson(ctx, "/v1/sync/cursor")
+        val o = r.optJSONObject(kind.wire)
+        val src = o?.optString("src") ?: "?"
+        val ts = o?.optLong("ts") ?: 0L
+        // The src is the visible proof of the box's datastore roundtrip: "redis" = the mirror fast
+        // path answered, "postgres" = the durable fallback, "frames" = content-derived only.
+        android.util.Log.i("LocalGhost", "resume ${kind.wire}: ts=$ts id=${o?.optLong("id") ?: 0L} via $src")
+        com.localghost.app.sync.Cursor(ts, o?.optLong("id") ?: 0L)
+    } catch (e: Exception) {
+        android.util.Log.w("LocalGhost", "cursor fetch failed, starting from 0 (dedup will skip): ${e.message}")
+        com.localghost.app.sync.Cursor(0L, 0L)
+    }
+
+    /** Report the confirmed sync position , the box's per-device memory of where we got to. */
+    suspend fun reportCursor(ctx: Context, kind: MediaKind, ts: Long, id: Long) {
+        try {
+            BoxHttp.postJson(ctx, "/v1/sync/cursor",
+                org.json.JSONObject().put("kind", kind.wire).put("ts", ts).put("id", id))
+        } catch (e: Exception) {
+            android.util.Log.w("LocalGhost", "cursor report failed (box will learn next run): ${e.message}")
+        }
+    }
+
     /** Which of these content hashes the box already has. EMPTY on any failure , the caller then
      *  uploads everything, because skipping on uncertainty is how photos get silently lost, while
      *  uploading a duplicate costs only bandwidth (the box dedups by the same hash). */
     suspend fun framesHave(ctx: Context, hashes: List<String>): Set<String> = try {
+        if (hashes.isEmpty()) return emptySet() // nothing to ask , skip the round trip entirely
         val body = org.json.JSONObject().put("hashes", org.json.JSONArray(hashes))
         val r = BoxHttp.postJson(ctx, "/v1/frames/exists", body)
         val arr = r.optJSONArray("have") ?: return emptySet()
@@ -431,7 +464,11 @@ object BoxClient {
     }
 
     /** One gallery entry from the box's archive. */
-    data class GalleryFrame(val hash: String, val takenAt: Long, val kind: String, val bytes: Long)
+    data class GalleryFrame(
+        val hash: String, val takenAt: Long, val kind: String, val bytes: Long,
+        val name: String = "",           // derived on the box: date + first tags; empty until tagged
+        val tags: List<String> = emptyList(),
+    )
 
     /** Page the archive newest-first. before=0 for the first page; pass the last row's takenAt to
      *  continue. Empty list on failure or end of archive. */
@@ -440,11 +477,28 @@ object BoxClient {
         val arr = r.optJSONArray("frames") ?: return emptyList()
         (0 until arr.length()).mapNotNull { i ->
             val o = arr.optJSONObject(i) ?: return@mapNotNull null
-            GalleryFrame(o.optString("hash"), o.optLong("takenAt"), o.optString("kind"), o.optLong("bytes"))
+            val tagsArr = o.optJSONArray("tags")
+            GalleryFrame(
+                o.optString("hash"), o.optLong("takenAt"), o.optString("kind"), o.optLong("bytes"),
+                name = o.optString("name", ""),
+                tags = if (tagsArr == null) emptyList()
+                       else (0 until tagsArr.length()).mapNotNull { t -> tagsArr.optString(t).takeIf { it.isNotBlank() } },
+            )
         }
     } catch (e: Exception) {
         android.util.Log.w("LocalGhost", "frames/list failed: ${e.message}")
         emptyList()
+    }
+
+    /** A user tag correction. Removes become TOMBSTONES on the box , the model can never re-propose
+     *  a tag a human rejected. True on success. */
+    suspend fun frameTag(ctx: Context, hash: String, tag: String, add: Boolean): Boolean = try {
+        BoxHttp.postJson(ctx, "/v1/frames/tag",
+            org.json.JSONObject().put("hash", hash).put("tag", tag).put("action", if (add) "add" else "remove"))
+        true
+    } catch (e: Exception) {
+        android.util.Log.w("LocalGhost", "tag ${if (add) "add" else "remove"} failed: ${e.message}")
+        false
     }
 
     /** One thumbnail's bytes (webp or jpeg). Null when the frame has none (videos) or on failure. */
@@ -466,7 +520,8 @@ object BoxClient {
     /** What to sync next. The cursor is LOCAL (SyncCursor prefs): the box does not yet track per-device
      *  positions, so the phone remembers where it got to and never re-sends the whole camera roll. */
     suspend fun nextCameraCommand(ctx: Context, kind: MediaKind): Command =
-        Command.SyncCamera(kind, com.localghost.app.sync.SyncCursor.get(ctx, kind))
+        // The cursor comes FROM THE BOX , the phone persists nothing. One authority, no split brain.
+        Command.SyncCamera(kind, getCursor(ctx, kind))
 
     /** REAL upload: stream the photo bytes to secd's spool endpoint over the pinned mTLS channel.
      *  202 Accepted = spooled for ghost.framed. The box ignores the name on purpose (it trusts only

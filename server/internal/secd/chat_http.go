@@ -7,12 +7,14 @@ package secd
 // JSON reply , llama-server streaming can be plumbed later without changing this route's shape.
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
+
+	"github.com/LocalGhostDao/localghost/server/internal/streamsock"
 	"time"
 
-	"github.com/LocalGhostDao/localghost/server/internal/ctlsock"
 )
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
@@ -40,18 +42,50 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		s.appearsDown(w)
 		return
 	}
-	// Generous client timeout: a deep-think answer on CPU is legitimately minutes, and the app shows
-	// its own progress. The unix-socket hop is local; the time is all model.
+	// STREAMING: pipe synthd's event stream (context first, then tokens, then done) straight to the
+	// app. secd adds authentication and appears-down; it does not touch the events. Cancellation
+	// flows: app hangs up -> this request context cancels -> synthd -> oracled -> llama stops
+	// generating, so an abandoned question stops burning CPU.
+	body, _ := json.Marshal(map[string]string{"prompt": req.Prompt, "think": req.Think})
 	runDir := fmt.Sprintf("%s/mnt/slot%d/run", s.cfg.StateDir, mounted)
-	c := ctlsock.NewClientTimeout("ghost.synthd", runDir, 5*time.Minute)
-	t0 := time.Now()
-	resp, err := c.Call("chat", map[string]string{"prompt": req.Prompt, "think": req.Think})
+	up, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
+		"http://ghost/chat", bytes.NewReader(body))
 	if err != nil {
-		secdLog.Warn("chat failed", "fn", "handleChat", "err", err)
+		s.appearsDown(w)
+		return
+	}
+	up.Header.Set("Content-Type", "application/json")
+	t0 := time.Now()
+	resp, err := streamsock.Client("ghost.synthd", runDir).Do(up)
+	if err != nil {
+		secdLog.Warn("chat failed: synthd unreachable", "fn", "handleChat", "err", err)
 		s.appearsDown(w) // model down / loading / synthd absent: indistinguishable from box-down, by design
 		return
 	}
-	secdLog.Info("chat answered", "fn", "handleChat", "took", time.Since(t0).Round(time.Millisecond).String())
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(resp.Data) // oracle.Response JSON: {output, model}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		secdLog.Warn("chat failed", "fn", "handleChat", "code", resp.StatusCode)
+		s.appearsDown(w)
+		return
+	}
+	fl, _ := w.(http.Flusher)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	buf := make([]byte, 4096)
+	for {
+		n, rerr := resp.Body.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return // app hung up , context cancellation stops the chain
+			}
+			if fl != nil {
+				fl.Flush()
+			}
+		}
+		if rerr != nil {
+			break
+		}
+	}
+	secdLog.Info("chat streamed", "fn", "handleChat", "took", time.Since(t0).Round(time.Millisecond).String())
 }
+

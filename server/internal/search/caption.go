@@ -12,6 +12,7 @@ package search
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/LocalGhostDao/localghost/server/internal/oracle"
@@ -73,4 +74,65 @@ func (v *VisionOracle) Caption(ctx context.Context, imagePath string) (string, e
 		return "", errors.New("caption implausibly short; job will retry")
 	}
 	return resp.Output, nil
+}
+
+// TagPrompt , tags are the retrieval and browsing surface a caption's prose cannot be. Short,
+// lowercase, concrete; the model proposes, the human corrects, and corrections outrank the model.
+const TagPrompt = `From this photo description, output 6-12 short lowercase tags: single words or two-word phrases, concrete things and places and activities only (no colours-as-tags, no counts, no sentences). Reply with ONLY the comma-separated tags.
+
+`
+
+// Tagger extracts tags from a caption. Text-only , cheap compared to the vision pass that made the
+// caption, so tagging rides the same background queue without meaningfully competing.
+type Tagger interface {
+	Tags(ctx context.Context, caption string) ([]string, error)
+}
+
+// TagOracle is the oracled-backed Tagger.
+type TagOracle struct {
+	Client  *oracle.Client
+	Timeout time.Duration
+}
+
+func (t *TagOracle) Tags(ctx context.Context, caption string) ([]string, error) {
+	_ = ctx
+	if t.Client == nil {
+		return nil, ErrNoVision
+	}
+	deadline := t.Timeout
+	if deadline <= 0 {
+		deadline = time.Minute
+	}
+	resp, err := t.Client.Infer(oracle.Request{
+		Capability: "tags",
+		Class:      oracle.ClassLocalSmall,
+		Priority:   oracle.PriorityBackground,
+		Input:      TagPrompt + caption,
+		MaxTokens:  128,
+		DeadlineMS: deadline.Milliseconds(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return ParseTags(resp.Output), nil
+}
+
+// ParseTags normalises the model's comma list: lowercase, trimmed, 2..24 chars, deduped, capped at
+// 12. Defensive by construction , a rambling model yields fewer tags, never garbage rows.
+func ParseTags(raw string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		tag := strings.ToLower(strings.TrimSpace(part))
+		tag = strings.Trim(tag, ".:;\"'`")
+		if len(tag) < 2 || len(tag) > 24 || strings.ContainsAny(tag, "\n\t") || seen[tag] {
+			continue
+		}
+		seen[tag] = true
+		out = append(out, tag)
+		if len(out) == 12 {
+			break
+		}
+	}
+	return out
 }

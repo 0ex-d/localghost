@@ -23,16 +23,9 @@ class SyncEngine(private val ctx: Context) {
     }
 
     private suspend fun exec(cmd: Command.SyncCamera, progress: Progress) {
-        // WHERE WAS I: ask the box for the newest taken_at it has archived for this kind, and fast-
-        // forward the local cursor to it if the box is ahead (killed app, reinstall, cursor loss). The
-        // local cursor stays authoritative when it is ahead (uploads the box has not processed yet).
-        val (photoMs, videoMs) = BoxClient.framesLatest(ctx)
-        val boxMs = if (cmd.kind == MediaKind.PHOTO) photoMs else videoMs
-        val after = if (boxMs > cmd.after.dateTaken) {
-            android.util.Log.i("LocalGhost", "sync ${cmd.kind}: box is ahead (box=$boxMs local=${cmd.after.dateTaken}), fast-forwarding cursor")
-            SyncCursor.advance(ctx, cmd.kind, boxMs, 0)
-            Cursor(boxMs, 0)
-        } else cmd.after
+        // Cursor came FROM THE BOX in nextCameraCommand , the single authority, ts+id per kind.
+        // The phone persists nothing; there is no local cursor to diverge, lose, or fast-forward.
+        val after = cmd.after
         val (total, totalBytes) = withContext(Dispatchers.IO) { CameraReader.count(ctx, cmd.kind, after) }
         // The one line that explains a "0 items" sync: was the camera roll EMPTY after the cursor
         // (query/permission/cursor issue), or full but nothing CONFIRMED (upload issue)? Both look
@@ -45,21 +38,30 @@ class SyncEngine(private val ctx: Context) {
         var doneBytes = 0L   // bytes from items already CONFIRMED sent this run
         var curRead = 0L
         var sawFailure = false // once an item fails, freeze the cursor so the gap is retried next run
+        // The run's confirmed position , IN MEMORY ONLY. The box is the persistent cursor: reported
+        // every 25 confirmations (a crash loses at most 25 items of position, re-covered by the hash
+        // dedup in seconds) and once more at the end of the run.
+        var confirmedTs = 0L
+        var confirmedId = 0L
+        var sinceReport = 0
+        val confirm: (CameraReader.Item) -> Unit = { item ->
+            if (!sawFailure) {
+                confirmedTs = item.dateTaken; confirmedId = item.id
+                if (++sinceReport >= 25) {
+                    sinceReport = 0
+                    kotlinx.coroutines.runBlocking { BoxClient.reportCursor(ctx, cmd.kind, confirmedTs, confirmedId) }
+                }
+            }
+        }
         val result = withContext(Dispatchers.IO) {
             CameraReader.syncFrom(
                 ctx, cmd.kind, after,
                 shouldAbort = { com.localghost.app.settings.AppSettings.syncPaused(ctx) },
-                alreadyHave = { item ->
-                    // Hash locally, ask the box. False on ANY doubt (hash failure, request failure ,
-                    // framesHave already returns empty on error) so uncertainty uploads. A confirmed
-                    // hit advances the cursor below via the same contiguous-streak rule: the send
-                    // lambda is never called for it, so advance here under the same conditions.
-                    val h = CameraReader.hashOf(ctx, item)
-                    val onBox = h != null &&
-                        kotlinx.coroutines.runBlocking { BoxClient.framesHave(ctx, listOf(h)) }.contains(h)
-                    if (onBox && !sawFailure) SyncCursor.advance(ctx, cmd.kind, item.dateTaken, item.id)
-                    onBox
+                checkHave = { hashes ->
+                    // One round trip per group of 40. Empty set on ANY failure , uncertainty uploads.
+                    kotlinx.coroutines.runBlocking { BoxClient.framesHave(ctx, hashes) }
                 },
+                onSkipExisting = { item -> confirm(item) },
                 send = { item, stream ->
                     val ok = kotlinx.coroutines.runBlocking { BoxClient.ingest(ctx, cmd.kind, item.name, stream, item.dateTaken) }
                     if (!ok) sawFailure = true
@@ -67,7 +69,7 @@ class SyncEngine(private val ctx: Context) {
                     // upload oldest-first; if #11 failed, we must not advance past it even though #12+
                     // succeed, or #11 would fall behind the cursor and never retry. Once anything has
                     // failed this run, stop advancing , the next run resumes at the first gap.
-                    if (ok && !sawFailure) SyncCursor.advance(ctx, cmd.kind, item.dateTaken, item.id)
+                    if (ok) confirm(item)
                     ok
                 },
                 onItemStart = { item ->
@@ -84,6 +86,9 @@ class SyncEngine(private val ctx: Context) {
         }
         android.util.Log.i("LocalGhost", "sync ${cmd.kind} finished: ${result.itemsSent} confirmed of $total")
         BoxClient.report(result)
+        // Final position report , the box's cursor now reflects this run; the next run (any device
+        // state, even a fresh install) resumes from here.
+        if (confirmedTs > 0) kotlinx.coroutines.runBlocking { BoxClient.reportCursor(ctx, cmd.kind, confirmedTs, confirmedId) }
         progress.onDone(result)
     }
 }
