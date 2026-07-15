@@ -53,9 +53,11 @@ if [ ! -x "$LLAMA_DIR/build/bin/llama-server" ]; then
     # STATIC single-binary CPU build. Static matters: the binary is seeded onto the ENCRYPTED VOLUME
     # (<mount>/bin/llama-server , everything except secd lives there and dies with the mount), and a
     # dynamic build would need its .so files carried along. -DGGML_NATIVE=ON tunes to THIS machine.
-    # LLAMA_SERVER_WEBUI=OFF trims the embedded browser chat UI where the option exists (cmake
-    # ignores unknown -D vars, so this is safe across versions). Belt and braces: oracled ALSO
-    # passes --no-webui at runtime unconditionally , this box's only chat surface is the app.
+    # LLAMA_SERVER_WEBUI=OFF asks cmake to skip the embedded browser UI, but MANY llama.cpp
+    # checkouts have no such option and cmake silently ignores unknown -D vars , so the UI may
+    # still BUILD (observed: it does). That costs build minutes, not security: the enforced
+    # guarantee is oracled passing --no-webui at RUNTIME, hardcoded, so the UI is never served
+    # regardless of what got compiled in.
     # GPU BUILD. The box carries an RTX 4070 (12GB, Ada = SM 8.9); building without -DGGML_CUDA=ON
     # produces a CPU-only llama-server that runs a 12B at single-digit tokens/s while the GPU idles ,
     # which is exactly the bug this line fixes (the first static build here made that mistake).
