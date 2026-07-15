@@ -47,7 +47,11 @@ CREATE TABLE IF NOT EXISTS search.originals_audio    PARTITION OF search.origina
 CREATE INDEX IF NOT EXISTS originals_captured_at ON search.originals (captured_at);
 CREATE INDEX IF NOT EXISTS originals_meta ON search.originals USING GIN (meta jsonb_path_ops);
 
-ALTER TABLE search.originals_image ADD COLUMN IF NOT EXISTS phash bigint;
+-- phash lives on the PARENT , Postgres forbids ALTER ... ADD COLUMN on a partition child ("cannot
+-- add column to a partition"), columns exist partition-tree-wide or not at all. Nullable and only
+-- ever populated for image rows; the index sits on the image partition, where every non-null value
+-- lives, so the other partitions pay nothing for it.
+ALTER TABLE search.originals ADD COLUMN IF NOT EXISTS phash bigint;
 CREATE INDEX IF NOT EXISTS originals_image_phash ON search.originals_image (phash);
 
 CREATE TABLE IF NOT EXISTS search.tombstones (
