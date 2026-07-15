@@ -12,6 +12,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -212,10 +215,25 @@ private fun MessageBubble(msg: Message) {
             .background(if (isUser) VoidLighter else Void)
             .border(1.dp, if (isUser) GhostBorder else GhostBorder, RectangleShape)
             .padding(12.dp)) {
-            // response body in soft grey (easy to read); user echo also grey
-            Text(msg.text, color = GhostText,
-                style = MaterialTheme.typography.bodyMedium)
+            // Both sides SELECTABLE , long-press selects, drag extends, the system toolbar copies
+            // fragments. GHOST replies render as markdown (the model emits ###, **, lists); the
+            // USER echo stays LITERAL: what they typed is what they see, asterisks and all.
+            SelectionContainer {
+                if (isUser) {
+                    Text(msg.text, color = GhostText,
+                        style = MaterialTheme.typography.bodyMedium)
+                } else {
+                    MarkdownText(msg.text)
+                }
+            }
         }
+        // Whole-message copy , selection handles fragments, this grabs the FULL raw text (markdown
+        // markers included, so a copied reply pastes as valid markdown elsewhere) in one tap.
+        val clipboard = LocalClipboardManager.current
+        Text("[ copy ]", color = TerminalDim, style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier
+                .padding(top = 2.dp)
+                .clickable { clipboard.setText(AnnotatedString(msg.text)) })
     }
 }
 
