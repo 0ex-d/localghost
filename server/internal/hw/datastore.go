@@ -829,7 +829,12 @@ func (d *DataStore) startRedis(slot int, c ServicesConfig) error {
 		"--daemonize", "yes",
 		"--pidfile", pidFile,
 		"--requirepass", c.Redis.Password,
-		"--save", "60", "1", // persist to the encrypted volume
+		// Persistence to the encrypted volume, two thresholds: an hour for a quiet box (one change
+		// is enough to earn the hourly snapshot), a minute only when writes are heavy (20+ changes ,
+		// sync bursts, caption runs). Constant 60s snapshots on an idle box were pure disk churn.
+		// The lock path additionally asks for an explicit save before teardown (see TODO: graceful
+		// shutdown), so these thresholds are about crash-loss windows, not lock-loss.
+		"--save", "3600", "1", "60", "20",
 	)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("redis start slot %d: %v: %s", slot, err, strings.TrimSpace(string(out)))

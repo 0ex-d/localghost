@@ -168,9 +168,11 @@ func runUnlock(b UnlockBackend, pin string, emit func(profile.Progress)) (openSl
 		return profile.NoSlot, err
 	}
 
-	// DAEMONS, READY
+	// DAEMONS. READY is deliberately NOT emitted here: the app enters on READY=Complete, and READY
+	// now means ready , the caller (unlockService.run) emits it once the MODEL stage resolves (loaded,
+	// failed, or the gate ceiling passes), so a cold unlock holds the app on "loading model" instead
+	// of dropping it into a chat that cannot answer yet.
 	emit(profile.Progress{Stage: profile.StageDaemons, State: profile.Complete})
-	emit(profile.Progress{Stage: profile.StageReady, State: profile.Complete})
 	return slot, nil
 }
 

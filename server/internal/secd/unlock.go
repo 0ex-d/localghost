@@ -68,7 +68,8 @@ func newUnlockService(backend UnlockBackend) *unlockService {
 		progress: map[profile.Stage]profile.StepState{},
 		order: []profile.Stage{
 			profile.StageResolve, profile.StageUnseal, profile.StageMount,
-			profile.StageStartDB, profile.StageStartCache, profile.StageDaemons, profile.StageReady,
+			profile.StageStartDB, profile.StageStartCache, profile.StageDaemons,
+			profile.StageModel, profile.StageReady,
 		},
 		openSlot: profile.NoSlot,
 	}
@@ -139,30 +140,41 @@ func (u *unlockService) run(pin string) {
 		u.mu.Unlock()
 	}
 	slot, err := runUnlock(u.backend, pin, emit)
-	u.mu.Lock()
 	if err != nil || slot == profile.NoSlot {
+		u.mu.Lock()
 		u.failed = "unlock failed"
 		if err != nil && err != errReject {
 			u.failed = err.Error()
 		}
-	} else {
-		u.done = true
-		u.openSlot = slot
-		// The MODEL stage is informational , done is already true, the gate opens, the box archives.
-		// This keeps reporting so the unlock screen (and anything polling) can show the 12B warming
-		// up instead of the model appearing ready-by-silence. oracled owns the actual load; we watch
-		// its health port and mirror the state into the stage map.
-		go u.watchModel(emit)
+		u.mu.Unlock()
+		return
 	}
+	// The MODEL stage BLOCKS done: the unlock screen holds on "loading model" until oracled reports
+	// the model live, so the box the app lands on is fully ready , chat answers on the first message
+	// instead of dead-airing while a 12B pages into VRAM. The costs are named: a cold unlock takes
+	// model-load time longer (tens of seconds on this hardware, bounded at 3 minutes), and the API
+	// gate opens that much later, so background frame uploads start after the load instead of during
+	// it. A warm unlock pays one health round trip , milliseconds. NEVER-ABORT still holds: a model
+	// that misses the ceiling marks the stage Errored and the unlock completes anyway , the box
+	// archives and serves, chat degraded, exactly as /v1/status will say.
+	// This runs OUTSIDE u.mu , the poll handler takes that lock every second to render progress.
+	u.waitModelReady(emit, 3*time.Minute)
+	// READY completes LAST, after MODEL resolves , runUnlock deliberately does not emit it (see the
+	// DAEMONS comment there). Whatever MODEL resolved to , loaded, or Errored past the ceiling , the
+	// box is now as ready as it is going to get, and done opens the gate.
+	emit(profile.Progress{Stage: profile.StageReady, State: profile.Complete})
+	u.mu.Lock()
+	u.done = true
+	u.openSlot = slot
 	u.mu.Unlock()
 }
 
-// watchModel mirrors oracled's model-load state into the MODEL unlock stage. Running while loading,
-// Complete when oracled reports healthy, Failed with the detail if oracled never gets there. Bounded:
-// a 12B with mlock takes a couple of minutes; ten is a hard ceiling, not an expectation.
-func (u *unlockService) watchModel(emit func(profile.Progress)) {
+// waitModelReady polls oracled's health port until the model reports live (Code 0), the deadline
+// passes, or nothing answers. Emits the MODEL stage: Running while loading, Complete when live,
+// Errored past the deadline. Synchronous by design , see run().
+func (u *unlockService) waitModelReady(emit func(profile.Progress), within time.Duration) {
 	emit(profile.Progress{Stage: profile.StageModel, State: profile.Running})
-	deadline := time.Now().Add(10 * time.Minute)
+	deadline := time.Now().Add(within)
 	client := &http.Client{Timeout: 2 * time.Second}
 	lastDetail := "no response from ghost.oracled"
 	for time.Now().Before(deadline) {
@@ -177,7 +189,7 @@ func (u *unlockService) watchModel(emit func(profile.Progress)) {
 			if derr == nil {
 				if body.Code == 0 {
 					emit(profile.Progress{Stage: profile.StageModel, State: profile.Complete})
-					secdLog.Info("model ready", "fn", "watchModel")
+					secdLog.Info("model ready", "fn", "waitModelReady")
 					return
 				}
 				if body.Detail != "" {
@@ -185,16 +197,10 @@ func (u *unlockService) watchModel(emit func(profile.Progress)) {
 				}
 			}
 		}
-		// A lock during the load ends the watch , no stage spam over a volume that is gone.
-		u.mu.Lock()
-		abandoned := u.openSlot == profile.NoSlot
-		u.mu.Unlock()
-		if abandoned {
-			return
-		}
-		time.Sleep(3 * time.Second)
+		time.Sleep(1 * time.Second)
 	}
-	secdLog.Warn("model did not become ready", "fn", "watchModel", "within", "10m", "last", lastDetail)
+	secdLog.Warn("model did not become ready , unlock completes without it (box serves, chat degraded)",
+		"fn", "waitModelReady", "within", within.String(), "last", lastDetail)
 	emit(profile.Progress{Stage: profile.StageModel, State: profile.Errored})
 }
 
