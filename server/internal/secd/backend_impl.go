@@ -159,6 +159,33 @@ func (b *backend) StartCache(slot int) error {
 				secdLog.Warn("chown volume dir for run user", "fn", "StartCache", "dir", dir, "err", err)
 			}
 		}
+		// Heal spool ownership. spoolBody chowns at commit NOW, but files spooled by an older secd
+		// landed root:root and framed (the run user) retries them forever with permission denied
+		// (observed live: two July-11 spool files stuck across four days of drains). One flat pass
+		// over frames/incoming, chowning only what the run user does not already own , bounded by
+		// the spool's size, which is transient by design.
+		spool := filepath.Join(mount, "frames", "incoming")
+		if entries, err := os.ReadDir(spool); err == nil {
+			healed := 0
+			for _, e := range entries {
+				if e.IsDir() {
+					continue
+				}
+				if fi, ferr := e.Info(); ferr == nil {
+					if st, ok := fi.Sys().(*syscall.Stat_t); ok && st.Uid == uint32(uid) {
+						continue
+					}
+				}
+				if cerr := os.Chown(filepath.Join(spool, e.Name()), uid, gid); cerr != nil {
+					secdLog.Warn("heal spool file ownership", "fn", "StartCache", "file", e.Name(), "err", cerr)
+					continue
+				}
+				healed++
+			}
+			if healed > 0 {
+				secdLog.Info("healed spool file ownership for the run user", "fn", "StartCache", "files", healed)
+			}
+		}
 	}
 
 	// Ingest provisioning-staged model weights onto the encrypted volume. tools/stage_models.sh
