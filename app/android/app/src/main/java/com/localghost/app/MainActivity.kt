@@ -835,13 +835,24 @@ class MainActivity : ComponentActivity() {
 
     private fun passBiometric() {
         error = null
+        // RECENT DEVICE UNLOCK SKIPS THE PROMPT. The gate key carries a 10s auth window, and the
+        // phone's own lockscreen unlock opens it , so "unlocked my phone onto the app" goes straight
+        // to the box PIN with zero extra taps and zero extra fingerprints. The OS vouches for the
+        // recency (the cipher only inits inside the window); nothing here trusts a timestamp we
+        // recorded ourselves.
+        if (AppLock.tryGateCipher() != null) { screen = Screen.Pin; return }
+        // Outside the window: the windowed-key prompt pattern , authenticate WITHOUT a CryptoObject
+        // (duration-bound keys do not do per-use crypto binding), then retry the cipher, which the
+        // just-completed authentication now allows.
         BiometricPrompt.Builder(this)
             .setTitle("Unlock LocalGhost").setSubtitle("Authenticate to enter your code")
             .setAllowedAuthenticators(BIOMETRIC_STRONG or DEVICE_CREDENTIAL).build()
-            .authenticate(BiometricPrompt.CryptoObject(AppLock.gateCipher()),
-                CancellationSignal(), mainExecutor,
+            .authenticate(CancellationSignal(), mainExecutor,
                 object : BiometricPrompt.AuthenticationCallback() {
-                    override fun onAuthenticationSucceeded(r: BiometricPrompt.AuthenticationResult) { screen = Screen.Pin }
+                    override fun onAuthenticationSucceeded(r: BiometricPrompt.AuthenticationResult) {
+                        if (AppLock.tryGateCipher() != null) screen = Screen.Pin
+                        else error = "authentication did not open the gate , try again"
+                    }
                     override fun onAuthenticationError(code: Int, msg: CharSequence) { error = msg.toString() }
                 })
     }

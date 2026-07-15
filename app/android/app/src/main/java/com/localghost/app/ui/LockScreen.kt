@@ -11,6 +11,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -72,12 +73,16 @@ fun LockScreen(
                         style = MaterialTheme.typography.bodyMedium)
                 }
                 Spacer(Modifier.height(24.dp))
-                Text("CAN'T REACH YOUR BOX? USE ON-PHONE MODELS ONLY", color = GhostTextDim,
+                // Bracketed + underlined: these are BUTTONS and looked like footnotes , the app's
+                // action grammar is [ VERB ], so secondary actions wear it too.
+                Text("[ CAN'T REACH YOUR BOX? USE ON-PHONE MODELS ONLY ]", color = GhostTextDim,
                     textAlign = TextAlign.Center, style = MaterialTheme.typography.labelMedium,
+                    textDecoration = TextDecoration.Underline,
                     modifier = Modifier.fillMaxWidth().clickable { onLocalOnly() })
                 Spacer(Modifier.height(12.dp))
-                Text("RE-SCAN THE BOX QR (RE-ENROL THIS PHONE)", color = GhostTextDim,
+                Text("[ RE-SCAN THE BOX QR , RE-ENROL THIS PHONE ]", color = GhostTextDim,
                     textAlign = TextAlign.Center, style = MaterialTheme.typography.labelMedium,
+                    textDecoration = TextDecoration.Underline,
                     modifier = Modifier.fillMaxWidth().clickable { onReenroll() })
             }
         }

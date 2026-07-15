@@ -8,16 +8,28 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 
 /**
- * Biometric gate key. A keystore AES key bound to user authentication — the biometric
- * prompt unlocks a CryptoObject around this cipher, proving a real fingerprint/face, not
- * just a tapped button.
+ * Biometric gate key. A keystore AES key bound to user authentication. The key carries a 10-SECOND
+ * validity window (setUserAuthenticationParameters(10, ...)): any device authentication , INCLUDING
+ * the phone's own lockscreen unlock , opens the window, and within it the cipher inits silently.
+ * That is the whole "just unlocked my phone onto the app" feature: the OS itself vouches for the
+ * recency, so the app skips its own fingerprint prompt and goes straight to the box PIN. Past the
+ * window, init throws UserNotAuthenticatedException and the app shows the biometric prompt (WITHOUT
+ * a CryptoObject , duration-bound keys use the time-window pattern, not per-use crypto binding),
+ * then retries.
+ *
+ * Alias is v2: the v1 key was per-use (duration 0), which is a different keystore contract; an
+ * existing install's v1 key is deleted and replaced. Safe , this key only gates the phone UI, the
+ * box PIN is the real credential, and the box never trusts this key.
  */
 object AppLock {
-    private const val ALIAS = "localghost.gate"
+    private const val ALIAS = "localghost.gate.v2"
+    private const val OLD_ALIAS = "localghost.gate"
     private const val TRANSFORM = "AES/GCM/NoPadding"
+    private const val AUTH_WINDOW_SECONDS = 10
 
     fun ensureKey() {
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        try { if (ks.containsAlias(OLD_ALIAS)) ks.deleteEntry(OLD_ALIAS) } catch (_: Exception) { /* gone is fine */ }
         if (ks.containsAlias(ALIAS)) return
         generate()
     }
@@ -30,29 +42,41 @@ object AppLock {
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
             .setUserAuthenticationRequired(true)
             .setUserAuthenticationParameters(
-                0, KeyProperties.AUTH_BIOMETRIC_STRONG or KeyProperties.AUTH_DEVICE_CREDENTIAL)
+                AUTH_WINDOW_SECONDS, KeyProperties.AUTH_BIOMETRIC_STRONG or KeyProperties.AUTH_DEVICE_CREDENTIAL)
             .build()
         KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
             .apply { init(spec) }.generateKey()
     }
 
-    fun gateCipher(): Cipher {
-        // Auth-bound keystore keys are PERMANENTLY invalidated when the user adds or removes a
-        // fingerprint (or changes the device credential). containsAlias stays true for an invalidated
-        // key, so ensureKey() never notices; the failure surfaces here, at cipher init, as
-        // KeyPermanentlyInvalidatedException , previously an uncaught crash at the lock screen on
-        // EVERY launch until app data was cleared. Recovery is safe and correct: this key only gates
-        // the phone UI (the box PIN is the real credential, and the box never trusts this key), so we
-        // delete the dead key, mint a fresh one bound to the CURRENT biometric set, and retry once.
-        return try {
+    /**
+     * The SILENT gate: a Cipher when the device was authenticated within the last 10 seconds (the
+     * lockscreen unlock that put the app on screen counts), null when a prompt is needed. Catch
+     * order matters: UserNotAuthenticatedException EXTENDS InvalidKeyException, so the window-miss
+     * case must be caught first or it would be misread as an invalidated key and trigger a
+     * pointless regenerate.
+     *
+     * A genuinely invalidated key (biometric enrolment changed) is regenerated here, bound to the
+     * CURRENT biometric set; the fresh key has no open window yet, so the retry lands in the
+     * prompt path , correct, since the biometric set just changed.
+     */
+    fun tryGateCipher(): Cipher? = try {
+        initCipher()
+    } catch (e: android.security.keystore.UserNotAuthenticatedException) {
+        null // outside the window: prompt needed
+    } catch (e: java.security.InvalidKeyException) {
+        val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+        try { ks.deleteEntry(ALIAS) } catch (_: Exception) { /* already gone is fine */ }
+        generate()
+        try {
             initCipher()
-        } catch (e: java.security.InvalidKeyException) {
-            val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-            try { ks.deleteEntry(ALIAS) } catch (_: Exception) { /* already gone is fine */ }
-            generate()
-            initCipher()
+        } catch (e2: android.security.keystore.UserNotAuthenticatedException) {
+            null
         }
     }
+
+    @Deprecated("per-use CryptoObject flow, replaced by tryGateCipher + windowed key", ReplaceWith("tryGateCipher()"))
+    fun gateCipher(): Cipher = tryGateCipher()
+        ?: throw java.security.InvalidKeyException("gate window closed; authenticate first")
 
     private fun initCipher(): Cipher {
         val ks = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }

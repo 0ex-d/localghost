@@ -5,15 +5,22 @@ Started 2026-07-15, the night the box learned to repair itself on unlock.
 
 ## App , chat rendering and UX
 
-- [ ] **1. Markdown rendering in chat** , stdlib only, no external dependencies. Hand-rolled
-      parser covering headers, bold, italic, inline code, fenced code blocks, bullet/numbered
-      lists, checkboxes. Anything exotic renders as plain text rather than breaking. (IN PROGRESS)
+- [x] **1. Markdown rendering in chat** , stdlib only. Range-based renderer, streaming-safe by
+      construction (all parsing in remember/runCatching, plain-text fallback, fuzzed over 3485
+      streaming prefixes). Includes SelectionContainer + per-message [ copy ]. Landed 2026-07-15.
 - [ ] **2. Expandable thinking** , the `thinking… (n)` counter already carries the reasoning
       events; tap to expand and read the reasoning text, collapsed by default.
 - [ ] **3. Auto-scroll during streaming** , follow the tail as tokens arrive; the moment the user
       scrolls up or holds, stop following; resume when they return to the bottom.
 - [ ] **4. Keyboard inset bug** , the input box floats far above the keyboard. Almost certainly
       IME insets applied twice (window + composable padding); one has to go.
+
+- [x] **18. Skip the app fingerprint after a recent device unlock** , gate key rebound with a
+      10s auth-validity window (lockscreen unlock opens it); silent cipher path goes straight to
+      the box PIN, prompt only outside the window. Landed 2026-07-15.
+- [x] **19. Lock-screen links styled as buttons** ([ brackets ] + underline). Landed 2026-07-15.
+- [x] **20. Scanner assembly burst** , 100ms sampling while capturing the rotating enrol frames
+      (bounded burst, thermal tuning kept for indefinite hunting). Landed 2026-07-15.
 
 ## App/box , chat continuity
 

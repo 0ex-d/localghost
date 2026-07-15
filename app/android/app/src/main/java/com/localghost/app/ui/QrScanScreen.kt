@@ -234,7 +234,21 @@ fun QrScanScreen(
                 // throttle, which FEELS like the scanner getting worse the longer you try. 250ms hot
                 // still lands ~12 attempts per rotating frame (3.2s hold); 600ms is plenty to notice
                 // a code entering view within a blink.
-                val interval = if (codeInView) 250L else 600L
+                //
+                // EXCEPT during multi-frame ASSEMBLY: capturing the rotating enrol sequence is a
+                // bounded burst measured in seconds, not the indefinite hunt the thermal tuning
+                // protects against , and every rotating frame that fails to decode inside its own
+                // display window costs a FULL cycle of the rotation (the observed "go through the
+                // codes once or twice"). 100ms during assembly is ~32 attempts per displayed frame,
+                // so a marginal decode gets nearly three times the chances before the display moves
+                // on. The burst ends when assembly does, so nothing here can cook the phone.
+                val assembling = capturedFrames.isNotEmpty() &&
+                    frameProgress?.let { it.first < it.second } == true
+                val interval = when {
+                    assembling -> 100L
+                    codeInView -> 250L
+                    else -> 600L
+                }
                 if (now - timing.lastDecodeAt < interval) {
                     proxy.close()
                     return@setAnalyzer
