@@ -293,7 +293,11 @@ func applyThink(level, input string, maxTokens int) (string, int) {
 		if maxTokens == 0 {
 			maxTokens = 2048 // reasoning is billed against max_tokens , CPU-era 768 starved answers
 		}
-		return "Think through this briefly before answering , a few lines of reasoning, then a clear answer.\n\n" + input, maxTokens
+		// The <think>...</think> wrapper is load-bearing: ghost.synthd splits tokens inside it into
+		// reasoning events for the app's thinking panel, and keeps only what follows as the answer.
+		// Without the explicit delimiter this model reasons in-band and the reasoning leaks into the
+		// visible answer (and the panel stays empty).
+		return "Put your reasoning between <think> and </think>, then give a clear answer after </think>. Reason briefly , a few lines.\n\n" + input, maxTokens
 	case "deep":
 		if maxTokens == 0 {
 			// Reasoning tokens count INSIDE this cap: at 2048 a thorough think consumed the whole
@@ -301,7 +305,7 @@ func applyThink(level, input string, maxTokens int) (string, int) {
 			// 4070 makes 8192 cheap; better a long think than a silent one.
 			maxTokens = 8192
 		}
-		return "Reason through this carefully and at length before answering. Work step by step, consider what could be wrong, then give your best answer.\n\n" + input, maxTokens
+		return "Put your reasoning between <think> and </think>, then give your best answer after </think>. Reason carefully and at length: work step by step, consider what could be wrong.\n\n" + input, maxTokens
 	default:
 		return input, maxTokens
 	}

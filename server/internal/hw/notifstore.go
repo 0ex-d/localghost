@@ -119,6 +119,7 @@ type FrameRow struct {
 	Bytes   int64    `json:"bytes"`
 	Name    string   `json:"name,omitempty"` // derived (date + tags) until a user rename exists
 	Tags    []string `json:"tags,omitempty"` // model + user tags; tombstoned removals excluded
+	Place   string   `json:"place,omitempty"` // reverse-geocoded hierarchy, "" until geo data lands
 }
 
 // FramesList pages the archive newest-first: frames with taken_at strictly BEFORE the cursor (pass 0
@@ -136,7 +137,7 @@ func (s *NotifStore) FramesList(slot int, beforeTs int64, limit int) ([]FrameRow
 		limit = 60
 	}
 	rows, err := c.Query(
-		"SELECT hash, taken_at, kind, bytes, display_name FROM frames WHERE taken_at < $1 ORDER BY taken_at DESC LIMIT "+strconv.Itoa(limit),
+		"SELECT hash, taken_at, kind, bytes, display_name, place FROM frames WHERE taken_at < $1 ORDER BY taken_at DESC LIMIT "+strconv.Itoa(limit),
 		strconv.FormatInt(beforeTs, 10))
 	if err != nil {
 		return nil, err
@@ -158,6 +159,9 @@ func (s *NotifStore) FramesList(slot int, beforeTs int64, limit int) ([]FrameRow
 		}
 		if len(v) > 4 && v[4] != nil {
 			r.Name = *v[4]
+		}
+		if len(v) > 5 && v[5] != nil {
+			r.Place = *v[5]
 		}
 		out = append(out, r)
 	}
@@ -841,3 +845,405 @@ func (s *NotifStore) redis(slot int, args ...string) error {
 
 
 
+
+// ChatRename sets a conversation's title. The one WRITE in the otherwise read-only chats surface
+// secd exposes , justified the same way the tag override was: a title the PERSON chose outranks the
+// derived one, permanently (synthd's auto-titling only ever fills empty titles, so a rename sticks).
+// Returns whether a row actually changed, so the endpoint can appear-down on a bogus id instead of
+// answering ok about nothing.
+func (s *NotifStore) ChatRename(slot int, chatID int64, title string) (bool, error) {
+	db, err := s.pg(slot)
+	if err != nil {
+		return false, err
+	}
+	rows, err := db.Query(
+		"UPDATE chats SET title = $1, updated_at = (extract(epoch from now())*1000)::bigint WHERE id = $2 RETURNING id",
+		title, chatID)
+	if err != nil {
+		return false, err
+	}
+	return len(rows.Vals) > 0, nil
+}
+
+// ChatDelete removes a conversation and its messages. Deletion is the person's call and it is
+// REAL: rows gone, not flagged , the box stores conversations for the person, not about them.
+// Messages first, then the chat, so a failure between the two leaves an empty chat (visible,
+// deletable again) rather than orphaned messages under a missing chat.
+func (s *NotifStore) ChatDelete(slot int, chatID int64) (bool, error) {
+	db, err := s.pg(slot)
+	if err != nil {
+		return false, err
+	}
+	if err := db.Exec("DELETE FROM chat_messages WHERE chat_id = $1", chatID); err != nil {
+		return false, err
+	}
+	rows, err := db.Query("DELETE FROM chats WHERE id = $1 RETURNING id", chatID)
+	if err != nil {
+		return false, err
+	}
+	return len(rows.Vals) > 0, nil
+}
+
+// GeoPoint is one photo location for the map overlay.
+type GeoPoint struct {
+	Hash    string  `json:"hash"`
+	Lat     float64 `json:"lat"`
+	Lon     float64 `json:"lon"`
+	TakenAt int64   `json:"taken_at"`
+	Place   string  `json:"place"`
+}
+
+// FramesGeo returns GPS-bearing frames inside a bounding box (or everything geotagged when the box
+// is the whole world), newest first, capped. The map overlay's data: dots, not imagery.
+func (s *NotifStore) FramesGeo(slot int, minLat, maxLat, minLon, maxLon float64, limit int) ([]GeoPoint, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > 5000 {
+		limit = 5000
+	}
+	rows, err := c.Query(
+		"SELECT hash, lat, lon, taken_at, place FROM frames WHERE has_gps AND lat BETWEEN $1 AND $2 AND lon BETWEEN $3 AND $4 ORDER BY taken_at DESC LIMIT "+strconv.Itoa(limit),
+		minLat, maxLat, minLon, maxLon)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]GeoPoint, 0, len(rows.Vals))
+	for _, v := range rows.Vals {
+		if len(v) < 5 || v[0] == nil {
+			continue
+		}
+		g := GeoPoint{Hash: *v[0]}
+		if v[1] != nil {
+			g.Lat, _ = strconv.ParseFloat(*v[1], 64)
+		}
+		if v[2] != nil {
+			g.Lon, _ = strconv.ParseFloat(*v[2], 64)
+		}
+		if v[3] != nil {
+			g.TakenAt, _ = strconv.ParseInt(*v[3], 10, 64)
+		}
+		if v[4] != nil {
+			g.Place = *v[4]
+		}
+		out = append(out, g)
+	}
+	return out, nil
+}
+
+// FramesSearch matches frames whose PLACE hierarchy, display name, or tags contain every term ,
+// "waterfall vancouver island" finds a photo tagged waterfall whose place mentions Vancouver
+// Island, in any combination across the three surfaces. AND semantics per term, ILIKE per surface,
+// newest first. This is the location-and-tags search; free-prose search stays with ghost.searchd.
+func (s *NotifStore) FramesSearch(slot int, q string, limit int) ([]FrameRow, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 60
+	}
+	terms := strings.Fields(strings.TrimSpace(q))
+	if len(terms) > 8 {
+		terms = terms[:8]
+	}
+	if len(terms) == 0 {
+		return nil, nil
+	}
+	sql := `SELECT f.hash, f.taken_at, f.kind, f.bytes, f.display_name FROM frames f WHERE true`
+	args := []any{}
+	for i, t := range terms {
+		sql += ` AND (f.place ILIKE $` + strconv.Itoa(i+1) +
+			` OR f.display_name ILIKE $` + strconv.Itoa(i+1) +
+			` OR EXISTS (SELECT 1 FROM frame_tags ft WHERE ft.hash = f.hash AND ft.source <> 'user_removed' AND ft.tag ILIKE $` + strconv.Itoa(i+1) + `))`
+		args = append(args, "%"+t+"%")
+	}
+	sql += ` ORDER BY f.taken_at DESC LIMIT ` + strconv.Itoa(limit)
+	rows, err := c.Query(sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]FrameRow, 0, len(rows.Vals))
+	for _, v := range rows.Vals {
+		if len(v) < 5 || v[0] == nil {
+			continue
+		}
+		r := FrameRow{Hash: *v[0]}
+		if v[1] != nil {
+			r.TakenAt, _ = strconv.ParseInt(*v[1], 10, 64)
+		}
+		if v[2] != nil {
+			r.Kind = *v[2]
+		}
+		if v[3] != nil {
+			r.Bytes, _ = strconv.ParseInt(*v[3], 10, 64)
+		}
+		if v[4] != nil {
+			r.Name = *v[4]
+		}
+		out = append(out, r)
+	}
+	return out, nil
+}
+
+// MemoryRow is one distilled memory for the app's MEMORIES screen.
+type MemoryRow struct {
+	ID        int64  `json:"id"`
+	Title     string `json:"title"`
+	Body      string `json:"body"`
+	Kind      string `json:"kind"`
+	Source    int64  `json:"source_chat,omitempty"`
+	CreatedAt int64  `json:"created_at"`
+}
+
+// MemoriesList returns live (non-tombstoned) memories, newest first.
+func (s *NotifStore) MemoriesList(slot int, limit int) ([]MemoryRow, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	rows, err := c.Query(
+		"SELECT id, title, body, kind, COALESCE(source_chat,0), created_at FROM memories WHERE NOT tombstoned ORDER BY created_at DESC LIMIT " + strconv.Itoa(limit))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]MemoryRow, 0, len(rows.Vals))
+	for _, v := range rows.Vals {
+		if len(v) < 6 || v[0] == nil {
+			continue
+		}
+		var m MemoryRow
+		m.ID, _ = strconv.ParseInt(*v[0], 10, 64)
+		if v[1] != nil {
+			m.Title = *v[1]
+		}
+		if v[2] != nil {
+			m.Body = *v[2]
+		}
+		if v[3] != nil {
+			m.Kind = *v[3]
+		}
+		if v[4] != nil {
+			m.Source, _ = strconv.ParseInt(*v[4], 10, 64)
+		}
+		if v[5] != nil {
+			m.CreatedAt, _ = strconv.ParseInt(*v[5], 10, 64)
+		}
+		out = append(out, m)
+	}
+	return out, nil
+}
+
+// MemoryTombstone soft-deletes a memory: the row stays (so re-distillation of the same source chat
+// cannot resurrect it , shadowd skips chats that already have memory rows, tombstoned included),
+// but it leaves every list and every retrieval. The person's deletion outranks the model, forever.
+func (s *NotifStore) MemoryTombstone(slot int, id int64) (bool, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return false, err
+	}
+	rows, err := c.Query("UPDATE memories SET tombstoned = TRUE, updated_at = (extract(epoch from now())*1000)::bigint WHERE id = $1 AND NOT tombstoned RETURNING id", id)
+	if err != nil {
+		return false, err
+	}
+	return len(rows.Vals) > 0, nil
+}
+
+// MemoryAdd inserts a user-authored memory. kind='user', user_edited from birth , the model never
+// touches it.
+func (s *NotifStore) MemoryAdd(slot int, title, body string) (int64, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return 0, err
+	}
+	now := time.Now().UnixMilli()
+	rows, err := c.Query(
+		"INSERT INTO memories (title, body, kind, created_at, updated_at, user_edited) VALUES ($1,$2,'user',$3,$3,TRUE) RETURNING id",
+		title, body, now)
+	if err != nil || len(rows.Vals) == 0 || rows.Vals[0][0] == nil {
+		return 0, err
+	}
+	id, _ := strconv.ParseInt(*rows.Vals[0][0], 10, 64)
+	return id, nil
+}
+
+// MemoryEdit updates a memory's text and marks it user_edited , from then on re-distillation may
+// never overwrite it. The person's version IS the memory.
+func (s *NotifStore) MemoryEdit(slot int, id int64, title, body string) (bool, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return false, err
+	}
+	rows, err := c.Query(
+		"UPDATE memories SET title=$1, body=$2, user_edited=TRUE, updated_at=$3 WHERE id=$4 AND NOT tombstoned RETURNING id",
+		title, body, time.Now().UnixMilli(), id)
+	if err != nil {
+		return false, err
+	}
+	return len(rows.Vals) > 0, nil
+}
+
+// DaySummary is what framed knows about one day , the prefill data for the daily check-in ("how
+// are you feeling and why") and anything else that wants "what did today look like" in one row.
+type DaySummary struct {
+	Photos int      `json:"photos"`
+	Videos int      `json:"videos"`
+	Places []string `json:"places,omitempty"`
+	First  int64    `json:"first,omitempty"` // earliest capture, unix seconds
+	Last   int64    `json:"last,omitempty"`
+	Notes  []string `json:"notes,omitempty"` // journal entry titles from today (all sources)
+	Steps           int      `json:"steps,omitempty"`
+	SleepMinutes    int      `json:"sleep_minutes,omitempty"`
+	ExerciseMinutes int      `json:"exercise_minutes,omitempty"`
+	// Suggested feelings , GUESSES from the day's shape, offered first in the check-in, never
+	// preselected: the box proposes, the person disposes. The heuristics are plain and stated:
+	// short sleep suggests tired; real movement or exercise suggests energised; a park or trail
+	// in the places suggests calm; a heavy-everything day suggests stressed as a candidate.
+	Suggested []string `json:"suggested,omitempty"`
+}
+
+// DayContext summarizes one day from frames + journal. start/end are unix seconds bounding the day
+// in the CALLER's timezone , the box does not guess where the person woke up.
+func (s *NotifStore) DayContext(slot int, start, end int64) (DaySummary, error) {
+	var out DaySummary
+	c, err := s.pg(slot)
+	if err != nil {
+		return out, err
+	}
+	rows, err := c.Query(
+		"SELECT kind, COALESCE(place,''), taken_at FROM frames WHERE taken_at >= $1 AND taken_at < $2 ORDER BY taken_at ASC LIMIT 2000",
+		start, end)
+	if err != nil {
+		return out, err
+	}
+	for _, v := range rows.Vals {
+		if len(v) < 3 || v[0] == nil || v[2] == nil {
+			continue
+		}
+		ts, _ := strconv.ParseInt(*v[2], 10, 64)
+		if out.First == 0 || ts < out.First {
+			out.First = ts
+		}
+		if ts > out.Last {
+			out.Last = ts
+		}
+		switch *v[0] {
+		case "photo":
+			out.Photos++
+		case "video":
+			out.Videos++
+		}
+		if v[1] != nil && *v[1] != "" {
+			dup := false
+			for _, p := range out.Places {
+				if p == *v[1] {
+					dup = true
+					break
+				}
+			}
+			if !dup && len(out.Places) < 5 {
+				out.Places = append(out.Places, *v[1])
+			}
+		}
+	}
+	if jrows, jerr := c.Query(
+		"SELECT title FROM journal_entries WHERE ts >= $1 AND ts < $2 AND title <> '' ORDER BY ts ASC LIMIT 8",
+		start, end); jerr == nil {
+		for _, v := range jrows.Vals {
+			if len(v) >= 1 && v[0] != nil {
+				out.Notes = append(out.Notes, *v[0])
+			}
+		}
+	}
+	// Health for the day (the PHONE's YYYY-MM-DD derived from the day start it sent).
+	dayStr := time.Unix(start, 0).UTC().Format("2006-01-02")
+	if hrows, herr := c.Query("SELECT metric, value FROM health_metrics WHERE day = $1", dayStr); herr == nil {
+		for _, v := range hrows.Vals {
+			if len(v) < 2 || v[0] == nil || v[1] == nil {
+				continue
+			}
+			val, _ := strconv.ParseFloat(*v[1], 64)
+			switch *v[0] {
+			case "steps":
+				out.Steps = int(val)
+			case "sleep_minutes":
+				out.SleepMinutes = int(val)
+			case "exercise_minutes":
+				out.ExerciseMinutes = int(val)
+			}
+		}
+	}
+	// Suggestions , transparent heuristics over the day's shape.
+	sug := func(f string) {
+		for _, s := range out.Suggested {
+			if s == f {
+				return
+			}
+		}
+		if len(out.Suggested) < 4 {
+			out.Suggested = append(out.Suggested, f)
+		}
+	}
+	if out.SleepMinutes > 0 && out.SleepMinutes < 360 {
+		sug("tired")
+	}
+	if out.ExerciseMinutes >= 30 || out.Steps >= 9000 {
+		sug("energised")
+	}
+	for _, p := range out.Places {
+		lp := strings.ToLower(p)
+		if strings.Contains(lp, "park") || strings.Contains(lp, "trail") || strings.Contains(lp, "falls") {
+			sug("calm")
+			break
+		}
+	}
+	if out.SleepMinutes > 0 && out.SleepMinutes < 360 && out.Steps >= 12000 {
+		sug("stressed")
+	}
+	if out.SleepMinutes >= 480 {
+		sug("calm")
+	}
+	return out, nil
+}
+
+// HealthSeries is one metric's daily values over a window , the stats screen's food.
+type HealthSeries struct {
+	Metric string    `json:"metric"`
+	Days   []string  `json:"days"`
+	Values []float64 `json:"values"`
+}
+
+// HealthStats returns every daily metric's series for the last n days, oldest first per series.
+func (s *NotifStore) HealthStats(slot int, n int) ([]HealthSeries, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return nil, err
+	}
+	if n <= 0 || n > 365 {
+		n = 30
+	}
+	since := time.Now().AddDate(0, 0, -n).Format("2006-01-02")
+	rows, err := c.Query(
+		"SELECT metric, day, value FROM health_metrics WHERE day >= $1 ORDER BY metric, day ASC", since)
+	if err != nil {
+		return nil, err
+	}
+	out := []HealthSeries{}
+	for _, v := range rows.Vals {
+		if len(v) < 3 || v[0] == nil || v[1] == nil || v[2] == nil {
+			continue
+		}
+		val, _ := strconv.ParseFloat(*v[2], 64)
+		if len(out) == 0 || out[len(out)-1].Metric != *v[0] {
+			out = append(out, HealthSeries{Metric: *v[0]})
+		}
+		last := &out[len(out)-1]
+		last.Days = append(last.Days, *v[1])
+		last.Values = append(last.Values, val)
+	}
+	return out, nil
+}

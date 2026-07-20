@@ -519,7 +519,12 @@ object QrSampler {
             if (geom > 0.6) continue
             val legPx = legLength(pa, pb, pc)
             val dimEst = legPx / mAvg + 7.0
-            if (dimEst < 19.0 || dimEst > 60.0) continue
+            // 17..68, NOT 19..60: the enrol sequence uses up to version 11, which is 61 modules ,
+            // the old 60 cap rejected every v11 triple at the geometry stage even with all three
+            // finders cleanly found (the "bigger QRs" that would not catch). The bounds are an
+            // ESTIMATE filter, not a validity check , dimension snapping downstream does the real
+            // decision , so they carry slack for perspective and module-size noise on both ends.
+            if (dimEst < 17.0 || dimEst > 68.0) continue
             val support = a.second + b.second + c.second
             val score = geom + modSpread * 5.0 - support * 0.01
             scored.add(score to listOf(pa, pb, pc))
@@ -618,11 +623,18 @@ object QrSampler {
         val out = ArrayList<Pair<Pt, Int>>()
         val sumX = ArrayList<Double>(); val sumY = ArrayList<Double>()
         val sumM = ArrayList<Double>(); val cnt = ArrayList<Int>()
-        val radius = 14.0
         for (p in pts) {
             var hit = -1
             for (i in out.indices) {
                 val c = out[i].first
+                // MODULE-PROPORTIONAL radius, floored at the old 14px. A fixed radius was the
+                // big-code detection bug: a code filling the frame has ~19px modules, its finder is
+                // ~133px across, and the row scan yields candidates spanning the whole ~3-module
+                // core , a 14px radius SHATTERED one physical finder into a vertical stack of four
+                // or five clusters, and the triple selector drowned in fragments of the same corner.
+                // 3.5 modules covers a finder's candidate spread at any scale; small codes keep the
+                // 14px floor and behave exactly as before.
+                val radius = maxOf(14.0, 3.5 * maxOf(c.mod, p.mod))
                 if (abs(c.x - p.x) <= radius && abs(c.y - p.y) <= radius) { hit = i; break }
             }
             if (hit >= 0) {

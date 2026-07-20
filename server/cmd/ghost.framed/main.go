@@ -105,6 +105,16 @@ func main() {
 	}
 	store := framed.NewStore(hw.SocketForMount(*mount), sc.Postgres.Port, sc.Postgres.RWUser, sc.Postgres.RWPass, sc.Postgres.Name)
 	pipe := framed.NewPipeline(dirs, store, lg)
+	// Reverse geocoder, DB-BACKED , the dataset (allCountries is millions of rows) lives in
+	// postgres on the encrypted volume, not in RAM. Wired when geo_points has data; import with
+	// `ghost-cli ghost.framed geo-import` after dropping GeoNames TSVs under <mount>/geo, then
+	// reprocess to backfill places.
+	if store.GeoReady() {
+		pipe.WithPlaceResolver(store.ResolvePlace)
+		lg.Info("reverse geocoder wired (geo_points populated)", "fn", "main")
+	} else {
+		lg.Info("geo_points empty , frames get empty place strings (drop GeoNames TSVs in <mount>/geo, run geo-import)", "fn", "main")
+	}
 
 	runDir := os.Getenv("GHOST_RUN_DIR")
 	if runDir == "" {
@@ -164,6 +174,64 @@ func main() {
 		return ctlsock.Response{OK: true, Text: fmt.Sprintf("processed %d", n)}, nil
 	})
 	// rebuild-day: reassemble one day's GeoJSON (day=YYYY-MM-DD), e.g. after a manual DB fix.
+	// gps-import: ingest Google Timeline / location-history exports dropped in
+	// <mount>/framed/gps-inbox , years of GPS become track points, day paths, and map history.
+	// Also polled automatically every 5 minutes; the ctl command just skips the wait.
+	ctl.Handle("gps-import", func(json.RawMessage) (ctlsock.Response, error) {
+		go func() {
+			n := pipe.IngestTimelineDir(*mount, lg)
+			lg.Info("gps import pass done", "fn", "main", "points", n)
+		}()
+		return ctlsock.Response{OK: true, Text: "gps import started (watch the log)"}, nil
+	})
+	go func() {
+		t := time.NewTicker(5 * time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				pipe.IngestTimelineDir(*mount, lg)
+			}
+		}
+	}()
+	// geo-import: stream GeoNames TSVs from <mount>/geo into geo_points/geo_names. Background ,
+	// allCountries is minutes of batched inserts; watch the log. Idempotent by geonameid PK, so
+	// re-running after a newer dump only adds. Wires the resolver on completion , no restart.
+	ctl.Handle("geo-import", func(json.RawMessage) (ctlsock.Response, error) {
+		go func() {
+			pts, names, err := store.ImportGeo(filepath.Join(*mount, "geo"), lg)
+			if err != nil {
+				lg.Error("geo import failed", "fn", "main", "points", pts, "err", err)
+				return
+			}
+			lg.Info("geo import done", "fn", "main", "points", pts, "names", names)
+			if store.GeoReady() {
+				pipe.WithPlaceResolver(store.ResolvePlace)
+				lg.Info("reverse geocoder wired , run reprocess to backfill places", "fn", "main")
+			}
+		}()
+		return ctlsock.Response{OK: true, Text: "geo import started (watch the log; then run reprocess)"}, nil
+	})
+	// reprocess: converge the archive's derived state , frame records, previews (force=true also
+	// re-derives EXISTING previews, the orientation-fix case), search notifies, day paths. Runs in
+	// the background: a full archive pass takes minutes and the socket should answer now.
+	ctl.Handle("reprocess", func(args json.RawMessage) (ctlsock.Response, error) {
+		var a struct {
+			Force bool `json:"force"`
+		}
+		if len(args) > 0 {
+			_ = json.Unmarshal(args, &a)
+		}
+		go func() {
+			scanned, recorded, previewed, notified := pipe.Reprocess(a.Force)
+			lg.Info("reprocess done", "fn", "main", "scanned", scanned, "recorded", recorded,
+				"previewed", previewed, "notified", notified)
+		}()
+		return ctlsock.Response{OK: true, Text: "reprocess started (watch the log; force=" +
+			map[bool]string{true: "true", false: "false"}[a.Force] + ")"}, nil
+	})
 	ctl.Handle("rebuild-day", func(args json.RawMessage) (ctlsock.Response, error) {
 		var a struct {
 			Day string `json:"day"`

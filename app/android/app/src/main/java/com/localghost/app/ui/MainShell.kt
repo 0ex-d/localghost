@@ -41,6 +41,8 @@ enum class Dest(val label: String, val glyph: String) {
     HARNESS("BOX STATUS", "◉"),
     SYNC("SYNC", "⇅"),
     GALLERY("GALLERY", "▦"),
+    MAP("MAP", "◎"),
+    HEALTH("HEALTH", "♥"),
     CODES("CODES", "⚿"),
     SETTINGS("SETTINGS", "⚙"),
     GLOSSARY("GLOSSARY", "≣"),
@@ -99,6 +101,8 @@ fun MainShell(
     thinkLevel: String = "",
     onCycleThink: () -> Unit = {},
     onOpenBoxChat: (Long) -> Unit = {},
+    onRenameBoxChat: (Long, String) -> Unit = { _, _ -> },
+    onDeleteBoxChat: (Long) -> Unit = {},
     incognito: Boolean = false,
     onToggleIncognito: () -> Unit = {},
     onToggleMute: (Boolean) -> Unit,
@@ -167,8 +171,10 @@ fun MainShell(
                             onSelect = { onSelectConversation(it); dest = Dest.CHAT },
                             onNew = { onNewConversation(); dest = Dest.CHAT },
                             onDelete = onDeleteConversation,
-                            onOpenBoxChat = { id -> onOpenBoxChat(id); dest = Dest.CHAT })
-                        Dest.MEMORIES -> MemoriesScreen(lifeContext, memories)
+                            onOpenBoxChat = { id -> onOpenBoxChat(id); dest = Dest.CHAT },
+                            onRenameBoxChat = onRenameBoxChat,
+                            onDeleteBoxChat = onDeleteBoxChat)
+                        Dest.MEMORIES -> MemoriesScreen(lifeContext)
                         Dest.NOTIFICATIONS -> {
                             val nctx = androidx.compose.ui.platform.LocalContext.current
                             val nowSec = System.currentTimeMillis() / 1000
@@ -183,6 +189,8 @@ fun MainShell(
                         Dest.HARNESS -> HarnessScreen(daemons)
                         Dest.SYNC -> SyncScreen(sync, onSync, onRequestFullAccess, onTestNotification, onTogglePause = onTogglePause)
                         Dest.GALLERY -> GalleryScreen()
+                        Dest.MAP -> MapScreen()
+                        Dest.HEALTH -> HealthScreen()
                         Dest.CODES -> PinManagementScreen(devices)
                         Dest.SETTINGS -> SettingsScreen(
                             onOpenVerify = { dest = Dest.VERIFY },
@@ -369,7 +377,7 @@ private fun DrawerPanel(
 
             Spacer(Modifier.height(20.dp))
             SectionLabel("YOUR ARCHIVE")
-            listOf(Dest.GALLERY, Dest.MEMORIES, Dest.SYNC).forEach {
+            listOf(Dest.GALLERY, Dest.MAP, Dest.HEALTH, Dest.MEMORIES, Dest.SYNC).forEach {
                 DrawerRow(it, it == current) { onSelect(it) }
             }
 

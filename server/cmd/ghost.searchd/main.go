@@ -326,6 +326,23 @@ func main() {
 		return ctlsock.Response{OK: true, Text: "deleted; citing interpretations stale-marked"}, nil
 	})
 
+	// unpark: reset jobs dead at the 5-attempt ceiling so the worker claims them again. The ceiling
+	// protects against poison jobs; it has no answer for "the environment was broken all night and
+	// is fixed now" (role errors, a blind oracled) , this is that answer. Optional kind filter.
+	// Poison jobs re-park after five more tries; pulling this lever wrongly costs nothing.
+	ctl.Handle("unpark", func(args json.RawMessage) (ctlsock.Response, error) {
+		var a struct {
+			Kind string `json:"kind"`
+		}
+		if len(args) > 0 {
+			_ = json.Unmarshal(args, &a)
+		}
+		n, err := storeW.UnparkJobs(a.Kind)
+		if err != nil {
+			return ctlsock.Response{OK: false, Err: err.Error()}, nil
+		}
+		return ctlsock.Response{OK: true, Text: fmt.Sprintf("unparked %d jobs", n)}, nil
+	})
 	// rebuild: spec 13.3, the proof indexes are derived state.
 	ctl.Handle("rebuild", func(json.RawMessage) (ctlsock.Response, error) {
 		n, err := ing.Rebuild()

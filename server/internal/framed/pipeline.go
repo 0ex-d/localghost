@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"image"
 	"io"
+	"io/fs"
 	"image/jpeg"
 	_ "image/png" // registered so image.Decode handles PNG uploads
 	"log/slog"
@@ -35,6 +36,7 @@ import (
 	"time"
 
 	"github.com/LocalGhostDao/localghost/server/internal/exif"
+	"github.com/LocalGhostDao/localghost/server/internal/geo"
 )
 
 // Dirs is the frames layout under <mount>/frames.
@@ -90,6 +92,10 @@ type Pipeline struct {
 	// Best-effort by design: search indexing is derived state , a failure is logged and the photo is
 	// still archived; searchd's rebuild re-covers anything missed.
 	notifySearch func(archivePath string, takenAt int64)
+	// resolvePlace, when non-nil, reverse-geocodes GPS frames , DB-backed (geo_points, imported by
+	// `ghost-cli ghost.framed geo-import`). Nil means no geo data yet: empty place strings,
+	// reprocess backfills after an import.
+	resolvePlace func(lat, lon float64) geo.Place
 }
 
 func NewPipeline(dirs Dirs, store *Store, log *slog.Logger) *Pipeline {
@@ -98,6 +104,9 @@ func NewPipeline(dirs Dirs, store *Store, log *slog.Logger) *Pipeline {
 
 // OnArchived registers the search-layer notify hook.
 func (p *Pipeline) OnArchived(fn func(archivePath string, takenAt int64)) { p.notifySearch = fn }
+
+// WithPlaceResolver installs the reverse geocoder function (the DB-backed store resolver).
+func (p *Pipeline) WithPlaceResolver(fn func(lat, lon float64) geo.Place) { p.resolvePlace = fn }
 
 // DrainIncoming processes every pending upload, oldest first, one at a time. Returns how many were
 // processed. Called on start (resume after lock/crash) and on each poll tick.
@@ -263,7 +272,7 @@ func (p *Pipeline) processOne(path string) (string, error) {
 	case KindPhoto:
 		kindStr = "photo"
 		if cfgFmt == "jpeg" || cfgFmt == "png" {
-			prevPath, thumbPath = p.makePreviews(raw, hash)
+			prevPath, thumbPath = p.makePreviews(raw, hash, meta.Orientation)
 		} else {
 			p.log.Info("photo archived without preview (decoder does not handle this still format)",
 				"fn", "processOne", "hash", hash, "mime", sniff.MIME)
@@ -275,12 +284,32 @@ func (p *Pipeline) processOne(path string) (string, error) {
 		p.log.Warn("archived unrecognised media type", "fn", "processOne", "hash", hash, "ext", ext)
 	}
 
+	place := ""
+	if meta.HasGPS && p.resolvePlace != nil {
+		place = p.resolvePlace(meta.Lat, meta.Lon).String()
+	}
 	f := Frame{
-		Hash: hash, TakenAt: taken.UTC().Unix(),
+		Hash: hash, TakenAt: taken.UTC().Unix(), Place: place,
 		Lat: meta.Lat, Lon: meta.Lon, HasGPS: meta.HasGPS,
 		ArchivePath: archPath, PreviewPath: prevPath, ThumbPath: thumbPath,
 		Bytes: fileBytes, Source: "phone", ReceivedAt: time.Now().UTC().Unix(),
 		Kind: kindStr, MIME: sniff.MIME, TakenSrc: takenSrc,
+	}
+
+	// The JOURNAL ENTRY , framed's line in the shared ingestion diary synthd distills from. Written
+	// with what framed knows at archive time (kind, when, where); captions and tags arrive later
+	// through other daemons and enrich the memory at distillation, not the entry.
+	{
+		when := time.Unix(f.TakenAt, 0).UTC().Format("Mon Jan 2 2006, 15:04")
+		title := f.Kind + " archived , " + when
+		body := "A " + f.Kind + " from " + when + "."
+		if f.Place != "" {
+			body = "A " + f.Kind + " taken at " + f.Place + " on " + when + "."
+			title = f.Kind + " at " + f.Place
+		}
+		if jerr := p.store.InsertJournal(f.Hash, f.TakenAt, title, body); jerr != nil {
+			p.log.Warn("journal entry failed", "fn", "processOne", "hash", f.Hash, "err", jerr)
+		}
 	}
 	if err := p.store.InsertFrame(f); err != nil {
 		// Archive holds the bytes; the record can be replayed by reprocess. Loud, not fatal.
@@ -299,7 +328,7 @@ func (p *Pipeline) processOne(path string) (string, error) {
 }
 
 // makePreviews decodes once and writes the 1600px preview and 320px thumb as JPEG q80.
-func (p *Pipeline) makePreviews(raw []byte, hash string) (prev, thumb string) {
+func (p *Pipeline) makePreviews(raw []byte, hash string, orientation int) (prev, thumb string) {
 	img, _, err := image.Decode(bytes.NewReader(raw))
 	if err != nil {
 		p.log.Warn("preview decode failed", "fn", "makePreviews", "hash", hash, "err", err)
@@ -315,7 +344,11 @@ func (p *Pipeline) makePreviews(raw []byte, hash string) (prev, thumb string) {
 		if err != nil {
 			return ""
 		}
-		if err := jpeg.Encode(f, downscale(img, edge), &jpeg.Options{Quality: jpegQuality}); err != nil {
+		// Downscale FIRST, orient the small image , the axis-aligned transforms commute with the
+		// box average, and a 1600px rotate costs a fraction of a 12MP one. The ORIGINAL in the
+		// archive keeps its bytes and its EXIF untouched, as always; only the derived copies are
+		// baked to display orientation (they carry no EXIF, so baking is the only correct option).
+		if err := jpeg.Encode(f, applyOrientation(downscale(img, edge), orientation), &jpeg.Options{Quality: jpegQuality}); err != nil {
 			_ = f.Close()
 			return ""
 		}
@@ -489,4 +522,161 @@ func takenHintFromName(path string) int64 {
 		return 0
 	}
 	return ms
+}
+
+// Reprocess walks the ARCHIVE and converges every derived thing back to the current code: frame
+// records re-inserted (InsertFrame is ON CONFLICT DO NOTHING, so existing rows cost one no-op),
+// previews and thumbs re-derived, the search layer re-notified, and every GPS day's path rebuilt.
+// This is the command the pipeline's own comments promised for months ("photo IS archived; run
+// reprocess") before it existed. Two failure modes drove finally writing it, both observed live:
+// a degraded-DB window archived hours of photos whose records and search notifies all failed , and
+// searchd's rebuild CANNOT cover that, it walks search.originals and regenerates derived state, it
+// does not discover archive files that never got ingested , and the EXIF orientation fix landed
+// with every pre-existing portrait thumb baked sideways.
+//
+// forcePreviews re-derives even when the preview files exist (the orientation-fix case: the files
+// are there, they are just wrong). Preview files are hash-named, so re-derivation overwrites in
+// place and existing DB paths stay valid. Originals are READ, never written , the archive-untouched
+// rule holds here as everywhere.
+//
+// Runs under the drain mutex: reprocess and a spool drain racing the same store is noise we do not
+// need. Bounded work per file (head read for sniff+EXIF; full read only for photos), progress
+// logged every 200 so a multi-thousand-photo pass is visible, not silent.
+func (p *Pipeline) Reprocess(forcePreviews bool) (scanned, recorded, previewed, notified int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	gpsDays := map[string]bool{}
+	_ = filepath.WalkDir(p.dirs.Archive, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		scanned++
+		if scanned%200 == 0 {
+			p.log.Info("reprocess progress", "fn", "Reprocess", "scanned", scanned,
+				"recorded", recorded, "previewed", previewed)
+		}
+		ext := filepath.Ext(d.Name())
+		hash := strings.TrimSuffix(d.Name(), ext)
+		fi, serr := os.Stat(path)
+		if serr != nil {
+			return nil
+		}
+		f, ferr := os.Open(path)
+		if ferr != nil {
+			p.log.Warn("reprocess: unreadable, skipped", "fn", "Reprocess", "path", path, "err", ferr)
+			return nil
+		}
+		head := make([]byte, 64*1024)
+		n, _ := io.ReadFull(f, head)
+		_ = f.Close()
+		head = head[:n]
+		sn := Sniff(head)
+		meta := exif.Parse(head)
+
+		taken := meta.TakenAt
+		takenSrc := "exif"
+		if taken.IsZero() {
+			// The archive PATH is the day processOne filed it under , derived from the best taken
+			// source available at archive time (exif, then the spool-name hint, then mtime). The
+			// spool name is gone (renamed to <hash><ext>), so the path IS the surviving record of
+			// that decision; midnight UTC of its day is the honest reconstruction.
+			rel, rerr := filepath.Rel(p.dirs.Archive, path)
+			if rerr == nil {
+				if ts, perr := time.Parse("2006/01/02", filepath.ToSlash(filepath.Dir(rel))); perr == nil {
+					taken = ts.UTC()
+					takenSrc = "archive-path"
+				}
+			}
+		}
+		if taken.IsZero() {
+			taken = fi.ModTime().UTC()
+			takenSrc = "mtime"
+		}
+
+		kindStr := "unknown"
+		prevPath, thumbPath := "", ""
+		switch sn.Kind {
+		case KindPhoto:
+			kindStr = "photo"
+			existingPrev := filepath.Join(p.dirs.Preview, hash+".jpg")
+			existingPrevWebp := filepath.Join(p.dirs.Preview, hash+".webp")
+			have := fileExists(existingPrev) || fileExists(existingPrevWebp)
+			if forcePreviews || !have {
+				if raw, rerr := os.ReadFile(path); rerr == nil {
+					prevPath, thumbPath = p.makePreviews(raw, hash, meta.Orientation)
+					if prevPath != "" {
+						previewed++
+					}
+				} else {
+					p.log.Warn("reprocess: photo unreadable for previews", "fn", "Reprocess", "path", path, "err", rerr)
+				}
+			} else {
+				if fileExists(existingPrevWebp) {
+					prevPath = existingPrevWebp
+				} else {
+					prevPath = existingPrev
+				}
+				tj, tw := filepath.Join(p.dirs.Thumb, hash+".jpg"), filepath.Join(p.dirs.Thumb, hash+".webp")
+				if fileExists(tw) {
+					thumbPath = tw
+				} else if fileExists(tj) {
+					thumbPath = tj
+				}
+			}
+		case KindVideo:
+			kindStr = "video"
+		}
+
+		place := ""
+		if meta.HasGPS && p.resolvePlace != nil {
+			place = p.resolvePlace(meta.Lat, meta.Lon).String()
+		}
+		frame := Frame{
+			Hash: hash, TakenAt: taken.UTC().Unix(), Place: place,
+			Lat: meta.Lat, Lon: meta.Lon, HasGPS: meta.HasGPS,
+			ArchivePath: path, PreviewPath: prevPath, ThumbPath: thumbPath,
+			Bytes: fi.Size(), Source: "reprocess", ReceivedAt: time.Now().UTC().Unix(),
+			Kind: kindStr, MIME: sn.MIME, TakenSrc: takenSrc,
+		}
+
+	// The JOURNAL ENTRY , framed's line in the shared ingestion diary synthd distills from. Written
+	// with what framed knows at archive time (kind, when, where); captions and tags arrive later
+	// through other daemons and enrich the memory at distillation, not the entry.
+	{
+		when := time.Unix(frame.TakenAt, 0).UTC().Format("Mon Jan 2 2006, 15:04")
+		title := frame.Kind + " archived , " + when
+		body := "A " + frame.Kind + " from " + when + "."
+		if frame.Place != "" {
+			body = "A " + frame.Kind + " taken at " + frame.Place + " on " + when + "."
+			title = frame.Kind + " at " + frame.Place
+		}
+		if jerr := p.store.InsertJournal(frame.Hash, frame.TakenAt, title, body); jerr != nil {
+			p.log.Warn("journal entry failed", "fn", "Reprocess", "hash", frame.Hash, "err", jerr)
+		}
+	}
+		if err := p.store.InsertFrame(frame); err != nil {
+			p.log.Warn("reprocess: frame record failed", "fn", "Reprocess", "hash", hash, "err", err)
+		} else {
+			recorded++
+		}
+		if p.notifySearch != nil && kindStr == "photo" {
+			p.notifySearch(path, taken.UTC().Unix())
+			notified++
+		}
+		if meta.HasGPS {
+			gpsDays[taken.UTC().Format("2006-01-02")] = true
+		}
+		return nil
+	})
+	for day := range gpsDays {
+		p.RebuildDay(day)
+	}
+	p.log.Info("reprocess complete", "fn", "Reprocess", "scanned", scanned, "recorded", recorded,
+		"previewed", previewed, "notified", notified, "gpsDays", len(gpsDays))
+	return scanned, recorded, previewed, notified
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }

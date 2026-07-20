@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -75,6 +76,8 @@ type serviceRuntime struct {
 	lastErr    string
 	lastCode   ghosthealth.Code
 	backoffTil time.Time
+	lastNotif  time.Time // per-service alert rate limit
+	wasFailing bool      // a recovery alert only makes sense after a failure alert
 }
 
 // Supervisor manages the cohort. logDir is on the encrypted volume; each daemon's stdout/stderr go to
@@ -83,6 +86,11 @@ type Supervisor struct {
 	mu       sync.Mutex
 	services map[string]*serviceRuntime
 	order    []string
+	// notify, when set, writes a user-visible notification on service TRANSITIONS , failed,
+	// recovered , so the person learns their archive stopped archiving from the app, not from
+	// noticing a week later. Best-effort by contract: the hook must never block or panic the
+	// supervisor; rate-limited per service (5 min) so a flapping daemon is one alert, not a feed.
+	notify func(service, kind, title, body string)
 	pollEach time.Duration
 	client   *http.Client
 	stopPoll context.CancelFunc
@@ -198,6 +206,11 @@ func (s *Supervisor) pollOnce() {
 				continue
 			}
 			rt.state = stateUp
+			if rt.wasFailing {
+				rt.wasFailing = false
+				s.alert(rt, "service-recovered", rt.svc.Name+" recovered",
+					"back up after "+strconv.Itoa(rt.restarts)+" restart(s)")
+			}
 			fallthrough
 		case stateUp:
 			code, err := s.probe(rt)
@@ -239,12 +252,26 @@ func (s *Supervisor) probe(rt *serviceRuntime) (ghosthealth.Code, error) {
 	return h.Code, nil
 }
 
+// WithNotify installs the transition-alert hook.
+func (s *Supervisor) WithNotify(fn func(service, kind, title, body string)) { s.notify = fn }
+
+func (s *Supervisor) alert(rt *serviceRuntime, kind, title, body string) {
+	if s.notify == nil || time.Since(rt.lastNotif) < 5*time.Minute {
+		return
+	}
+	rt.lastNotif = time.Now()
+	s.notify(rt.svc.Name, kind, title, body)
+}
+
 func (s *Supervisor) markFailedAndRestart(rt *serviceRuntime, code ghosthealth.Code, err error) {
 	detail := "health code failed"
 	if err != nil {
 		detail = err.Error()
 	}
 	s.jlog.Warn("service failed, scheduling restart", "fn", "markFailedAndRestart", "svc", rt.svc.Name, "detail", detail)
+	rt.wasFailing = true
+	s.alert(rt, "service-failed", rt.svc.Name+" failed , restarting",
+		detail+" (restart #"+strconv.Itoa(rt.restarts+1)+")")
 	s.killProc(rt)
 	s.scheduleBackoff(rt, detail)
 }
@@ -270,7 +297,13 @@ func (s *Supervisor) killProc(rt *serviceRuntime) {
 	go func() { _, _ = rt.proc.Wait(); close(done) }()
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
+		// 15s, up from 5: SIGTERM asks a daemon to FINISH its in-flight item , framed mid-archive
+		// (rename done, previews and record pending), searchd mid-ingest , and 5s regularly was not
+		// enough for a preview derivation plus a DB write, so planned teardowns were SIGKILLing work
+		// that reprocess then had to heal. 15 matches the shutdown allowance elsewhere (stopWatchd's
+		// ping-until-dead). SIGKILL remains the floor: a wedged daemon still cannot hold the unmount
+		// hostage, it just gets three times the courtesy first.
 		_ = rt.proc.Kill()
 		<-done
 	}

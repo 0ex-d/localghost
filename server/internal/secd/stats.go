@@ -9,6 +9,7 @@ package secd
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/LocalGhostDao/localghost/server/internal/hw"
 )
@@ -45,12 +46,16 @@ func (s *Server) handleServicesSummary(w http.ResponseWriter, r *http.Request) {
 		Day   json.RawMessage `json:"day,omitempty"`
 	}
 	var rows []row
+	var freshest int64
 	for name := range hw.StatsTargets() {
 		rw := row{Name: name}
 		if latest, err := s.notif.StatsRange(mounted, "stats:10s:"+name, 1); err == nil && len(latest) == 1 {
 			var e statEntry
 			if json.Unmarshal([]byte(latest[0]), &e) == nil {
 				rw.Now = &e
+				if e.T > freshest {
+					freshest = e.T
+				}
 			}
 		}
 		if blob, ok, err := s.notif.StatsGet(mounted, "stats:24h:"+name); err == nil && ok {
@@ -58,8 +63,17 @@ func (s *Server) handleServicesSummary(w http.ResponseWriter, r *http.Request) {
 		}
 		rows = append(rows, rw)
 	}
+	// NOBODY-WATCHES-WATCHD, answered: the sampler writes every 10s, so rings older than 35s on an
+	// unlocked box mean the WATCHER is dead (or Redis is) , and without this flag the screen would
+	// paint the last samples as a healthy present, frozen green. Staleness is the one condition the
+	// stats themselves cannot report, so the endpoint that serves them must.
+	age := int64(-1)
+	if freshest > 0 {
+		age = time.Now().Unix() - freshest
+	}
+	stale := freshest == 0 || age > 35
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"targets": rows})
+	_ = json.NewEncoder(w).Encode(map[string]any{"targets": rows, "stale": stale, "age_seconds": age})
 }
 
 // handleServiceDetail , GET /v1/services/detail?name=X. The full picture for one target: both ring

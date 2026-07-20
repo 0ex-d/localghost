@@ -97,8 +97,30 @@ else
 fi
 
 say "4/4  restart ghost.secd"
-# On SIGTERM secd does a clean lock (cohort down, DBs stopped, volume unmounted, LUKS closed), then
-# systemd starts the new binary. So after this the box is LOCKED , expected, not an error.
+# GRACEFUL PATH (preferred): with GHOST_PIN set and the box up, ask secd to HALT first , the same
+# ordered teardown a lock does minus the unmount: cohort SIGTERMed with time to finish in-flight
+# items, redis SHUTDOWN SAVE (RDB written to the volume), pg_ctl stop with a clean checkpoint. Only
+# THEN does systemd swap the binary. Without a PIN this falls back to systemctl restart, where
+# secd's SIGTERM handler races systemd's kill timeout , the race that produced mounted-but-dead;
+# the convergent unlock repairs that state now, but "repairable" is not "good", so say so loudly.
+if [ -n "${GHOST_PIN:-}" ] && systemctl is-active --quiet ghost.secd; then
+    echo "GHOST_PIN provided , graceful halt before the binary swap"
+    "$REPO/bin/ghost-cli" --run-dir=/var/lib/ghost/run ghost.secd halt "pin=$GHOST_PIN" || true
+    # halt replies ok unconditionally (PIN-opaque); confirm by watching the volume's services die.
+    for i in $(seq 1 30); do
+        pgrep -f '/var/lib/ghost/mnt/.*/bin/' >/dev/null 2>&1 || break
+        sleep 1
+    done
+    if pgrep -f '/var/lib/ghost/mnt/.*/bin/' >/dev/null 2>&1; then
+        echo "WARNING: volume services still up after halt , wrong PIN? Falling back to restart."
+    else
+        echo "halted cleanly , cohort down, redis saved, postgres checkpointed."
+    fi
+else
+    echo "NOTE: no GHOST_PIN in the environment , falling back to systemctl restart, which races"
+    echo "      secd's SIGTERM lock against systemd's kill timeout. For a guaranteed-clean teardown:"
+    echo "        sudo GHOST_PIN=<main pin> ./tools/redeploy.sh"
+fi
 systemctl restart ghost.secd
 sleep 1
 systemctl --no-pager --lines=0 status ghost.secd 2>/dev/null | head -3 || true

@@ -19,6 +19,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -217,6 +218,7 @@ func (b *backend) StartCache(slot int) error {
 		b.log("unlock: could not start ghost.watchd (box stays mounted, daemons unavailable)", err)
 		return nil
 	}
+	b.watchStopping.Store(false)
 	b.watchProc = proc
 
 	// Wait briefly for watchd's socket to come up, then start the cohort. A timeout here is not fatal.
@@ -243,7 +245,49 @@ func (b *backend) StartCache(slot int) error {
 	if _, err := b.watch.StartCohort(); err != nil {
 		b.log("unlock: ghost.watchd start-cohort reported trouble (box stays mounted, degraded)", err)
 	}
+	go b.superviseWatchd(mount, proc)
 	return nil
+}
+
+// superviseWatchd answers "who watches watchd": SECD DOES , it is the gateway, systemd restarts it,
+// and it is the only process positioned to notice its child die. Before this, a watchd crash
+// mid-session orphaned the whole cohort until the next unlock happened to converge it , the box
+// kept serving stale-green stats (now at least FLAGGED stale) while nothing archived. This loop
+// Waits on the child; a deliberate stop (lock, halt, shutdown , watchStopping set first) ends it
+// silently; anything else is logged loudly and respawned with a bounded 15s cadence, cohort
+// re-issued (idempotent), and the adopt/converge machinery picks it all up. Covers the OWNED-proc
+// case; an ADOPTED watchd has no proc to Wait on and stays covered by the staleness flag + unlock
+// convergence , named limit, not an accident.
+func (b *backend) superviseWatchd(mount string, proc *os.Process) {
+	for {
+		_, _ = proc.Wait()
+		if b.watchStopping.Load() {
+			return // deliberate stop: lock/halt/shutdown owns the teardown
+		}
+		secdLog.Error("ghost.watchd DIED unexpectedly , cohort orphaned, respawning", "fn", "superviseWatchd")
+		time.Sleep(3 * time.Second) // let the socket unbind and the cohort's own deaths settle
+		np, err := b.spawnWatchd(mount)
+		if err != nil {
+			secdLog.Error("watchd respawn failed , retrying in 15s", "fn", "superviseWatchd", "err", err)
+			for err != nil && !b.watchStopping.Load() {
+				time.Sleep(15 * time.Second)
+				np, err = b.spawnWatchd(mount)
+			}
+			if b.watchStopping.Load() {
+				return
+			}
+		}
+		b.watchProc = np
+		proc = np
+		if rerr := b.waitWatchdReady(15 * time.Second); rerr != nil {
+			b.log("respawned watchd not ready , will supervise its exit and retry", rerr)
+			continue
+		}
+		if _, cerr := b.watch.StartCohort(); cerr != nil {
+			b.log("respawned watchd start-cohort reported trouble", cerr)
+		}
+		secdLog.Info("ghost.watchd respawned, cohort re-issued", "fn", "superviseWatchd")
+	}
 }
 
 // spawnWatchd execs ghost.watchd from the volume bin dir, pointed at the mount, DROPPED to the run
@@ -488,6 +532,10 @@ func (b *backend) log(msg string, a ...any) {
 // cohort and confirms every daemon dead before it exits, so when this returns, the whole cohort AND
 // watchd are gone , the volume is safe to unmount. Falls back to KILL after a grace.
 func (b *backend) stopWatchd() {
+	// Set and NOT defer-cleared: superviseWatchd's Wait wakes on its own schedule, possibly after
+	// this function returns , a defer-clear here raced it into respawning watchd on a LOCKED box.
+	// The flag stays true until the next spawn (StartCache clears it just before watchProc is set).
+	b.watchStopping.Store(true)
 	if b.watchProc == nil {
 		// No process handle , either the box is cold (nothing to do) or this watchd was ADOPTED
 		// after a secd restart, in which case the control socket is the only stop channel. Send

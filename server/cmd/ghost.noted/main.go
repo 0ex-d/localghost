@@ -1,4 +1,4 @@
-// ghost.noted , STUB. Binds its loopback health port and reports OK so ghost.watchd can
+// ghost.noted , TEXT INGESTION (first real slice). Binds its loopback health port and reports OK so ghost.watchd can
 // manage it (poll, restart, stop-before-unmount) before the real logic exists. The daemon's actual
 // job is described in this directory's README; this binary is the honest placeholder , it does
 // nothing but stay alive and answer health, so the supervisor and the app's Ghost Status screen work
@@ -9,16 +9,25 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"flag"
+	"io"
 	"log"
 	"log/slog"
+	"net/mail"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
+	"time"
 
+	"github.com/LocalGhostDao/localghost/server/internal/hw"
+	"github.com/LocalGhostDao/localghost/server/internal/poltergres"
 	"github.com/LocalGhostDao/localghost/server/internal/ctlsock"
 	"github.com/LocalGhostDao/localghost/server/internal/ghosthealth"
 	"github.com/LocalGhostDao/localghost/server/internal/rotlog"
@@ -86,7 +95,21 @@ func main() {
 		}()
 	}
 
-	lg.Info("stub up", "fn", "main", "healthPort", *port)
+	// THE INBOX. Drop text at <mount>/noted/inbox and it becomes a journal entry and an archived
+	// canonical copy , that is the whole contract. Formats: .eml (parsed with stdlib net/mail:
+	// Subject/Date/From honored, headers stripped, text body kept) and anything else readable as
+	// text (.txt, .md , notes, exports, whatever). Idempotent end to end: ref is the content hash,
+	// so the same email dropped twice is one entry; the archive is content-addressed the same way.
+	// Files land in inbox from wherever the operator likes , scp, a mail-fetch cron, the app's
+	// share sheet once the secd upload endpoint exists (TODO). ghost.synthd distills from the
+	// journal; noted never talks to the model.
+	if runDir != "" {
+		mount := filepath.Dir(runDir)
+		go inboxLoop(ctx, mount, lg)
+		lg.Info("text ingestion up", "fn", "main", "inbox", filepath.Join(mount, "noted", "inbox"))
+	} else {
+		lg.Warn("no run dir , inbox disabled (health/ctl only)", "fn", "main")
+	}
 
 	<-ctx.Done()
 	lg.Info("shutting down", "fn", "main")
@@ -99,4 +122,203 @@ func envPort(key string) int {
 		}
 	}
 	return 0
+}
+
+// inboxLoop polls the inbox every 30s and ingests whatever text has landed. Lazy pg (services.conf
+// creds, reconnect on failure), same pattern as every volume daemon. Each file: parse -> journal
+// entry (idempotent by content hash) -> archive under the hash -> remove from inbox. Unreadable or
+// unparseable files are moved to inbox/rejected with the reason logged , never deleted, never
+// looping forever.
+func inboxLoop(ctx context.Context, mount string, lg *slog.Logger) {
+	inbox := filepath.Join(mount, "noted", "inbox")
+	archive := filepath.Join(mount, "noted", "archive")
+	rejected := filepath.Join(inbox, "rejected")
+	for _, d := range []string{inbox, archive, rejected} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			lg.Error("inbox dirs", "fn", "inboxLoop", "err", err)
+			return
+		}
+	}
+	var db *poltergres.ReadWrite
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if db == nil {
+			if cfg, cerr := hw.LoadServicesConfig(mount); cerr == nil {
+				db = poltergres.NewReadWrite(hw.SocketForMount(mount), cfg.Postgres.Port,
+					cfg.Postgres.RWUser, cfg.Postgres.RWPass, cfg.Postgres.Name)
+			}
+		}
+		if db != nil {
+			if err := journalChats(db, lg); err != nil {
+				lg.Warn("chat journaling failed, will reconnect", "fn", "inboxLoop", "err", err)
+				db = nil
+			}
+		}
+		entries, err := os.ReadDir(inbox)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+				continue
+			}
+			path := filepath.Join(inbox, e.Name())
+			if db == nil {
+				cfg, cerr := hw.LoadServicesConfig(mount)
+				if cerr != nil {
+					lg.Warn("services.conf unreadable, pass skipped", "fn", "inboxLoop", "err", cerr)
+					break
+				}
+				db = poltergres.NewReadWrite(hw.SocketForMount(mount), cfg.Postgres.Port,
+					cfg.Postgres.RWUser, cfg.Postgres.RWPass, cfg.Postgres.Name)
+			}
+			if err := ingestOne(db, path, archive, lg); err != nil {
+				lg.Warn("ingest failed, moved to rejected", "fn", "inboxLoop", "file", e.Name(), "err", err)
+				_ = os.Rename(path, filepath.Join(rejected, e.Name()))
+				if strings.Contains(err.Error(), "connect") || strings.Contains(err.Error(), "refused") {
+					db = nil // pg trouble, not file trouble: reconnect next tick
+				}
+			}
+		}
+	}
+}
+
+// ingestOne turns one inbox file into a journal entry and an archived canonical copy.
+func ingestOne(db *poltergres.ReadWrite, path, archive string, lg *slog.Logger) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if len(raw) == 0 || len(raw) > 2<<20 {
+		return io.ErrUnexpectedEOF // empty or absurd , rejected, not looped
+	}
+	sum := sha256.Sum256(raw)
+	ref := hex.EncodeToString(sum[:])
+	title, body, ts := parseText(raw, path)
+	fi, _ := os.Stat(path)
+	if ts == 0 && fi != nil {
+		ts = fi.ModTime().Unix()
+	}
+	// Ref policy, split by kind: emails keep the PURE content hash (re-dropping the same .eml
+	// must stay a no-op), but plain text folds in the file mtime , jotting "gym" twice on purpose
+	// is two diary entries, not one silently swallowed. The canonical archive stays
+	// content-addressed either way, so bytes are never stored twice.
+	if !looksLikeEmail(raw) && fi != nil {
+		ref = ref[:40] + "-" + strconv.FormatInt(fi.ModTime().Unix(), 10)
+	}
+	if err := db.Exec(
+		"INSERT INTO journal_entries (source, ref, ts, title, body, created_at) VALUES ('ghost.noted', $1, $2, $3, $4, $5) ON CONFLICT (source, ref) DO NOTHING",
+		ref, ts, title, body, time.Now().UnixMilli()); err != nil {
+		return err
+	}
+	dst := filepath.Join(archive, ref+".txt")
+	if err := os.WriteFile(dst, raw, 0o640); err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil {
+		return err
+	}
+	lg.Info("ingested", "fn", "ingestOne", "ref", ref[:12], "title", title)
+	return nil
+}
+
+// looksLikeEmail mirrors parseText's detection , a parseable message with a Subject header.
+func looksLikeEmail(raw []byte) bool {
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	return err == nil && msg.Header.Get("Subject") != ""
+}
+
+// parseText understands .eml (stdlib net/mail: Subject/Date honored, headers stripped) and treats
+// everything else as plain text (first non-empty line is the title). Body is capped at 4000 runes ,
+// journal entries are the diary, not the archive; the canonical copy keeps every byte.
+func parseText(raw []byte, path string) (title, body string, ts int64) {
+	if msg, err := mail.ReadMessage(bytes.NewReader(raw)); err == nil && msg.Header.Get("Subject") != "" {
+		title = msg.Header.Get("Subject")
+		if d, derr := msg.Header.Date(); derr == nil {
+			ts = d.Unix()
+		}
+		if from := msg.Header.Get("From"); from != "" {
+			title = title + " (from " + from + ")"
+		}
+		b, _ := io.ReadAll(io.LimitReader(msg.Body, 1<<20))
+		body = strings.TrimSpace(string(b))
+	} else {
+		text := strings.TrimSpace(string(raw))
+		lines := strings.SplitN(text, "\n", 2)
+		title = strings.TrimSpace(lines[0])
+		if len(title) > 120 {
+			title = title[:120]
+		}
+		if title == "" {
+			title = filepath.Base(path)
+		}
+		body = text
+	}
+	r := []rune(body)
+	if len(r) > 4000 {
+		body = string(r[:4000]) + " …"
+	}
+	return title, body, ts
+}
+
+// journalChats brings CONVERSATIONS into the journal , they are text, so they are noted's domain,
+// and routing them here gives ghost.synthd exactly ONE source to distill from. A chat qualifies
+// once quiet for 10 minutes with at least 2 messages; the entry is the transcript (capped , the
+// journal is the diary, the chats table keeps every byte), ref chat:<id>, idempotent like
+// everything else in this table. Incognito never reaches the chats table, so it never reaches
+// here , inherited, not enforced.
+func journalChats(db *poltergres.ReadWrite, lg *slog.Logger) error {
+	cutoff := time.Now().Add(-10 * time.Minute).UnixMilli()
+	rows, err := db.Query(`
+		SELECT c.id, c.title, c.updated_at FROM chats c
+		WHERE c.updated_at < $1
+		  AND NOT EXISTS (SELECT 1 FROM journal_entries j WHERE j.source = 'ghost.noted' AND j.ref = 'chat:' || c.id)
+		  AND (SELECT count(*) FROM chat_messages cm WHERE cm.chat_id = c.id) >= 2
+		ORDER BY c.updated_at DESC LIMIT 10`, cutoff)
+	if err != nil {
+		return err
+	}
+	for _, v := range rows.Vals {
+		if len(v) < 3 || v[0] == nil {
+			continue
+		}
+		chatID := *v[0]
+		title := "conversation"
+		if v[1] != nil && strings.TrimSpace(*v[1]) != "" {
+			title = "conversation: " + strings.TrimSpace(*v[1])
+		}
+		var ts int64
+		if v[2] != nil {
+			if ms, perr := strconv.ParseInt(*v[2], 10, 64); perr == nil {
+				ts = ms / 1000
+			}
+		}
+		mrows, merr := db.Query("SELECT role, content FROM chat_messages WHERE chat_id = $1 ORDER BY id ASC LIMIT 60", chatID)
+		if merr != nil {
+			return merr
+		}
+		var b strings.Builder
+		for _, m := range mrows.Vals {
+			if len(m) >= 2 && m[0] != nil && m[1] != nil {
+				b.WriteString(*m[0] + ": " + *m[1] + "\n")
+			}
+		}
+		body := b.String()
+		if r := []rune(body); len(r) > 4000 {
+			body = string(r[:4000]) + " …"
+		}
+		if err := db.Exec(
+			"INSERT INTO journal_entries (source, ref, ts, title, body, created_at) VALUES ('ghost.noted', $1, $2, $3, $4, $5) ON CONFLICT (source, ref) DO NOTHING",
+			"chat:"+chatID, ts, title, body, time.Now().UnixMilli()); err != nil {
+			return err
+		}
+		lg.Info("chat journaled", "fn", "journalChats", "chat", chatID)
+	}
+	return nil
 }

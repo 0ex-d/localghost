@@ -47,12 +47,81 @@ fun SyncScreen(
         Spacer(Modifier.height(16.dp))
         SectionLabel("ACCESS")
         Spacer(Modifier.height(8.dp))
+        val pctx = androidx.compose.ui.platform.LocalContext.current
+        val openSettings = {
+            pctx.startActivity(android.content.Intent(
+                android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                android.net.Uri.parse("package:" + pctx.packageName)))
+        }
         grantLine("camera photos",
             when { sync.hasImages -> "FULL"; sync.partial -> "PARTIAL"; else -> "none" },
-            ok = sync.hasImages, warn = sync.partial)
-        grantLine("camera videos", if (sync.hasVideo) "FULL" else "none", ok = sync.hasVideo, warn = false)
+            ok = sync.hasImages, warn = sync.partial,
+            rationale = "without this nothing syncs , PARTIAL means Android is hiding most of your photos from the ghost",
+            onFix = onRequestFullAccess)
+        grantLine("camera videos", if (sync.hasVideo) "FULL" else "none", ok = sync.hasVideo, warn = false,
+            rationale = "videos stay on the phone until granted", onFix = onRequestFullAccess)
         grantLine("location (unredacted)", if (sync.hasLocation) "GRANTED" else "none",
-            ok = sync.hasLocation, warn = false)
+            ok = sync.hasLocation, warn = false,
+            rationale = "without this Android strips GPS from synced photos , no places, no map dots",
+            onFix = onRequestFullAccess)
+        Spacer(Modifier.height(4.dp))
+        Text("> every grant feeds ONLY your box. denying one disables its feature, nothing else.",
+            color = TerminalDim, style = MaterialTheme.typography.labelMedium)
+        Text("> permanently denied? [ open system settings ]", color = GhostTextDim,
+            style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier.clickable { openSettings() })
+        run {
+            // HEALTH , Samsung Health writes into the phone's Health Connect store; this reads it
+            // there and ships steps/sleep/exercise to the box (tallyd). The data's only network
+            // hop is phone -> box, same channel as photos. Grant once in the system sheet; sync
+            // ships the last 7 days, upserted, so tapping again only refines.
+            val hctx = androidx.compose.ui.platform.LocalContext.current
+            val scope = androidx.compose.runtime.rememberCoroutineScope()
+            var healthMsg by remember { mutableStateOf("") }
+            var granted by remember { mutableStateOf(false) }
+            var grantedCount by remember { mutableStateOf(0) }
+            LaunchedEffect(Unit) {
+                if (com.localghost.app.sync.HealthSync.available(hctx)) {
+                    grantedCount = com.localghost.app.sync.HealthSync.grantedCount(hctx)
+                    granted = grantedCount == com.localghost.app.sync.HealthSync.PERMISSIONS.size
+                }
+            }
+            val permLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+                androidx.health.connect.client.PermissionController.createRequestPermissionResultContract()) { g ->
+                granted = g.containsAll(com.localghost.app.sync.HealthSync.PERMISSIONS)
+            }
+            val total = com.localghost.app.sync.HealthSync.PERMISSIONS.size
+            grantLine("health (steps · sleep · heart · more)",
+                when { granted -> "FULL"; grantedCount > 0 -> "$grantedCount/$total"; else -> "none" },
+                ok = granted, warn = grantedCount in 1 until total,
+                rationale = "partial is fine , sync ships what is granted and names what it skipped",
+                onFix = { permLauncher.launch(com.localghost.app.sync.HealthSync.PERMISSIONS) })
+            Spacer(Modifier.height(8.dp))
+            if (com.localghost.app.sync.HealthSync.available(hctx)) {
+                GhostButton(if (granted) "SYNC HEALTH (7 DAYS)" else "CONNECT HEALTH",
+                    onClick = {
+                        if (!granted) permLauncher.launch(com.localghost.app.sync.HealthSync.PERMISSIONS)
+                        else scope.launch {
+                            healthMsg = "reading health connect…"
+                            val res = com.localghost.app.sync.HealthSync.sync(hctx)
+                            val skip = if (res.skipped.isEmpty()) "" else
+                                " (skipped: ${res.skipped.joinToString(", ")})"
+                            healthMsg = when {
+                                res.error != null -> "! ${res.error}$skip"
+                                res.days > 0 -> "shipped ${res.days} day(s) to your box$skip"
+                                else -> "no health data found for the last 7 days$skip"
+                            }
+                        }
+                    }, modifier = Modifier.fillMaxWidth())
+                if (healthMsg.isNotEmpty()) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(healthMsg, color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+                }
+            } else {
+                Text("> Health Connect not available on this device", color = TerminalDim,
+                    style = MaterialTheme.typography.labelMedium)
+            }
+        }
         Spacer(Modifier.height(20.dp))
         GhostButton("SYNC NOW", onSync, enabled = !sync.busy, modifier = Modifier.fillMaxWidth())
         if (sync.partial) {
@@ -123,13 +192,23 @@ private fun etaStr(seconds: Long): String = when {
 }
 
 @Composable
-private fun grantLine(label: String, value: String, ok: Boolean, warn: Boolean) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-        Text(if (ok) "[+] " else if (warn) "[~] " else "[ ] ",
-            color = if (ok) TerminalGreen else if (warn) Warning else GhostTextDim,
-            style = MaterialTheme.typography.bodyMedium)
-        Text("$label  ", color = GhostText, style = MaterialTheme.typography.bodyMedium)
-        Text(value, color = if (ok) TerminalGreen else if (warn) Warning else GhostTextDim,
-            style = MaterialTheme.typography.bodyMedium)
+private fun grantLine(label: String, value: String, ok: Boolean, warn: Boolean,
+                      rationale: String = "", onFix: (() -> Unit)? = null) {
+    val fixable = !ok && onFix != null
+    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)
+        .let { if (fixable) it.clickable { onFix!!() } else it }) {
+        Row {
+            Text(if (ok) "[+] " else if (warn) "[~] " else "[ ] ",
+                color = if (ok) TerminalGreen else if (warn) Warning else GhostTextDim,
+                style = MaterialTheme.typography.bodyMedium)
+            Text("$label  ", color = GhostText, style = MaterialTheme.typography.bodyMedium)
+            Text(value, color = if (ok) TerminalGreen else if (warn) Warning else GhostTextDim,
+                style = MaterialTheme.typography.bodyMedium)
+            if (fixable) Text("  [ fix ]", color = TerminalGreen,
+                style = MaterialTheme.typography.labelMedium)
+        }
+        if (rationale.isNotEmpty() && !ok) {
+            Text("    $rationale", color = TerminalDim, style = MaterialTheme.typography.labelMedium)
+        }
     }
 }

@@ -293,6 +293,29 @@ ALTER TABLE frames ADD COLUMN IF NOT EXISTS mime TEXT NOT NULL DEFAULT '';
 -- because pre-column rows fell back to upload mtime when EXIF was absent, and the where-was-I sync
 -- query must not trust those (one poisons MAX(taken_at) and the phone skips its whole roll).
 ALTER TABLE frames ADD COLUMN IF NOT EXISTS taken_src TEXT NOT NULL DEFAULT 'mtime';
+-- place: the on-box reverse-geocoded hierarchy ("North America / Canada / British Columbia / ...").
+-- Empty until geocoded (no GPS, or no GeoNames data on the volume yet); reprocess backfills.
+ALTER TABLE frames ADD COLUMN IF NOT EXISTS place TEXT NOT NULL DEFAULT '';
+-- On-box reverse geocoding, DB-backed: the full GeoNames set is millions of rows , RAM was the
+-- wrong home. Imported once by `ghost-cli ghost.framed geo-import`; the lat/lon btrees make the
+-- expanding-bbox nearest queries cheap. kind: P populated, K park/reserve, F physical feature.
+CREATE TABLE IF NOT EXISTS geo_points (
+  geonameid BIGINT PRIMARY KEY,
+  name      TEXT NOT NULL,
+  lat       DOUBLE PRECISION NOT NULL,
+  lon       DOUBLE PRECISION NOT NULL,
+  kind      CHAR(1) NOT NULL,
+  fcode     TEXT NOT NULL DEFAULT '',
+  country   TEXT NOT NULL DEFAULT '',
+  admin1    TEXT NOT NULL DEFAULT '',
+  admin2    TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS geo_points_lat ON geo_points (lat);
+CREATE INDEX IF NOT EXISTS geo_points_lon ON geo_points (lon);
+CREATE TABLE IF NOT EXISTS geo_names (
+  code TEXT PRIMARY KEY,  -- 'c:CA' country, '1:CA.02' admin1, '2:CA.02.5926' admin2, 'k:CA' continent
+  name TEXT NOT NULL
+);
 
 -- Per-device sync cursors. The phone's local cursor dies with every app reinstall; the box remembers
 -- for it. where-was-I answers max(trusted content time, stored cursor) , so a fresh install resumes
@@ -320,6 +343,74 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     ts      BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS chat_messages_chat ON chat_messages (chat_id, id);
+-- MEMORIES , the durable distillate ghost.shadowd writes from saved conversations (and, later,
+-- from frames/places). One row = one fact/preference/event about the person, with PROVENANCE
+-- (source_chat) and USER SOVEREIGNTY: tombstoned memories are the tag principle again , the model
+-- may never resurrect what the person deleted; user_edited rows are never overwritten by re-
+-- distillation. emb is reserved for the embedding pass (synthd's semantic index); NULL means
+-- keyword-only retrieval, which is the honest v1.
+CREATE TABLE IF NOT EXISTS memories (
+    id          BIGSERIAL PRIMARY KEY,
+    title       TEXT NOT NULL,
+    body        TEXT NOT NULL,
+    kind        TEXT NOT NULL DEFAULT 'distilled', -- distilled | user
+    source_chat BIGINT,
+    created_at  BIGINT NOT NULL,
+    updated_at  BIGINT NOT NULL,
+    user_edited BOOLEAN NOT NULL DEFAULT FALSE,
+    tombstoned  BOOLEAN NOT NULL DEFAULT FALSE,
+    emb         JSONB
+);
+CREATE INDEX IF NOT EXISTS memories_source ON memories (source_chat);
+-- JOURNAL ENTRIES , the ingestion daemons' shared diary. Each ingester (framed, voiced, noted,
+-- tallyd) writes entries for what it saw, in its own words, as it sees it; ghost.synthd is the
+-- ONLY consumer that turns entries into memories/episodes. UNIQUE(source, ref) makes writers
+-- idempotent: framed can reprocess the whole archive and re-write every entry as a no-op.
+CREATE TABLE IF NOT EXISTS journal_entries (
+    id         BIGSERIAL PRIMARY KEY,
+    source     TEXT NOT NULL,             -- ghost.framed | ghost.voiced | ghost.noted | ghost.tallyd
+    ref        TEXT NOT NULL,             -- source-scoped stable id (frame hash, transcript id...)
+    ts         BIGINT NOT NULL,           -- when the underlying thing HAPPENED (taken_at etc)
+    title      TEXT NOT NULL,
+    body       TEXT NOT NULL,
+    created_at BIGINT NOT NULL,
+    distilled  BOOLEAN NOT NULL DEFAULT FALSE, -- synthd's high-water mark
+    UNIQUE (source, ref)
+);
+CREATE INDEX IF NOT EXISTS journal_ts ON journal_entries (ts);
+-- synthd polls WHERE NOT distilled every 10 minutes forever; the partial index keeps that poll
+-- O(undistilled), not O(everything ever journaled).
+CREATE INDEX IF NOT EXISTS frame_tags_hash ON frame_tags (hash);
+CREATE INDEX IF NOT EXISTS journal_undistilled ON journal_entries (ts DESC) WHERE NOT distilled;
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS source_ref TEXT NOT NULL DEFAULT '';
+-- ON THIS DAY reports , synthd-composed retrospectives ("this is what you were doing N years ago
+-- today"), cached per month-day: photos + places from frames, notes from the journal, a short
+-- model-written narrative per year. Regenerated when stale (>20h) , the day's content only changes
+-- when new history syncs in.
+-- HEALTH METRICS , tallyd's time-series. One row per (day, metric): steps, sleep_minutes,
+-- exercise_minutes, distance_km , whatever the phone's Health Connect store offers. Upserted, so
+-- re-syncing a day refines it. tallyd also journals each day's health once (idempotent), which is
+-- how sleep and movement reach synthd's distillation and the check-in's suggestions.
+CREATE TABLE IF NOT EXISTS health_metrics (
+    day    TEXT NOT NULL,      -- YYYY-MM-DD, the PHONE's day
+    metric TEXT NOT NULL,
+    value  DOUBLE PRECISION NOT NULL,
+    PRIMARY KEY (day, metric)
+);
+-- High-resolution samples (heart rate thinned to 5-min on the phone, SpO2, weight events...).
+-- Daily aggregates live in health_metrics; this is the drill-in series. (metric, ts) PK , upsert,
+-- re-sync refines.
+CREATE TABLE IF NOT EXISTS health_samples (
+    metric TEXT NOT NULL,
+    ts     BIGINT NOT NULL,   -- unix seconds
+    value  DOUBLE PRECISION NOT NULL,
+    PRIMARY KEY (metric, ts)
+);
+CREATE TABLE IF NOT EXISTS reports (
+    day          TEXT PRIMARY KEY,       -- 'MM-DD'
+    generated_at BIGINT NOT NULL,
+    body         JSONB NOT NULL
+);
 
 -- Human-facing frame metadata. display_name is DERIVED (date + first tags) by the tag worker and
 -- only ever set when empty , a user rename wins forever. Archive files stay hash-named: bytes are
@@ -878,7 +969,12 @@ func (d *DataStore) stopRedis(slot int, c ServicesConfig) error {
 	if d.redisCmd(mount, "redis-cli", "-p", port, "-a", pw, "ping").Run() != nil {
 		return nil // not running (or unreachable) , nothing to stop
 	}
-	out, err := d.redisCmd(mount, "redis-cli", "-p", port, "-a", pw, "shutdown", "nosave").CombinedOutput()
+	// shutdown SAVE, not nosave: a lock is a PLANNED exit, and nosave was discarding everything
+	// since the last snapshot , with hourly save thresholds, up to an hour of chat mirrors, sync
+	// cursors, and stats rings died at every lock, silently. The thresholds exist to bound CRASH
+	// loss; a shutdown we ourselves ordered has no excuse not to persist. SAVE writes the RDB to
+	// the encrypted volume before exit; on a box this size that is milliseconds to low seconds.
+	out, err := d.redisCmd(mount, "redis-cli", "-p", port, "-a", pw, "shutdown", "save").CombinedOutput()
 	// shutdown closes the connection, so an error here is often benign; check it actually stopped.
 	if d.redisCmd(mount, "redis-cli", "-p", port, "-a", pw, "ping").Run() == nil {
 		return fmt.Errorf("redis slot %d still up after shutdown: %s", slot, strings.TrimSpace(string(out)))

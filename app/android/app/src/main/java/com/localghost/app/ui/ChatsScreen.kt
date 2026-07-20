@@ -1,5 +1,6 @@
 package com.localghost.app.ui
 
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -31,6 +32,8 @@ fun ChatsScreen(
     onNew: () -> Unit,
     onDelete: (String) -> Unit,
     onOpenBoxChat: (Long) -> Unit = {},
+    onRenameBoxChat: (Long, String) -> Unit = { _, _ -> },
+    onDeleteBoxChat: (Long) -> Unit = {},
 ) {
     var query by remember { mutableStateOf("") }
     // THE BOX'S conversations , everything synthd persisted, searched server-side (titles AND
@@ -122,7 +125,9 @@ fun ChatsScreen(
                     }
                     else -> {
                         items(boxChats, key = { "box-" + it.id }) { c ->
-                            BoxChatRow(c) { onOpenBoxChat(c.id) }
+                            BoxChatRow(c, onOpen = { onOpenBoxChat(c.id) },
+                                onRename = { t -> onRenameBoxChat(c.id, t) },
+                                onDelete = { onDeleteBoxChat(c.id) })
                         }
                         if (!boxExhausted) item(key = "box-more") {
                             Text(if (boxLoading) "loading…" else "LOAD MORE ▾",
@@ -149,25 +154,59 @@ fun ChatsScreen(
 }
 
 @Composable
-private fun BoxChatRow(c: BoxClient.BoxChat, onOpen: () -> Unit) {
+private fun BoxChatRow(c: BoxClient.BoxChat, onOpen: () -> Unit, onRename: (String) -> Unit = {}, onDelete: () -> Unit = {}) {
+    // Inline rename: the pencil turns the title into an edit field in place , no dialog, terminal
+    // style. Save sends the new title; the list refresh brings the box's truth back.
+    var editing by remember { mutableStateOf(false) }
+    var confirmDel by remember { mutableStateOf(false) }
+    var draft by remember { mutableStateOf(c.title) }
     Row(
         Modifier.fillMaxWidth()
             .border(1.dp, GhostBorder, RectangleShape)
             .background(Void)
-            .clickable { onOpen() }
+            .clickable(enabled = !editing) { onOpen() }
             .padding(14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
-            Text(c.title.ifBlank { "(untitled)" }, color = GhostText,
-                style = MaterialTheme.typography.bodyMedium,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (editing) {
+                BasicTextField(draft, { draft = it }, singleLine = true,
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(color = TerminalGreen),
+                    cursorBrush = SolidColor(TerminalGreen),
+                    modifier = Modifier.fillMaxWidth())
+            } else {
+                Text(c.title.ifBlank { "(untitled)" }, color = GhostText,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
             Spacer(Modifier.height(2.dp))
             Text(java.text.SimpleDateFormat("MMM d, HH:mm", java.util.Locale.US)
                     .format(java.util.Date(c.updatedAt)) + " · ${c.messages} msgs",
                 color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
         }
-        Text("→", color = TerminalDim, style = MaterialTheme.typography.labelMedium)
+        if (editing) {
+            Text("[ save ]", color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.clickable {
+                    val t = draft.trim()
+                    if (t.isNotEmpty() && t != c.title) onRename(t)
+                    editing = false
+                }.padding(start = 8.dp))
+            Text("[ x ]", color = GhostTextDim, style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.clickable { draft = c.title; editing = false }.padding(start = 8.dp))
+        } else if (confirmDel) {
+            // Two-tap delete , the confirm IS the guard, no dialog. Auto-reverts if ignored.
+            LaunchedEffect(confirmDel) { kotlinx.coroutines.delay(3000); confirmDel = false }
+            Text("[ delete? ]", color = Warning, style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.clickable { onDelete() }.padding(start = 8.dp))
+            Text("[ no ]", color = GhostTextDim, style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.clickable { confirmDel = false }.padding(start = 8.dp))
+        } else {
+            Text("✎", color = GhostTextDim, style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.clickable { draft = c.title; editing = true }.padding(start = 8.dp, end = 6.dp))
+            Text("🗑", color = GhostTextDim, style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.clickable { confirmDel = true }.padding(end = 6.dp))
+            Text("→", color = TerminalDim, style = MaterialTheme.typography.labelMedium)
+        }
     }
     Spacer(Modifier.height(8.dp))
 }

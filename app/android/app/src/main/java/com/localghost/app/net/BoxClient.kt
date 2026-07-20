@@ -557,6 +557,7 @@ object BoxClient {
         val hash: String, val takenAt: Long, val kind: String, val bytes: Long,
         val name: String = "",           // derived on the box: date + first tags; empty until tagged
         val tags: List<String> = emptyList(),
+        val place: String = "",          // reverse-geocoded hierarchy; "" until geo data lands
     )
 
     /** Page the archive newest-first. before=0 for the first page; pass the last row's takenAt to
@@ -570,6 +571,7 @@ object BoxClient {
             GalleryFrame(
                 o.optString("hash"), o.optLong("takenAt"), o.optString("kind"), o.optLong("bytes"),
                 name = o.optString("name", ""),
+                place = o.optString("place", ""),
                 tags = if (tagsArr == null) emptyList()
                        else (0 until tagsArr.length()).mapNotNull { t -> tagsArr.optString(t).takeIf { it.isNotBlank() } },
             )
@@ -597,6 +599,174 @@ object BoxClient {
 
     data class BoxChatMsg(val id: Long, val role: String, val content: String)
     /** One conversation's history, newest first as served; callers reverse for display. */
+    /** Place + name + tag search (AND per term) , the location search over the archive. */
+    suspend fun framesSearch(ctx: Context, q: String): List<GalleryFrame>? = try {
+        val r = BoxHttp.getJson(ctx, "/v1/frames/search?q=" + java.net.URLEncoder.encode(q, "UTF-8"))
+        val a = r.optJSONArray("frames") ?: return emptyList()
+        (0 until a.length()).mapNotNull { i ->
+            val o = a.optJSONObject(i) ?: return@mapNotNull null
+            GalleryFrame(o.optString("hash"), o.optLong("takenAt"), o.optString("kind"),
+                bytes = o.optLong("bytes"), name = o.optString("name"),
+                place = o.optString("place"))
+        }
+    } catch (e: Exception) { android.util.Log.w("LocalGhost", "frames search: ${e.message}"); null }
+
+    /** Ship day-batched health metrics to the box (tallyd ingests). */
+    suspend fun healthUpload(ctx: Context, days: Map<String, Map<String, Double>>,
+                             samples: List<Triple<String, Long, Double>> = emptyList()): Boolean = try {
+        val arr = org.json.JSONArray()
+        days.forEach { (day, metrics) ->
+            val mo = org.json.JSONObject(); metrics.forEach { (k, v) -> mo.put(k, v) }
+            arr.put(org.json.JSONObject().put("day", day).put("metrics", mo))
+        }
+        val sarr = org.json.JSONArray()
+        samples.forEach { (m, ts, v) ->
+            sarr.put(org.json.JSONObject().put("metric", m).put("ts", ts).put("value", v))
+        }
+        BoxHttp.postJson(ctx, "/v1/health",
+            org.json.JSONObject().put("days", arr).put("samples", sarr)); true
+    } catch (_: Exception) { false }
+
+    data class HealthSeries(val metric: String, val days: List<String>, val values: List<Double>)
+
+    suspend fun healthStats(ctx: Context, days: Int = 30): List<HealthSeries>? = try {
+        val r = BoxHttp.getJson(ctx, "/v1/health/stats?days=$days")
+        val a = r.optJSONArray("series") ?: return emptyList()
+        (0 until a.length()).mapNotNull { i ->
+            val o = a.optJSONObject(i) ?: return@mapNotNull null
+            val ds = o.optJSONArray("days") ?: org.json.JSONArray()
+            val vs = o.optJSONArray("values") ?: org.json.JSONArray()
+            HealthSeries(o.optString("metric"),
+                (0 until ds.length()).map { ds.optString(it) },
+                (0 until vs.length()).map { vs.optDouble(it) })
+        }
+    } catch (_: Exception) { null }
+
+    data class DaySummary(val photos: Int, val videos: Int, val places: List<String>, val notes: List<String>,
+        val steps: Int = 0, val sleepMinutes: Int = 0, val exerciseMinutes: Int = 0,
+        val suggested: List<String> = emptyList())
+
+    /** What today looked like so far , the check-in prefill. Bounds are the PHONE's day. */
+    suspend fun daySummary(ctx: Context): DaySummary? = try {
+        val cal = java.util.Calendar.getInstance()
+        cal.set(java.util.Calendar.HOUR_OF_DAY, 0); cal.set(java.util.Calendar.MINUTE, 0)
+        cal.set(java.util.Calendar.SECOND, 0); cal.set(java.util.Calendar.MILLISECOND, 0)
+        val start = cal.timeInMillis / 1000
+        val r = BoxHttp.getJson(ctx, "/v1/day/summary?start=$start&end=${start + 86400}")
+        fun arr(k: String): List<String> { val x = r.optJSONArray(k) ?: return emptyList()
+            return (0 until x.length()).map { x.optString(it) } }
+        DaySummary(r.optInt("photos"), r.optInt("videos"), arr("places"), arr("notes"),
+            r.optInt("steps"), r.optInt("sleep_minutes"), r.optInt("exercise_minutes"), arr("suggested"))
+    } catch (_: Exception) { null }
+
+    data class OtdYear(val year: Int, val yearsAgo: Int, val narrative: String,
+        val places: List<String>, val photos: List<String>, val notes: List<String>)
+
+    /** The On This Day retrospective , synthd-composed, cached on the box. First build of a day
+     *  narrates through the model and can take a minute; cached calls are instant. */
+    suspend fun onThisDay(ctx: Context): List<OtdYear>? = try {
+        val r = BoxHttp.getJson(ctx, "/v1/onthisday")
+        val a = r.optJSONArray("years") ?: return emptyList()
+        (0 until a.length()).mapNotNull { i ->
+            val o = a.optJSONObject(i) ?: return@mapNotNull null
+            fun arr(k: String): List<String> { val x = o.optJSONArray(k) ?: return emptyList()
+                return (0 until x.length()).map { x.optString(it) } }
+            OtdYear(o.optInt("year"), o.optInt("years_ago"), o.optString("narrative"),
+                arr("places"), arr("photos"), arr("notes"))
+        }
+    } catch (e: Exception) { android.util.Log.w("LocalGhost", "onthisday: ${e.message}"); null }
+
+    /** Send text into the journal: secd drops it in noted's inbox; noted ingests on its next tick. */
+    suspend fun noteAdd(ctx: Context, text: String): Boolean = try {
+        BoxHttp.postJson(ctx, "/v1/notes", org.json.JSONObject().put("text", text)); true
+    } catch (_: Exception) { false }
+
+    data class MemRow(val id: Long, val title: String, val body: String, val kind: String, val createdAt: Long)
+
+    suspend fun memoriesList(ctx: Context): List<MemRow>? = try {
+        val r = BoxHttp.getJson(ctx, "/v1/memories")
+        val a = r.optJSONArray("memories") ?: return emptyList()
+        (0 until a.length()).mapNotNull { i ->
+            val o = a.optJSONObject(i) ?: return@mapNotNull null
+            MemRow(o.optLong("id"), o.optString("title"), o.optString("body"),
+                o.optString("kind"), o.optLong("created_at"))
+        }
+    } catch (e: Exception) { android.util.Log.w("LocalGhost", "memories: ${e.message}"); null }
+
+    suspend fun memoryAdd(ctx: Context, title: String, body: String): Boolean = try {
+        BoxHttp.postJson(ctx, "/v1/memories/add", org.json.JSONObject().put("title", title).put("body", body)); true
+    } catch (_: Exception) { false }
+
+    suspend fun memoryEdit(ctx: Context, id: Long, title: String, body: String): Boolean = try {
+        BoxHttp.postJson(ctx, "/v1/memories/edit", org.json.JSONObject().put("id", id).put("title", title).put("body", body)); true
+    } catch (_: Exception) { false }
+
+    suspend fun memoryDelete(ctx: Context, id: Long): Boolean = try {
+        BoxHttp.postJson(ctx, "/v1/memories/delete", org.json.JSONObject().put("id", id)); true
+    } catch (_: Exception) { false }
+
+    data class StatsFreshness(val stale: Boolean, val ageSeconds: Long)
+
+    /** The sampler's freshness , stale means the WATCHER is down and status rows show the past. */
+    suspend fun statsFreshness(ctx: Context): StatsFreshness? = try {
+        val r = BoxHttp.getJson(ctx, "/v1/services/summary")
+        StatsFreshness(r.optBoolean("stale", false), r.optLong("age_seconds", -1))
+    } catch (_: Exception) { null }
+
+    data class GeoPoint(val hash: String, val lat: Double, val lon: Double, val takenAt: Long, val place: String)
+
+    /** GPS-bearing frames as dots for the map. Optional bbox; capped server-side. */
+    suspend fun framesGeo(ctx: Context): List<GeoPoint>? = try {
+        val r = BoxHttp.getJson(ctx, "/v1/frames/geo")
+        val a = r.optJSONArray("points") ?: return emptyList()
+        (0 until a.length()).mapNotNull { i ->
+            val o = a.optJSONObject(i) ?: return@mapNotNull null
+            GeoPoint(o.optString("hash"), o.optDouble("lat"), o.optDouble("lon"),
+                o.optLong("taken_at"), o.optString("place"))
+        }
+    } catch (e: Exception) { android.util.Log.w("LocalGhost", "frames geo: ${e.message}"); null }
+
+    /** Which day tracks exist on the box, newest first. */
+    suspend fun geoDays(ctx: Context, limit: Int = 30): List<String>? = try {
+        val r = BoxHttp.getJson(ctx, "/v1/geo/days?limit=$limit")
+        val a = r.optJSONArray("days") ?: return emptyList()
+        (0 until a.length()).map { a.optString(it) }
+    } catch (_: Exception) { null }
+
+    /** One day's track as ordered lat/lon pairs, pulled from framed's GeoJSON LineStrings. */
+    suspend fun geoDayTrack(ctx: Context, day: String): List<Pair<Double, Double>>? = try {
+        val gj = BoxHttp.getJson(ctx, "/v1/geo/day?d=$day")
+        val out = ArrayList<Pair<Double, Double>>()
+        val feats = gj.optJSONArray("features") ?: return emptyList()
+        for (i in 0 until feats.length()) {
+            val geom = feats.optJSONObject(i)?.optJSONObject("geometry") ?: continue
+            if (geom.optString("type") != "LineString") continue
+            val coords = geom.optJSONArray("coordinates") ?: continue
+            for (j in 0 until coords.length()) {
+                val pt = coords.optJSONArray(j) ?: continue
+                out.add(Pair(pt.optDouble(1), pt.optDouble(0))) // GeoJSON is lon,lat
+            }
+        }
+        out
+    } catch (_: Exception) { null }
+
+    /** The operator-provided Natural Earth GeoJSON, or null (map draws graticule-only, by design). */
+    suspend fun worldGeoJson(ctx: Context): org.json.JSONObject? = try {
+        BoxHttp.getJson(ctx, "/v1/geo/world")
+    } catch (_: Exception) { null }
+
+    /** Rename a persisted chat , the person's title outranks the derived one, permanently. */
+    suspend fun renameChat(ctx: Context, id: Long, title: String): Boolean = try {
+        BoxHttp.postJson(ctx, "/v1/chats/rename", org.json.JSONObject().put("id", id).put("title", title))
+        true
+    } catch (e: Exception) { android.util.Log.w("LocalGhost", "rename chat: ${e.message}"); false }
+
+    /** Delete a persisted chat and its messages , real deletion on the box, rows gone. */
+    suspend fun deleteChat(ctx: Context, id: Long): Boolean = try {
+        BoxHttp.postJson(ctx, "/v1/chats/delete", org.json.JSONObject().put("id", id))
+        true
+    } catch (e: Exception) { android.util.Log.w("LocalGhost", "delete chat: ${e.message}"); false }
+
     suspend fun boxChatMessages(ctx: Context, chatId: Long, beforeId: Long = 0L, limit: Int = 100): List<BoxChatMsg>? = try {
         var path = "/v1/chats/messages?id=$chatId&limit=$limit"
         if (beforeId > 0) path += "&before=$beforeId"

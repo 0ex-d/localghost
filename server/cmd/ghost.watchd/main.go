@@ -27,6 +27,7 @@ import (
 	"github.com/LocalGhostDao/localghost/server/internal/hw"
 	"github.com/LocalGhostDao/localghost/server/internal/rotlog"
 	"github.com/LocalGhostDao/localghost/server/internal/svcconf"
+	"github.com/LocalGhostDao/localghost/server/internal/poltergres"
 	"github.com/LocalGhostDao/localghost/server/internal/watchd"
 )
 
@@ -93,6 +94,28 @@ func main() {
 	defer close(rollerStop)
 
 	sup := watchd.New(*mount, *runUser, jlog)
+	// Transition alerts land in the notifications table , the same feed the app already renders ,
+	// via a LAZY rw connection: the cohort (and this hook's first use) only exists after Postgres
+	// is up, but laziness also survives Postgres restarting under us. Best-effort throughout: an
+	// alert that cannot be written is one log line, never a supervisor problem.
+	var notifDB *poltergres.ReadWrite
+	sup.WithNotify(func(service, kind, title, body string) {
+		if notifDB == nil {
+			cfg, cerr := hw.LoadServicesConfig(*mount)
+			if cerr != nil {
+				jlog.Warn("alert dropped: services.conf unreadable", "fn", "main", "err", cerr)
+				return
+			}
+			notifDB = poltergres.NewReadWrite(hw.SocketForMount(*mount), cfg.Postgres.Port,
+				cfg.Postgres.RWUser, cfg.Postgres.RWPass, cfg.Postgres.Name)
+		}
+		if err := notifDB.Exec(
+			"INSERT INTO notifications (service, kind, title, body, seen, options, created) VALUES ($1,$2,$3,$4, FALSE, '[]', now())",
+			service, kind, title, body); err != nil {
+			jlog.Warn("alert write failed", "fn", "main", "svc", service, "err", err)
+			notifDB = nil // reconnect on the next transition , Postgres may have been mid-restart
+		}
+	})
 	binDir := filepath.Join(*mount, "bin")
 	// Start order comes from the single daemon registry (hw.StartOrder), so it cannot drift from the
 	// supervised set or the seed list. Registry order is the start order (shadowd, critical, first).

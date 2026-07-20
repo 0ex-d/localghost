@@ -2,7 +2,7 @@
 
 # ghost.framed
 
-Image ingestion, archival, and description. Pulls from upstream image sources (or accepts pushes from external agents), stores canonical copies in its own archive, runs a local vision model against each image, produces structured descriptions, and pushes those descriptions through ghost.noted's inbox endpoint so the rest of the fleet sees them as text.
+Image ingestion, archival, and description. Pulls from upstream image sources (or accepts pushes from external agents), stores canonical copies in its own archive, runs a local vision model against each image, produces structured descriptions, and writes its own JOURNAL ENTRIES (journal_entries table, source=ghost.framed, idempotent by frame hash) with what it knows at archive time , kind, when, and the reverse-geocoded place. Captions and tags enrich the MEMORY at distillation time, not the entry. ghost.synthd is the only consumer that turns journal entries into memories.
 
 ## Status
 

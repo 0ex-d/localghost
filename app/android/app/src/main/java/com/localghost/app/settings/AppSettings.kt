@@ -20,6 +20,15 @@ object AppSettings {
         prefs(ctx).edit().putString("think_level", level).apply()
 
     /** Sync pause: honored by BOTH the periodic worker and the auto/manual one-shots. */
+    /** The last saved (non-incognito) box chat the person was in , restored after re-unlock so the
+     *  conversation survives the app process, not just the box (the box always had it; the SCREEN
+     *  forgot). 0 = none. */
+    fun lastCheckinDay(ctx: Context): String = prefs(ctx).getString("last_checkin_day", "") ?: ""
+    fun setLastCheckinDay(ctx: Context, d: String) = prefs(ctx).edit().putString("last_checkin_day", d).apply()
+
+    fun lastChatId(ctx: Context): Long = prefs(ctx).getLong("last_chat_id", 0L)
+    fun setLastChatId(ctx: Context, id: Long) = prefs(ctx).edit().putLong("last_chat_id", id).apply()
+
     fun syncPaused(ctx: Context): Boolean = prefs(ctx).getBoolean("sync_paused", false)
     fun setSyncPaused(ctx: Context, paused: Boolean) =
         prefs(ctx).edit().putBoolean("sync_paused", paused).apply()

@@ -32,6 +32,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -220,6 +221,71 @@ func main() {
 			}
 		}
 		var answer strings.Builder
+		// REASONING SPLIT. This gemma reasons IN-BAND (prompt-injected think, no native
+		// reasoning_content channel), so its thinking arrives as ordinary answer tokens wrapped in
+		// a <think>...</think> block. The app's thinking toggle listens for {"r":...} events that
+		// were never emitted , which is why the panel stayed empty. This streaming splitter re-tags
+		// tokens INSIDE the block as reasoning and everything after </think> as the answer, so the
+		// toggle fills live and only the real answer is persisted. Tag-boundary tokens can straddle
+		// two SSE chunks, so a small carry buffer holds a partial "<think" / "</think" across the
+		// seam. Models WITHOUT the block just stream answer tokens , the splitter is transparent.
+		var inThink, sawThink bool
+		var carry string
+		const openTag, closeTag = "<think>", "</think>"
+		emit := func(kind, text string) { // kind: "r" or "t"
+			if text == "" {
+				return
+			}
+			key := "t"
+			if kind == "r" {
+				key = "r"
+			}
+			nb, _ := json.Marshal(map[string]string{key: text})
+			_, _ = w.Write([]byte("data: " + string(nb) + "\n"))
+			if fl != nil {
+				fl.Flush()
+			}
+		}
+		// route classifies a token's text into reasoning/answer, honoring the open/close tags and
+		// the cross-chunk carry. Returns the answer-visible portion (for persistence).
+		route := func(t string) string {
+			s := carry + t
+			carry = ""
+			var answerOut strings.Builder
+			for len(s) > 0 {
+				if !inThink {
+					i := strings.Index(s, openTag)
+					if i < 0 {
+						// hold a possible partial "<think" tail across the seam
+						if k := partialTail(s, openTag); k > 0 {
+							carry = s[len(s)-k:]
+							s = s[:len(s)-k]
+						}
+						emit("t", s)
+						answerOut.WriteString(s)
+						break
+					}
+					emit("t", s[:i])
+					answerOut.WriteString(s[:i])
+					s = s[i+len(openTag):]
+					inThink, sawThink = true, true
+				} else {
+					i := strings.Index(s, closeTag)
+					if i < 0 {
+						if k := partialTail(s, closeTag); k > 0 {
+							carry = s[len(s)-k:]
+							s = s[:len(s)-k]
+						}
+						emit("r", s)
+						break
+					}
+					emit("r", s[:i])
+					s = s[i+len(closeTag):]
+					inThink = false
+				}
+			}
+			return answerOut.String()
+		}
 		sc := bufio.NewScanner(resp.Body)
 		sc.Buffer(make([]byte, 64<<10), 64<<10)
 		for sc.Scan() {
@@ -232,7 +298,12 @@ func main() {
 				}
 				if json.Unmarshal([]byte(payload), &tok) == nil {
 					if tok.T != "" {
-						answer.WriteString(tok.T)
+						// Split reasoning from answer; only the answer portion is persisted.
+						answer.WriteString(route(tok.T))
+						_ = sawThink
+						if !tok.Done {
+							continue // token already emitted (r or t) by route; skip the raw line
+						}
 					}
 					if tok.Done {
 						if !q.Incognito && chatID != 0 {
@@ -345,6 +416,28 @@ func main() {
 			return ctlsock.Response{OK: true, Data: data}, nil
 		})
 		// index-stats: operator view of the corpus (empty today).
+		// ON THIS DAY , the retrospective. "What was I doing on July 15th, every year the box
+		// knows about" , photos (hashes, for the app's thumb endpoint), places, journal notes, and
+		// a short model narrative per year. Cached per month-day, regenerated past 20h.
+		ctl.Handle("onthisday", func(args json.RawMessage) (ctlsock.Response, error) {
+			var a struct {
+				Day string `json:"day"` // MM-DD; empty = today
+			}
+			if len(args) > 0 {
+				_ = json.Unmarshal(args, &a)
+			}
+			if a.Day == "" {
+				a.Day = time.Now().UTC().Format("01-02")
+			}
+			if _, perr := time.Parse("01-02", a.Day); perr != nil {
+				return ctlsock.Response{OK: false, Err: "day must be MM-DD"}, nil
+			}
+			body, err := onThisDay(runDir, a.Day, lg)
+			if err != nil {
+				return ctlsock.Response{OK: false, Err: err.Error()}, nil
+			}
+			return ctlsock.Response{OK: true, Text: body}, nil
+		})
 		ctl.Handle("index-stats", func(json.RawMessage) (ctlsock.Response, error) {
 			data, _ := json.Marshal(map[string]any{"ready": engine.Ready(), "size": engine.Size()})
 			return ctlsock.Response{OK: true, Data: data}, nil
@@ -358,6 +451,22 @@ func main() {
 	}
 
 	lg.Info("up", "fn", "main", "healthPort", *port, "indexReady", engine.Ready())
+
+	// MEMORY-MAKING , the first real memory source. synthd's charter (how-memory-gets-made) is
+	// journal entries -> entities -> memories -> episodes, fed by ghost.noted; noted is still a
+	// stub, so the first corpus source is the one that already exists: saved conversations,
+	// distilled through oracled. Sovereignty is structural: tombstones never resurrected (chats
+	// with ANY memory rows are never re-distilled), user_edited never overwritten, incognito
+	// invisible by inheritance (never reaches the chats table).
+	mountDir := ""
+	if ld := os.Getenv("GHOST_LOG_DIR"); ld != "" {
+		mountDir = filepath.Dir(ld)
+	} else if runDir != "" {
+		mountDir = filepath.Dir(runDir)
+	}
+	if mountDir != "" {
+		go distillLoop(ctx, mountDir, runDir, lg)
+	}
 
 	<-ctx.Done()
 	lg.Info("shutting down", "fn", "main")
@@ -399,6 +508,7 @@ type chatReply struct {
 type contextSource func(runDir, prompt string) []ctxItem
 
 var contextSources = []contextSource{
+	memoriesSource, // FIRST: what the box knows about the PERSON outranks document search
 	searchdSource,
 	// PLACEHOLDER recentChatsSource: last N turns of this conversation (needs chat storage first ,
 	//   see docs/context-injection-design.md phase 3).
@@ -523,4 +633,380 @@ func searchdSource(runDir, prompt string) []ctxItem {
 		})
 	}
 	return out
+}
+
+// partialTail returns the length of the longest suffix of s that is a strict prefix of tag , the
+// number of trailing bytes to carry across the SSE seam so a tag split between two token chunks
+// ("<thi" + "nk>") is still recognised. 0 when no suffix could begin the tag.
+func partialTail(s, tag string) int {
+	max := len(tag) - 1
+	if max > len(s) {
+		max = len(s)
+	}
+	for k := max; k > 0; k-- {
+		if s[len(s)-k:] == tag[:k] {
+			return k
+		}
+	}
+	return 0
+}
+
+// distillLoop is the writer's heartbeat: every 10 minutes, find finished conversations without
+// memories and distill them. Lazy connections, per-pass reconnect on failure, bounded work per
+// pass (5 chats) so a first run over a long backlog spreads across passes instead of hammering
+// the model for an hour.
+func distillLoop(ctx context.Context, mount, runDir string, lg *slog.Logger) {
+	var db *poltergres.ReadWrite
+	oc := oracle.NewClient(runDir, 2*time.Minute)
+	t := time.NewTicker(10 * time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		if db == nil {
+			cfg, err := hw.LoadServicesConfig(mount)
+			if err != nil {
+				lg.Warn("services.conf unreadable, pass skipped", "fn", "distillLoop", "err", err)
+				continue
+			}
+			db = poltergres.NewReadWrite(hw.SocketForMount(mount), cfg.Postgres.Port,
+				cfg.Postgres.RWUser, cfg.Postgres.RWPass, cfg.Postgres.Name)
+		}
+		n, err := distillPass(db, oc, lg)
+		if err != nil {
+			lg.Warn("distill pass failed, will reconnect next tick", "fn", "distillLoop", "err", err)
+			db = nil
+			continue
+		}
+		if n > 0 {
+			lg.Info("distilled", "fn", "distillLoop", "memories", n)
+		}
+	}
+}
+
+func distillPass(db *poltergres.ReadWrite, oc *oracle.Client, lg *slog.Logger) (int, error) {
+	// ONE SOURCE: the journal. Every ingester (framed, noted , which journals chats too , voiced,
+	// tallyd) writes entries; this pass distills undistilled ones through the model and flips the
+	// distilled flag , which IS the sentinel: flipped even when the model finds nothing durable
+	// (NONE), so nothing is re-summarized; left unflipped on model failure, so it retries. The
+	// person's deletions are never re-litigated because the ENTRY stays distilled regardless of
+	// what happens to the memories it produced.
+	// Per-photo entries from framed are diary lines, not memory candidates , a single routine
+	// photo almost never yields a durable memory, and a full-archive reprocess journals TENS OF
+	// THOUSANDS of them. Feeding each through the model at 8/pass would occupy the GPU for weeks
+	// answering NONE. They are flipped distilled in bulk here; day-level EPISODES over frames are
+	// the real plan (TODO 30d) and will read frames directly, not these entries.
+	if err := db.Exec(
+		"UPDATE journal_entries SET distilled = TRUE WHERE NOT distilled AND source = 'ghost.framed' AND ref NOT LIKE 'timeline:%'"); err != nil {
+		return 0, err
+	}
+	rows, err := db.Query(
+		"SELECT id, source, ref, title, body FROM journal_entries WHERE NOT distilled ORDER BY ts DESC LIMIT 8")
+	if err != nil {
+		return 0, err
+	}
+	written := 0
+	for _, v := range rows.Vals {
+		if len(v) < 5 || v[0] == nil || v[2] == nil {
+			continue
+		}
+		entryID, ref := *v[0], *v[2]
+		title, body := "", ""
+		if v[3] != nil {
+			title = *v[3]
+		}
+		if v[4] != nil {
+			body = *v[4]
+		}
+		resp, ierr := oc.Infer(oracle.Request{
+			Capability: "summarize",
+			Priority:   oracle.PriorityBackground,
+			Input: "From this journal entry, extract up to 3 durable facts, preferences, plans, or events about the USER worth remembering long-term. " +
+				"One per line, format exactly: TITLE | one-sentence body. Only genuinely durable things , a single routine photo or a pleasantry is usually NOTHING. " +
+				"If nothing is worth remembering, reply with exactly: NONE
+
+" + title + "
+
+" + body,
+		})
+		if ierr != nil {
+			lg.Warn("distill inference failed, entry left for a later pass", "fn", "distillPass", "ref", ref, "err", ierr)
+			continue
+		}
+		now := time.Now().UnixMilli()
+		var srcChat int64
+		if strings.HasPrefix(ref, "chat:") {
+			srcChat, _ = strconv.ParseInt(strings.TrimPrefix(ref, "chat:"), 10, 64)
+		}
+		for _, line := range strings.Split(resp.Output, "
+") {
+			line = strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(line), "-*0123456789. "))
+			if line == "" || strings.EqualFold(line, "NONE") {
+				continue
+			}
+			parts := strings.SplitN(line, "|", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			t := strings.TrimSpace(parts[0])
+			b := strings.TrimSpace(parts[1])
+			if t == "" || b == "" || len(t) > 120 || len(b) > 500 {
+				continue
+			}
+			if err := db.Exec(
+				"INSERT INTO memories (title, body, kind, source_chat, source_ref, created_at, updated_at) VALUES ($1,$2,'distilled',NULLIF($3,0),$4,$5,$5)",
+				t, b, srcChat, ref, now); err != nil {
+				return written, err
+			}
+			written++
+		}
+		if err := db.Exec("UPDATE journal_entries SET distilled = TRUE WHERE id = $1", entryID); err != nil {
+			return written, err
+		}
+	}
+	return written, nil
+}
+
+// memDB is memoriesSource's lazy pg handle , same pattern as every volume daemon, package-level
+// because contextSources are plain funcs. Dropped on error, re-dialed next call.
+var memDB *poltergres.ReadWrite
+
+// memoriesSource , the retrieval half of the memory system finally meeting the injection path the
+// architecture built months ago. Keyword term-overlap over the memories table: honest v1 recall
+// (the emb column and semantic ranking are the recorded upgrade), which is exactly enough for
+// "what did I decide about the boat" to surface the boat memory. Live rows only , tombstones are
+// invisible here as everywhere , and user-authored rows compete equally with distilled ones. Top 2
+// by term hits then recency: memories season the chat, they do not flood it.
+func memoriesSource(runDir, prompt string) []ctxItem {
+	terms := make([]string, 0, 6)
+	for _, w := range strings.Fields(strings.ToLower(prompt)) {
+		w = strings.Trim(w, ".,!?\"'()[]:;")
+		if len(w) > 2 {
+			terms = append(terms, w)
+		}
+		if len(terms) == 6 {
+			break
+		}
+	}
+	if len(terms) == 0 {
+		return nil
+	}
+	if memDB == nil {
+		mount := filepath.Dir(runDir)
+		cfg, err := hw.LoadServicesConfig(mount)
+		if err != nil {
+			return nil
+		}
+		memDB = poltergres.NewReadWrite(hw.SocketForMount(mount), cfg.Postgres.Port,
+			cfg.Postgres.RWUser, cfg.Postgres.RWPass, cfg.Postgres.Name)
+	}
+	var sb strings.Builder
+	args := make([]any, 0, len(terms))
+	sb.WriteString("SELECT title, body, created_at FROM memories WHERE NOT tombstoned AND (")
+	for i, t := range terms {
+		if i > 0 {
+			sb.WriteString(" OR ")
+		}
+		p := "$" + strconv.Itoa(i+1)
+		sb.WriteString("title ILIKE " + p + " OR body ILIKE " + p)
+		args = append(args, "%"+t+"%")
+	}
+	sb.WriteString(") ORDER BY created_at DESC LIMIT 12")
+	rows, err := memDB.Query(sb.String(), args...)
+	if err != nil {
+		memDB = nil
+		return nil
+	}
+	type scored struct {
+		it   ctxItem
+		hits int
+	}
+	cand := make([]scored, 0, len(rows.Vals))
+	for _, v := range rows.Vals {
+		if len(v) < 3 || v[0] == nil {
+			continue
+		}
+		title := *v[0]
+		body := ""
+		if v[1] != nil {
+			body = *v[1]
+		}
+		low := strings.ToLower(title + " " + body)
+		hits := 0
+		for _, t := range terms {
+			if strings.Contains(low, t) {
+				hits++
+			}
+		}
+		when := ""
+		if v[2] != nil {
+			if ms, perr := strconv.ParseInt(*v[2], 10, 64); perr == nil {
+				when = time.UnixMilli(ms).UTC().Format("2006-01-02")
+			}
+		}
+		snip := title
+		if body != "" {
+			snip = title + " , " + body
+		}
+		if r := []rune(snip); len(r) > 240 {
+			snip = string(r[:240]) + "…"
+		}
+		cand = append(cand, scored{ctxItem{
+			When: when, Source: "memory", Snippet: snip,
+			Why:   "remembered , matched " + strconv.Itoa(hits) + " of your words",
+			Score: float64(hits) / float64(len(terms)),
+		}, hits})
+	}
+	sort.SliceStable(cand, func(a, b int) bool { return cand[a].hits > cand[b].hits })
+	out := make([]ctxItem, 0, 2)
+	for _, c := range cand {
+		if c.hits == 0 {
+			continue
+		}
+		out = append(out, c.it)
+		if len(out) == 2 {
+			break
+		}
+	}
+	return out
+}
+
+// otdYear is one year's slice of an On This Day report.
+type otdYear struct {
+	Year      int      `json:"year"`
+	YearsAgo  int      `json:"years_ago"`
+	Narrative string   `json:"narrative,omitempty"`
+	Places    []string `json:"places,omitempty"`
+	Photos    []string `json:"photos,omitempty"` // frame hashes , the app renders via /v1/frames/thumb
+	Notes     []string `json:"notes,omitempty"`  // journal entry titles
+}
+
+// onThisDay composes (or returns the cached) report for one month-day. All queries lean on the
+// existing lazy memDB handle. Narrative is BEST-EFFORT per year: an oracled miss leaves that year
+// factual (places + photos + notes stand on their own) rather than failing the report.
+func onThisDay(runDir, day string, lg *slog.Logger) (string, error) {
+	if memDB == nil {
+		mount := filepath.Dir(runDir)
+		cfg, err := hw.LoadServicesConfig(mount)
+		if err != nil {
+			return "", err
+		}
+		memDB = poltergres.NewReadWrite(hw.SocketForMount(mount), cfg.Postgres.Port,
+			cfg.Postgres.RWUser, cfg.Postgres.RWPass, cfg.Postgres.Name)
+	}
+	// fresh cache wins
+	if rows, err := memDB.Query("SELECT body, generated_at FROM reports WHERE day = $1", day); err == nil &&
+		len(rows.Vals) == 1 && rows.Vals[0][0] != nil && rows.Vals[0][1] != nil {
+		if gen, perr := strconv.ParseInt(*rows.Vals[0][1], 10, 64); perr == nil &&
+			time.Since(time.UnixMilli(gen)) < 20*time.Hour {
+			return *rows.Vals[0][0], nil
+		}
+	}
+	nowYear := time.Now().UTC().Year()
+	years := map[int]*otdYear{}
+	get := func(y int) *otdYear {
+		if years[y] == nil {
+			years[y] = &otdYear{Year: y, YearsAgo: nowYear - y}
+		}
+		return years[y]
+	}
+	// photos + places for this month-day, every year except the current one
+	if rows, err := memDB.Query(`
+		SELECT hash, COALESCE(place,''), extract(year from to_timestamp(taken_at))::int AS y
+		FROM frames WHERE kind = 'photo' AND to_char(to_timestamp(taken_at), 'MM-DD') = $1
+		ORDER BY taken_at ASC LIMIT 400`, day); err == nil {
+		for _, v := range rows.Vals {
+			if len(v) < 3 || v[0] == nil || v[2] == nil {
+				continue
+			}
+			y, _ := strconv.Atoi(*v[2])
+			if y == 0 || y == nowYear {
+				continue
+			}
+			yr := get(y)
+			yr.Photos = append(yr.Photos, *v[0]) // ALL candidates; hour-spread picks 12 below
+			if v[1] != nil && *v[1] != "" {
+				seen := false
+				for _, p := range yr.Places {
+					if p == *v[1] {
+						seen = true
+						break
+					}
+				}
+				if !seen && len(yr.Places) < 4 {
+					yr.Places = append(yr.Places, *v[1])
+				}
+			}
+		}
+	}
+	// journal notes for this month-day (chats, dropped texts, jots)
+	if rows, err := memDB.Query(`
+		SELECT title, extract(year from to_timestamp(ts))::int FROM journal_entries
+		WHERE to_char(to_timestamp(ts), 'MM-DD') = $1 AND title <> ''
+		ORDER BY ts ASC LIMIT 100`, day); err == nil {
+		for _, v := range rows.Vals {
+			if len(v) < 2 || v[0] == nil || v[1] == nil {
+				continue
+			}
+			y, _ := strconv.Atoi(*v[1])
+			if y == 0 || y == nowYear {
+				continue
+			}
+			if yr := get(y); len(yr.Notes) < 6 {
+				yr.Notes = append(yr.Notes, *v[0])
+			}
+		}
+	}
+	// SMARTER photo pick: 12 spread ACROSS the day, not the first 12 , the first-N cut showed
+	// twelve frames of breakfast and none of the summit. Photos arrived taken_at-ordered, so
+	// even striding preserves chronology while sampling the whole arc of the day.
+	for _, yr := range years {
+		if n := len(yr.Photos); n > 12 {
+			picked := make([]string, 0, 12)
+			for i := 0; i < 12; i++ {
+				picked = append(picked, yr.Photos[i*n/12])
+			}
+			yr.Photos = picked
+		}
+	}
+	// order years newest-first, narrate the ones with substance (cap 5 model calls)
+	keys := make([]int, 0, len(years))
+	for y := range years {
+		keys = append(keys, y)
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(keys)))
+	oc := oracle.NewClient(runDir, 90*time.Second)
+	narrated := 0
+	out := make([]otdYear, 0, len(keys))
+	for _, y := range keys {
+		yr := years[y]
+		if narrated < 5 && (len(yr.Places) > 0 || len(yr.Notes) > 0) {
+			wd := ""
+			if t, terr := time.Parse("2006-01-02", strconv.Itoa(yr.Year)+"-"+day); terr == nil {
+				wd = "It was a " + t.Weekday().String() + ". "
+			}
+			facts := wd + "Places: " + strings.Join(yr.Places, "; ") + ". Notes: " + strings.Join(yr.Notes, "; ") +
+				". Photo count: " + strconv.Itoa(len(yr.Photos)) + "."
+			if resp, ierr := oc.Infer(oracle.Request{
+				Capability: "summarize", Priority: oracle.PriorityBackground,
+				Input: "Write 2-3 warm, concrete sentences telling the USER what they were doing on this day " +
+					strconv.Itoa(yr.YearsAgo) + " year(s) ago, from these facts. Speak to them as 'you'. No preamble, no invented details.\n\n" + facts,
+			}); ierr == nil {
+				yr.Narrative = strings.TrimSpace(resp.Output)
+				narrated++
+			}
+		}
+		out = append(out, *yr)
+	}
+	b, _ := json.Marshal(map[string]any{"day": day, "years": out})
+	body := string(b)
+	if err := memDB.Exec(
+		"INSERT INTO reports (day, generated_at, body) VALUES ($1,$2,$3::jsonb) ON CONFLICT (day) DO UPDATE SET generated_at = EXCLUDED.generated_at, body = EXCLUDED.body",
+		day, time.Now().UnixMilli(), body); err != nil {
+		lg.Warn("report cache write failed (report still served)", "fn", "onThisDay", "err", err)
+	}
+	return body, nil
 }

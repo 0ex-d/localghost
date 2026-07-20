@@ -105,6 +105,7 @@ android {
     buildToolsVersion = "36.0.0"
 }
 dependencies {
+    implementation("androidx.health.connect:connect-client:1.1.0-alpha07")
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.compose.material3)

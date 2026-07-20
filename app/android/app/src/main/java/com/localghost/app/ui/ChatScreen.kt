@@ -1,11 +1,12 @@
 package com.localghost.app.ui
 
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.shape.CircleShape
@@ -51,10 +52,36 @@ fun ChatScreen(
 ) {
     var input by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
-    LaunchedEffect(messages.size, streaming) {
-        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.size - 1)
+    // FOLLOW THE TAIL, unless the person takes the wheel. followTail flips false the moment a user
+    // drag leaves the bottom, and back true when they return there , so reading something upstream
+    // mid-generation stays exactly where they put it, and letting go at the bottom resumes the ride.
+    val atBottom by remember {
+        derivedStateOf {
+            val info = listState.layoutInfo
+            val last = info.visibleItemsInfo.lastOrNull()
+            last == null || last.index >= info.totalItemsCount - 1
+        }
     }
-    Column(Modifier.fillMaxSize().imePadding()) {
+    var followTail by remember { mutableStateOf(true) }
+    LaunchedEffect(listState.isScrollInProgress, atBottom) {
+        if (listState.isScrollInProgress) followTail = atBottom // user is driving: follow only if they drove TO the bottom
+        else if (atBottom) followTail = true                    // settled at the bottom: resume following
+    }
+    // Keyed on CONTENT growth, not just message count , the old size-only key meant the view sat
+    // still while a long reply streamed past the fold. Tail text + reasoning lengths change per
+    // chunk, so this re-fires exactly when there is new tail to show.
+    val tailLen = messages.lastOrNull()?.text?.length ?: 0
+    val tailThink = messages.lastOrNull()?.reasoning?.length ?: 0
+    LaunchedEffect(messages.size, tailLen, tailThink, streaming) {
+        if (followTail && messages.isNotEmpty()) {
+            listState.scrollToItem(listState.layoutInfo.totalItemsCount.coerceAtLeast(1) - 1)
+        }
+    }
+    // ime MINUS navigationBars, not plain imePadding: the shell already pads the nav bar for every
+    // screen, and the IME inset spans the nav bar's space , plain imePadding stacked the two, which
+    // is why the input box floated a nav-bar-and-change above the keyboard while typing. The
+    // exclusion makes the two layers sum to exactly keyboard height; keyboard closed, it is zero.
+    Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.ime.exclude(WindowInsets.navigationBars))) {
         if (localModeActive) {
             Text("◇ no box, on-phone model, limited context",
                 color = Warning, style = MaterialTheme.typography.labelMedium,
@@ -69,7 +96,9 @@ fun ChatScreen(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 item { Spacer(Modifier.height(8.dp)) }
-                items(messages) { MessageBubble(it) }
+                itemsIndexed(messages) { i, m ->
+                    MessageBubble(m, selectable = !(streaming && i == messages.lastIndex))
+                }
                 if (streaming) item {
                     Text("◇ retrieving from index…", color = TerminalDim,
                         style = MaterialTheme.typography.labelMedium)
@@ -184,9 +213,10 @@ private fun EmptyState(modifier: Modifier) {
 }
 
 @Composable
-private fun MessageBubble(msg: Message) {
+private fun MessageBubble(msg: Message, selectable: Boolean = true) {
     val isUser = msg.role == Message.Role.USER
     var memOpen by remember { mutableStateOf(false) }
+    var thinkOpen by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth(), horizontalAlignment = if (isUser) Alignment.End else Alignment.Start) {
         // injected memories, collapsed behind a green + toggle; white when expanded
         if (msg.memoriesUsed.isNotEmpty()) {
@@ -211,29 +241,59 @@ private fun MessageBubble(msg: Message) {
             Text("⊹ attached  ${msg.attachments.joinToString(" · ") { it.name }}", color = TerminalDim,
                 style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(bottom = 4.dp))
         }
-        Box(Modifier
-            .background(if (isUser) VoidLighter else Void)
-            .border(1.dp, if (isUser) GhostBorder else GhostBorder, RectangleShape)
-            .padding(12.dp)) {
-            // Both sides SELECTABLE , long-press selects, drag extends, the system toolbar copies
-            // fragments. GHOST replies render as markdown (the model emits ###, **, lists); the
-            // USER echo stays LITERAL: what they typed is what they see, asterisks and all.
-            SelectionContainer {
-                if (isUser) {
-                    Text(msg.text, color = GhostText,
-                        style = MaterialTheme.typography.bodyMedium)
-                } else {
-                    MarkdownText(msg.text)
-                }
+        // The model's reasoning, collapsed behind a toggle. It STREAMS while expanded (the message
+        // object is replaced per chunk, so this just recomposes), doubles as the progress indicator
+        // before the first answer token, and stays readable after the answer lands.
+        if (msg.reasoning.isNotEmpty()) {
+            Row(verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.clickable { thinkOpen = !thinkOpen }
+                    .padding(top = 2.dp, bottom = 6.dp, end = 12.dp)) {
+                Text(if (thinkOpen) "−" else "+", color = TerminalDim, fontSize = 13.sp,
+                    modifier = Modifier.padding(end = 6.dp))
+                Text("thinking… (${msg.reasoning.length})", color = TerminalDim,
+                    style = MaterialTheme.typography.labelMedium)
+            }
+            if (thinkOpen) {
+                Text(msg.reasoning, color = GhostTextDim,
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier
+                        .padding(start = 18.dp, bottom = 6.dp)
+                        .animateContentSize()
+                        .background(VoidLighter)
+                        .border(1.dp, GhostBorder, RectangleShape)
+                        .padding(8.dp))
             }
         }
-        // Whole-message copy , selection handles fragments, this grabs the FULL raw text (markdown
-        // markers included, so a copied reply pastes as valid markdown elsewhere) in one tap.
-        val clipboard = LocalClipboardManager.current
-        Text("[ copy ]", color = TerminalDim, style = MaterialTheme.typography.labelMedium,
-            modifier = Modifier
-                .padding(top = 2.dp)
-                .clickable { clipboard.setText(AnnotatedString(msg.text)) })
+        // No bubble around nothing: while the model is still reasoning the answer text is empty,
+        // and an empty bordered box under the thinking row read as a rendering bug.
+        if (msg.text.isNotEmpty()) {
+            Box(Modifier
+                .background(if (isUser) VoidLighter else Void)
+                .border(1.dp, if (isUser) GhostBorder else GhostBorder, RectangleShape)
+                .padding(12.dp)) {
+                // GHOST replies render as markdown; the USER echo stays LITERAL. Selection wraps
+                // COMPLETED messages only: a SelectionContainer over a multi-Text tree recomposing
+                // per token inside a LazyColumn is exactly the fragile construct that blanked the
+                // stream , and selecting mid-stream is pointless anyway. The message becomes
+                // selectable the moment streaming ends.
+                val body: @Composable () -> Unit = {
+                    if (isUser) {
+                        Text(msg.text, color = GhostText,
+                            style = MaterialTheme.typography.bodyMedium)
+                    } else {
+                        MarkdownText(msg.text)
+                    }
+                }
+                if (selectable) SelectionContainer { body() } else body()
+            }
+            // Whole-message copy , selection handles fragments, this grabs the FULL raw text
+            // (markdown markers included, so a copied reply pastes as valid markdown elsewhere).
+            val clipboard = LocalClipboardManager.current
+            Text("[ copy ]", color = TerminalDim, style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier
+                    .padding(top = 2.dp)
+                    .clickable { clipboard.setText(AnnotatedString(msg.text)) })
+        }
     }
 }
 

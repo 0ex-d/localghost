@@ -19,6 +19,12 @@ type Meta struct {
 	Lat     float64
 	Lon     float64
 	HasGPS  bool
+	// Orientation is the EXIF orientation (tag 0x0112), 1..8; 0 when absent. Phones store the
+	// sensor's native landscape pixels and record HOW TO DISPLAY them here , a portrait shot is
+	// landscape bytes plus Orientation 6/8. Ignoring it is why portraits rendered sideways in the
+	// gallery: every viewer that looked right (Samsung Gallery) was applying this tag, and our
+	// preview derivation was not.
+	Orientation int
 }
 
 var errNoExif = errors.New("no exif")
@@ -105,6 +111,12 @@ func parseTIFF(t []byte) (Meta, error) {
 		case 0x8825: // GPSInfoIFDPointer
 			if typ == 4 && count == 1 {
 				gpsOff = int(bo.Uint32(val))
+			}
+		case 0x0112: // Orientation, SHORT, IFD0
+			if typ == 3 && count == 1 && len(val) >= 2 {
+				if o := int(bo.Uint16(val[:2])); o >= 1 && o <= 8 {
+					m.Orientation = o
+				}
 			}
 		}
 	})

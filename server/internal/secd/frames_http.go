@@ -21,6 +21,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"sort"
 	"strings"
 	"time"
 )
@@ -488,4 +489,259 @@ func spoolBody(dir string, r *http.Request, maxBytes int64, uid, gid int) (int64
 		_ = os.Chown(dir, uid, gid)
 	}
 	return n, nil
+}
+
+// handleFramesGeo , GET /v1/frames/geo?minlat&maxlat&minlon&maxlon&limit , GPS-bearing frames as
+// dots for the MAP. All parameters optional: no bbox means the whole world (capped). Same appears-
+// down discipline as everything else.
+func (s *Server) handleFramesGeo(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodGet {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	qp := r.URL.Query()
+	pf := func(k string, def float64) float64 {
+		v, err := strconv.ParseFloat(qp.Get(k), 64)
+		if err != nil {
+			return def
+		}
+		return v
+	}
+	limit, _ := strconv.Atoi(qp.Get("limit"))
+	pts, err := s.notif.FramesGeo(mounted,
+		pf("minlat", -90), pf("maxlat", 90), pf("minlon", -180), pf("maxlon", 180), limit)
+	if err != nil {
+		secdLog.Warn("frames geo failed", "fn", "handleFramesGeo", "err", err)
+		s.appearsDown(w)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"points": pts})
+}
+
+// handleFramesSearch , GET /v1/frames/search?q=&limit , place + display-name + tag search, AND per
+// term. "waterfall vancouver island" works the way a person means it.
+func (s *Server) handleFramesSearch(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodGet {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	q := r.URL.Query().Get("q")
+	if len(q) > 160 {
+		q = q[:160]
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	rowsOut, err := s.notif.FramesSearch(mounted, q, limit)
+	if err != nil {
+		secdLog.Warn("frames search failed", "fn", "handleFramesSearch", "err", err)
+		s.appearsDown(w)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"frames": rowsOut})
+}
+
+// handleGeoWorld , GET /v1/geo/world , serves the operator-provided Natural Earth GeoJSON from the
+// volume (<mount>/geo/world.geojson) for the app's self-drawn base map. Absent file appears down ,
+// the map renders without landmass (graticule + tracks + dots), by design.
+func (s *Server) handleGeoWorld(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodGet {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	path := filepath.Join(s.cfg.StateDir, "mnt", fmt.Sprintf("slot%d", mounted), "geo", "world.geojson")
+	f, err := os.Open(path)
+	if err != nil {
+		s.appearsDown(w)
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = io.Copy(w, f)
+}
+
+// handleGeoDays , GET /v1/geo/days?limit=N , which day tracks exist (framed's RebuildDay output),
+// newest first. The MAP uses this to know what it can draw.
+func (s *Server) handleGeoDays(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodGet {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 400 {
+		limit = 60
+	}
+	dir := filepath.Join(s.cfg.StateDir, "mnt", fmt.Sprintf("slot%d", mounted), "paths")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		// No paths dir yet is a normal young-box state , empty list, not appears-down.
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"days": []string{}})
+		return
+	}
+	days := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".geojson") {
+			days = append(days, strings.TrimSuffix(e.Name(), ".geojson"))
+		}
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(days))) // YYYY-MM-DD sorts lexically
+	if len(days) > limit {
+		days = days[:limit]
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"days": days})
+}
+
+// handleGeoDay , GET /v1/geo/day?d=YYYY-MM-DD , one day's track GeoJSON, exactly as framed wrote it.
+func (s *Server) handleGeoDay(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodGet {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	d := r.URL.Query().Get("d")
+	if _, err := time.Parse("2006-01-02", d); err != nil { // strict date = the path-traversal guard
+		s.appearsDown(w)
+		return
+	}
+	path := filepath.Join(s.cfg.StateDir, "mnt", fmt.Sprintf("slot%d", mounted), "paths", d+".geojson")
+	f, err := os.Open(path)
+	if err != nil {
+		s.appearsDown(w)
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = io.Copy(w, f)
+}
+
+// handleDaySummary , GET /v1/day/summary?start=&end= (unix seconds, the CALLER's day bounds , the
+// phone knows its timezone, the box does not guess). The check-in prefill and any "what did today
+// look like" consumer.
+func (s *Server) handleDaySummary(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodGet {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	start, _ := strconv.ParseInt(r.URL.Query().Get("start"), 10, 64)
+	end, _ := strconv.ParseInt(r.URL.Query().Get("end"), 10, 64)
+	if start <= 0 || end <= start || end-start > 172800 {
+		s.appearsDown(w)
+		return
+	}
+	sum, err := s.notif.DayContext(mounted, start, end)
+	if err != nil {
+		secdLog.Warn("day summary failed", "fn", "handleDaySummary", "err", err)
+		s.appearsDown(w)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(sum)
+}
+
+// handleHealthUpload , POST /v1/health {"days":[{"day","metrics":{...}}]} , the phone's Health
+// Connect readout, dropped as a batch into tallyd's inbox. Same one-path rule as notes.
+func (s *Server) handleHealthUpload(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodPost {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 256*1024))
+	if err != nil || len(body) == 0 || !json.Valid(body) {
+		s.appearsDown(w)
+		return
+	}
+	inbox := filepath.Join(s.cfg.StateDir, "mnt", fmt.Sprintf("slot%d", mounted), "tallyd", "inbox")
+	if err := os.MkdirAll(inbox, 0o750); err != nil {
+		s.appearsDown(w)
+		return
+	}
+	path := filepath.Join(inbox, fmt.Sprintf("health-%d.json", time.Now().UnixNano()))
+	if err := os.WriteFile(path, body, 0o640); err != nil {
+		s.appearsDown(w)
+		return
+	}
+	if s.cfg.RunUser != "" {
+		if u, uerr := user.Lookup(s.cfg.RunUser); uerr == nil {
+			uid, _ := strconv.Atoi(u.Uid)
+			gid, _ := strconv.Atoi(u.Gid)
+			_ = os.Chown(path, uid, gid)
+			_ = os.Chown(inbox, uid, gid)
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+}
+
+// handleHealthStats , GET /v1/health/stats?days=N , daily series per metric for the HEALTH screen.
+func (s *Server) handleHealthStats(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodGet {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	n, _ := strconv.Atoi(r.URL.Query().Get("days"))
+	series, err := s.notif.HealthStats(mounted, n)
+	if err != nil {
+		secdLog.Warn("health stats failed", "fn", "handleHealthStats", "err", err)
+		s.appearsDown(w)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"series": series})
 }

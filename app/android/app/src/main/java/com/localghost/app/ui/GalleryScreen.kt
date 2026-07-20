@@ -36,6 +36,16 @@ import com.localghost.app.ui.theme.*
 fun GalleryScreen() {
     val ctx = LocalContext.current
     var frames by remember { mutableStateOf(listOf<BoxClient.GalleryFrame>()) }
+    var query by remember { mutableStateOf("") }
+    var results by remember { mutableStateOf<List<BoxClient.GalleryFrame>?>(null) }
+    // The location-and-tags search , "waterfall vancouver island" over place + name + tags, AND per
+    // term, served by /v1/frames/search. Empty query returns to the paged archive.
+    LaunchedEffect(query) {
+        val q = query.trim()
+        if (q.length < 2) { results = null; return@LaunchedEffect }
+        kotlinx.coroutines.delay(350) // debounce typing
+        results = BoxClient.framesSearch(ctx, q)
+    }
     var selected by remember { mutableStateOf<BoxClient.GalleryFrame?>(null) }
 
     selected?.let { f ->
@@ -69,11 +79,39 @@ fun GalleryScreen() {
         Text(
             "What is archived on your box , copies streamed from the encrypted volume, newest first.",
             color = TerminalDim, style = MaterialTheme.typography.bodySmall)
+        Spacer(Modifier.height(10.dp))
+        // Location + tags search. Terminal-styled inline field; blank returns to the paged archive.
+        androidx.compose.foundation.text.BasicTextField(
+            value = query, onValueChange = { query = it }, singleLine = true,
+            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                imeAction = androidx.compose.ui.text.input.ImeAction.Search),
+            textStyle = MaterialTheme.typography.bodyMedium.copy(color = GhostText),
+            cursorBrush = androidx.compose.ui.graphics.SolidColor(TerminalGreen),
+            decorationBox = { inner ->
+                Row(Modifier.fillMaxWidth().border(1.dp, GhostBorder, RectangleShape).padding(10.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Text("⌕ ", color = TerminalDim, style = MaterialTheme.typography.bodyMedium)
+                    Box(Modifier.weight(1f)) {
+                        if (query.isEmpty()) Text("place, tags , e.g. waterfall vancouver island",
+                            color = TerminalDim, style = MaterialTheme.typography.bodyMedium)
+                        inner()
+                    }
+                    if (query.isNotEmpty()) Text("✕", color = GhostTextDim,
+                        modifier = Modifier.clickable { query = "" }.padding(start = 6.dp))
+                }
+            })
         Spacer(Modifier.height(12.dp))
 
-        if (frames.isEmpty() && !loading) {
-            Text("! nothing archived yet , run a sync", color = TerminalDim,
-                style = MaterialTheme.typography.bodyMedium)
+        val shown = results ?: frames
+        if (results != null) {
+            Text("${shown.size} result${if (shown.size == 1) "" else "s"} for "${query.trim()}"",
+                color = TerminalDim, style = MaterialTheme.typography.labelMedium)
+            Spacer(Modifier.height(6.dp))
+        }
+        if (shown.isEmpty() && !loading) {
+            Text(if (results != null) "! nothing matches , try fewer words"
+                 else "! nothing archived yet , run a sync",
+                color = TerminalDim, style = MaterialTheme.typography.bodyMedium)
         }
 
         LazyVerticalGrid(
@@ -82,7 +120,7 @@ fun GalleryScreen() {
             verticalArrangement = Arrangement.spacedBy(4.dp),
             modifier = Modifier.weight(1f)
         ) {
-            items(frames, key = { it.hash }) { frame ->
+            items(shown, key = { it.hash }) { frame ->
                 // Fetch each thumb once; null means tried-and-missing (video or fetch failure).
                 LaunchedEffect(frame.hash) {
                     if (!thumbs.containsKey(frame.hash)) {
@@ -113,7 +151,7 @@ fun GalleryScreen() {
                     }
                 }
             }
-            if (!endReached) {
+            if (!endReached && results == null) {
                 item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(3) }) {
                     var wantMore by remember { mutableStateOf(false) }
                     LaunchedEffect(wantMore) { if (wantMore) { loadPage(); wantMore = false } }
@@ -165,6 +203,11 @@ private fun FrameDetailDialog(
                 java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US)
                     .format(java.util.Date(frame.takenAt * 1000)) + " · ${frame.kind}",
                 color = GhostTextDim, style = MaterialTheme.typography.bodySmall)
+            if (frame.place.isNotBlank()) {
+                Spacer(Modifier.height(4.dp))
+                Text("⌖ ${frame.place}", color = TerminalDim,
+                    style = MaterialTheme.typography.bodySmall)
+            }
             Spacer(Modifier.height(12.dp))
             Text("TAGS", color = TerminalDim, style = MaterialTheme.typography.labelSmall)
             Spacer(Modifier.height(6.dp))

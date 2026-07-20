@@ -13,6 +13,10 @@ data class Message(
     val text: String,
     val memoriesUsed: List<String> = emptyList(),
     val attachments: List<Attachment> = emptyList(),
+    // The model's REASONING, streamed live and kept after the answer. Rendered collapsed behind a
+    // "thinking…" toggle; not persisted by the box (chat history reloads with it empty, which is
+    // honest , the box stores the conversation, not the scratchpad).
+    val reasoning: String = "",
 ) {
     enum class Role { USER, GHOST }
 }

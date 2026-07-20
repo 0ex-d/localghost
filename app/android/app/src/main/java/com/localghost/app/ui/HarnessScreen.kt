@@ -38,6 +38,22 @@ fun HarnessScreen(daemons: Loadable<List<DaemonStatus>>) {
                  color = GhostTextDim, style = MaterialTheme.typography.bodyMedium)
             Spacer(Modifier.height(6.dp))
         }
+        item {
+            // NOBODY-WATCHES-WATCHD, surfaced: the sampler writes every 10s; stale rings mean the
+            // watcher itself (or Redis) is down, and everything below is the PAST wearing green.
+            val hctx = androidx.compose.ui.platform.LocalContext.current
+            var fresh by remember { mutableStateOf<BoxClient.StatsFreshness?>(null) }
+            LaunchedEffect(Unit) { fresh = BoxClient.statsFreshness(hctx) }
+            fresh?.let { f ->
+                if (f.stale) {
+                    Text("⚠ STALE , last sample " +
+                        (if (f.ageSeconds >= 0) "${f.ageSeconds}s ago" else "never") +
+                        ". The watcher itself may be down; rows below show the last known state, not the present.",
+                        color = Warning, style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.padding(bottom = 6.dp))
+                }
+            }
+        }
         when (daemons) {
             is Loadable.Loading -> item { LoadingRow("polling daemons…") }
             is Loadable.Failed -> item { ErrorLine(daemons.reason) }

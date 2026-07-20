@@ -10,7 +10,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"log/slog"
 	"os"
@@ -18,7 +20,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"syscall"
+	"time"
 
+	"github.com/LocalGhostDao/localghost/server/internal/hw"
+	"github.com/LocalGhostDao/localghost/server/internal/poltergres"
 	"github.com/LocalGhostDao/localghost/server/internal/ctlsock"
 	"github.com/LocalGhostDao/localghost/server/internal/ghosthealth"
 	"github.com/LocalGhostDao/localghost/server/internal/rotlog"
@@ -86,7 +91,15 @@ func main() {
 		}()
 	}
 
-	lg.Info("stub up", "fn", "main", "healthPort", *port)
+	// FIRST REAL SLICE: health ingestion. The app reads the phone's Health Connect store (where
+	// Samsung Health writes) and posts day-batches; secd drops them as JSON in <mount>/tallyd/
+	// inbox; this loop upserts health_metrics and journals each day once , which is how sleep and
+	// movement reach synthd's distillation and the check-in's suggestions. Structured data in,
+	// time-series + diary out , exactly the charter.
+	if runDir != "" {
+		go healthLoop(ctx, filepath.Dir(runDir), lg)
+		lg.Info("health ingestion up", "fn", "main")
+	}
 
 	<-ctx.Done()
 	lg.Info("shutting down", "fn", "main")
@@ -99,4 +112,140 @@ func envPort(key string) int {
 		}
 	}
 	return 0
+}
+
+// healthLoop polls tallyd's inbox for health day-batches , the same lazy-pg inbox pattern as noted.
+func healthLoop(ctx context.Context, mount string, lg *slog.Logger) {
+	inbox := filepath.Join(mount, "tallyd", "inbox")
+	done := filepath.Join(mount, "tallyd", "done")
+	for _, d := range []string{inbox, done} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			lg.Error("inbox dirs", "fn", "healthLoop", "err", err)
+			return
+		}
+	}
+	var db *poltergres.ReadWrite
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		entries, err := os.ReadDir(inbox)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			if db == nil {
+				cfg, cerr := hw.LoadServicesConfig(mount)
+				if cerr != nil {
+					break
+				}
+				db = poltergres.NewReadWrite(hw.SocketForMount(mount), cfg.Postgres.Port,
+					cfg.Postgres.RWUser, cfg.Postgres.RWPass, cfg.Postgres.Name)
+			}
+			path := filepath.Join(inbox, e.Name())
+			if err := ingestHealth(db, path, lg); err != nil {
+				lg.Warn("health ingest failed, will retry next tick", "fn", "healthLoop", "file", e.Name(), "err", err)
+				db = nil
+				continue
+			}
+			_ = os.Rename(path, filepath.Join(done, e.Name()))
+		}
+	}
+}
+
+type healthDay struct {
+	Day     string             `json:"day"`
+	Metrics map[string]float64 `json:"metrics"`
+}
+
+type healthSample struct {
+	Metric string  `json:"metric"`
+	TS     int64   `json:"ts"`
+	Value  float64 `json:"value"`
+}
+
+func ingestHealth(db *poltergres.ReadWrite, path string, lg *slog.Logger) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var batch struct {
+		Days    []healthDay    `json:"days"`
+		Samples []healthSample `json:"samples"`
+	}
+	if err := json.Unmarshal(raw, &batch); err != nil {
+		// Malformed is a rename-to-done with a log, not a retry loop.
+		lg.Warn("health batch unparseable, skipped", "fn", "ingestHealth", "err", err)
+		return nil
+	}
+	for _, sm := range batch.Samples {
+		if sm.TS <= 0 || len(sm.Metric) > 40 {
+			continue
+		}
+		if err := db.Exec(
+			"INSERT INTO health_samples (metric, ts, value) VALUES ($1,$2,$3) ON CONFLICT (metric, ts) DO UPDATE SET value = EXCLUDED.value",
+			sm.Metric, sm.TS, sm.Value); err != nil {
+			return err
+		}
+	}
+	for _, d := range batch.Days {
+		if _, perr := time.Parse("2006-01-02", d.Day); perr != nil {
+			continue
+		}
+		for metric, val := range d.Metrics {
+			if len(metric) > 40 {
+				continue
+			}
+			if err := db.Exec(
+				"INSERT INTO health_metrics (day, metric, value) VALUES ($1,$2,$3) ON CONFLICT (day, metric) DO UPDATE SET value = EXCLUDED.value",
+				d.Day, metric, val); err != nil {
+				return err
+			}
+		}
+		// One journal line per day , idempotent, so sleep and movement reach the distiller. The
+		// entry states what was measured; interpretation is the distiller's and the check-in's job.
+		parts := ""
+		if v, ok := d.Metrics["sleep_minutes"]; ok && v > 0 {
+			parts += fmt.Sprintf("Slept %dh%02dm. ", int(v)/60, int(v)%60)
+		}
+		if v, ok := d.Metrics["steps"]; ok && v > 0 {
+			parts += fmt.Sprintf("%d steps. ", int(v))
+		}
+		if v, ok := d.Metrics["exercise_minutes"]; ok && v > 0 {
+			parts += fmt.Sprintf("%d min of exercise. ", int(v))
+		}
+		if v, ok := d.Metrics["distance_km"]; ok && v > 0.1 {
+			parts += fmt.Sprintf("%.1f km. ", v)
+		}
+		if v, ok := d.Metrics["calories"]; ok && v > 0 {
+			parts += fmt.Sprintf("%d kcal. ", int(v))
+		}
+		if v, ok := d.Metrics["hr_avg"]; ok && v > 0 {
+			hi := ""
+			if m, ok2 := d.Metrics["hr_max"]; ok2 && m > 0 {
+				hi = fmt.Sprintf(" (peak %d)", int(m))
+			}
+			parts += fmt.Sprintf("Avg heart rate %d%s. ", int(v), hi)
+		}
+		if parts == "" {
+			continue
+		}
+		ts := int64(0)
+		if t, terr := time.Parse("2006-01-02", d.Day); terr == nil {
+			ts = t.Unix() + 43200 // midday anchor
+		}
+		if err := db.Exec(
+			"INSERT INTO journal_entries (source, ref, ts, title, body, created_at) VALUES ('ghost.tallyd', $1, $2, $3, $4, $5) ON CONFLICT (source, ref) DO NOTHING",
+			"health:"+d.Day, ts, "health , "+d.Day, parts, time.Now().UnixMilli()); err != nil {
+			return err
+		}
+	}
+	return nil
 }

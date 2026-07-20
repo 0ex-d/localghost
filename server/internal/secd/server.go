@@ -201,6 +201,22 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/services/detail", s.handleServiceDetail)    // ring buffers for one target (sparklines)
 	mux.HandleFunc("/v1/chats", s.handleChatsList)            // persisted conversations: list + search + paging
 	mux.HandleFunc("/v1/chats/messages", s.handleChatMessages) // one conversation's history, paged
+	mux.HandleFunc("/v1/chats/rename", s.handleChatRename)     // the person's title outranks the derived one
+	mux.HandleFunc("/v1/chats/delete", s.handleChatDelete)     // real deletion: rows gone, not flagged
+	mux.HandleFunc("/v1/frames/geo", s.handleFramesGeo)        // GPS frames as dots, for the map
+	mux.HandleFunc("/v1/frames/search", s.handleFramesSearch)  // place + name + tags, AND per term
+	mux.HandleFunc("/v1/geo/world", s.handleGeoWorld)
+	mux.HandleFunc("/v1/geo/days", s.handleGeoDays)            // which day tracks exist
+	mux.HandleFunc("/v1/geo/day", s.handleGeoDay)              // one day's track, as framed wrote it          // operator-provided base-map GeoJSON
+	mux.HandleFunc("/v1/memories", s.handleMemories)           // the distilled corpus, live rows
+	mux.HandleFunc("/v1/memories/delete", s.handleMemoryDelete) // tombstone: deletion outranks the model
+	mux.HandleFunc("/v1/memories/add", s.handleMemoryAdd)       // user-authored, sovereign from birth
+	mux.HandleFunc("/v1/memories/edit", s.handleMemoryEdit)     // the person's version IS the memory
+	mux.HandleFunc("/v1/notes", s.handleNoteAdd)                // app -> noted inbox -> journal
+	mux.HandleFunc("/v1/onthisday", s.handleOnThisDay)          // synthd's retrospective, cached per day
+	mux.HandleFunc("/v1/day/summary", s.handleDaySummary)       // one day at a glance, check-in prefill
+	mux.HandleFunc("/v1/health", s.handleHealthUpload)          // Health Connect readout -> tallyd inbox
+	mux.HandleFunc("/v1/health/stats", s.handleHealthStats)     // daily series per metric
 	mux.HandleFunc("/v1/chat", s.handleChat)                  // ask the box's model (via synthd's retrieval seam)
 	mux.HandleFunc("/v1/locations", s.handleLocations)
 	mux.HandleFunc("/v1/models", s.handleModels)

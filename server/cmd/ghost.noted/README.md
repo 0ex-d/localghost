@@ -5,7 +5,7 @@ Text ingestion, archival, and journal-entry extraction. Pulls from upstream sour
 
 ## Status
 
-Phase 0. No code. This document describes the architecture as of April 2026, before first commit. It will be revised after implementation starts, especially the extraction prompt, the sync scheduling, and the conflict-resolution behaviour, which are the parts most likely to need tuning against real data.
+First real slice landed 2026-07-15: the INBOX. Drop text at <mount>/noted/inbox , .eml (stdlib net/mail; Subject/Date/From honored) or any plain text , and it becomes a journal entry (source=ghost.noted, ref=content hash, idempotent) plus a content-addressed canonical copy in <mount>/noted/archive. Unparseable files move to inbox/rejected, never deleted, never looped. ghost.synthd distills from the journal; noted never talks to the model. Not yet: upstream pullers (IMAP etc.), the secd upload endpoint for the app's share sheet, mentions extraction , those stay as described below.
 
 ## Purpose
 

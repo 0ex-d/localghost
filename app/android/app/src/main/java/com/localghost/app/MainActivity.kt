@@ -206,6 +206,7 @@ class MainActivity : ComponentActivity() {
             repeatOnLifecycle(Lifecycle.State.STARTED) { ForegroundPoller.run(this@MainActivity) }
         }
 
+        captureShare(intent)
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
@@ -289,6 +290,13 @@ class MainActivity : ComponentActivity() {
                         allowMobileSync = allowMobileSyncState,
                         thinkLevel = thinkLevelState,
                         onOpenBoxChat = { id -> openBoxChat(id) },
+                        onRenameBoxChat = { id, title ->
+                            lifecycleScope.launch {
+                                BoxClient.renameChat(this@MainActivity, id, title)
+                                refreshChats()
+                            }
+                        },
+                        onDeleteBoxChat = { id -> deleteConversation(id.toString()) },
                         incognito = incognitoState,
                         onToggleIncognito = {
                             incognitoState = !incognitoState
@@ -328,6 +336,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         super.onStop()
+        autoPrompted = false
         // authGate decides: lock + tear down unless we launched a picker, or a crash is showing.
         // Setup AND Scan survive backgrounding: both are pre-enrolment (the user isn't enrolled yet, so
         // the gate is wrong), and Scan in particular backgrounds the activity itself when the camera
@@ -364,7 +373,7 @@ class MainActivity : ComponentActivity() {
 
     private suspend fun generateFromBox(text: String, atts: List<Attachment>) {
         var reply = ""
-        var reasoningChars = 0
+        var reasoning = ""
         var mems: List<String> = emptyList()
         // First image attachment rides the stream as base64 , the box's projector (the same one
         // captioning the archive) answers questions about what it sees. One image for now; the
@@ -381,25 +390,30 @@ class MainActivity : ComponentActivity() {
         BoxClient.chat(incognito = incognitoState, chatId = if (incognitoState) 0L else currentChatId, messages.toList(), text, activeConvId, atts, chatCaps, imageB64 = imageB64).collect { chunk ->
             when (chunk) {
                 is BoxClient.ChatChunk.Memories -> mems = chunk.ids
-                is BoxClient.ChatChunk.ChatId -> currentChatId = chunk.id
+                is BoxClient.ChatChunk.ChatId -> {
+                    currentChatId = chunk.id
+                    // Persisted so the conversation survives the PROCESS, not just the box , the box
+                    // always kept it; the screen forgot it on every re-unlock.
+                    AppSettings.setLastChatId(this@MainActivity, chunk.id)
+                    refreshChats() // the adopted chat just moved to the top of the recents
+                }
                 is BoxClient.ChatChunk.Reasoning -> {
-                    // The model thinking, LIVE. Before this event existed the entire reasoning
-                    // phase was dead air , the screen sat on its waiting label for minutes and a
-                    // budget spent mid-think produced no answer at all. Until the first real token,
-                    // the placeholder shows thinking progress; the answer then replaces it.
-                    reasoningChars += chunk.text.length
-                    if (reply.isEmpty()) {
-                        val ind = "· thinking… ($reasoningChars)"
-                        if (messages.lastOrNull()?.role == Message.Role.GHOST)
-                            messages[messages.size - 1] = Message(Message.Role.GHOST, ind, mems)
-                        else messages.add(Message(Message.Role.GHOST, ind, mems))
-                    }
+                    // The model thinking, LIVE , the TEXT, not just a count. The bubble renders it
+                    // collapsed behind a "thinking… (n)" toggle that streams while expanded; before
+                    // the first answer token it doubles as the progress indicator (no more dead
+                    // air), and it stays expandable after the answer lands. The indicator string no
+                    // longer pollutes msg.text , the markdown renderer only ever sees the answer.
+                    reasoning += chunk.text
+                    val body = reply // "" until the first real token
+                    if (messages.lastOrNull()?.role == Message.Role.GHOST)
+                        messages[messages.size - 1] = Message(Message.Role.GHOST, body, mems, reasoning = reasoning)
+                    else messages.add(Message(Message.Role.GHOST, body, mems, reasoning = reasoning))
                 }
                 is BoxClient.ChatChunk.Token -> {
                     reply += chunk.text
                     if (messages.lastOrNull()?.role == Message.Role.GHOST)
-                        messages[messages.size - 1] = Message(Message.Role.GHOST, reply, mems)
-                    else messages.add(Message(Message.Role.GHOST, reply, mems))
+                        messages[messages.size - 1] = Message(Message.Role.GHOST, reply, mems, reasoning = reasoning)
+                    else messages.add(Message(Message.Role.GHOST, reply, mems, reasoning = reasoning))
                 }
                 BoxClient.ChatChunk.Done -> streaming = false
             }
@@ -598,28 +612,54 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun selectConversation(id: String) {
-        activeConvId = id
+        // Drawer rows are box chats now (/v1/chats) , selection is chatId adoption, same as CHATS.
         streaming = false; chatJob?.cancel()
+        id.toLongOrNull()?.let { openBoxChat(it) }
+    }
+
+    /** The drawer's recents, from the box's persisted chats. The old source was a STUB (delay(80),
+     *  unused params) , the list was backed by nothing. Maps /v1/chats rows into the drawer's row
+     *  type; called after unlock, after a stream adopts/updates a chat, and after rename/delete. */
+    private fun refreshChats() {
         lifecycleScope.launch {
-            val msgs = BoxClient.loadConversation(id)
-            messages.clear(); messages.addAll(msgs)
+            val chats = BoxClient.boxChats(this@MainActivity) ?: return@launch
+            conversations = chats.map {
+                Conversation(it.id.toString(), it.title.ifBlank { "(untitled)" },
+                    relativeLabel(it.updatedAt), it.messages.toInt())
+            }
+        }
+    }
+
+    private fun relativeLabel(epochMs: Long): String {
+        val d = (System.currentTimeMillis() - epochMs) / 1000
+        return when {
+            d < 90 -> "just now"
+            d < 3600 -> "${d / 60}m ago"
+            d < 86_400 -> "${d / 3600}h ago"
+            else -> "${d / 86_400}d ago"
         }
     }
 
     private fun newConversation() {
         streaming = false; chatJob?.cancel()
         messages.clear()
-        lifecycleScope.launch {
-            activeConvId = BoxClient.createConversation(this@MainActivity)
-            conversations = BoxClient.conversations(this@MainActivity)
-        }
+        currentChatId = 0L // latent bug: without this, the "new" chat APPENDED to the old one on the box
+        AppSettings.setLastChatId(this, 0L)
+        activeConvId = null
+        // No create call: a chat comes into existence on the box when the first message streams
+        // (chatId adoption). The old create was a stub anyway.
     }
 
     private fun deleteConversation(id: String) {
         lifecycleScope.launch {
-            BoxClient.deleteConversation(id)
-            conversations = BoxClient.conversations(this@MainActivity)
-            if (activeConvId == id) { activeConvId = null; messages.clear() }
+            val cid = id.toLongOrNull() ?: return@launch
+            BoxClient.deleteChat(this@MainActivity, cid)
+            if (currentChatId == cid) {
+                currentChatId = 0L
+                AppSettings.setLastChatId(this@MainActivity, 0L)
+                messages.clear()
+            }
+            refreshChats()
         }
     }
 
@@ -806,12 +846,48 @@ class MainActivity : ComponentActivity() {
      *  briefly backgrounds the activity) cannot re-fire it in a loop; a dismissed prompt leaves
      *  the UNLOCK button as the manual fallback. */
     private var autoPrompted = false
+    // Text shared into the app (ACTION_SEND) waits here until the gate passes , the share lands
+    // before authentication, and posting to the box needs the session regardless.
+    private var pendingShare: String? = null
+
+    private fun captureShare(intent: android.content.Intent?) {
+        if (intent?.action == android.content.Intent.ACTION_SEND && intent.type == "text/plain") {
+            intent.getStringExtra(android.content.Intent.EXTRA_TEXT)?.takeIf { it.isNotBlank() }?.let {
+                pendingShare = it
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        captureShare(intent)
+        flushShare()
+    }
+
+    private fun flushShare() {
+        val text = pendingShare ?: return
+        if (screen !is Screen.Shell) return // gate first; retried after unlock
+        pendingShare = null
+        lifecycleScope.launch {
+            val ok = BoxClient.noteAdd(this@MainActivity, text)
+            android.widget.Toast.makeText(this@MainActivity,
+                if (ok) "sent to your journal" else "box unreachable , note not sent",
+                android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
     private fun maybeAutoPrompt() {
         if (screen is Screen.Gate && !autoPrompted) {
+            // Prompt-first: coming to the foreground on the gate goes STRAIGHT to authentication ,
+            // fingerprint sheet, or the device PIN/pattern sheet for people without biometrics
+            // enrolled (DEVICE_CREDENTIAL is already in the allowed set), or silently through to
+            // the box PIN inside the 10s device-unlock window. The gate screen is only ever SEEN
+            // after a cancel, where its UNLOCK button is the retry.
             autoPrompted = true
             passBiometric()
         }
         if (screen !is Screen.Gate) autoPrompted = false
+        // Re-arm when the app leaves the foreground, so the NEXT foregrounding prompts again ,
+        // the old once-per-process flag meant backgrounding and returning showed a dead gate.
     }
 
     // --- auth ---
@@ -829,6 +905,7 @@ class MainActivity : ComponentActivity() {
                     if (m.role == "user") Message.Role.USER else Message.Role.GHOST, m.content))
             }
             currentChatId = id
+            AppSettings.setLastChatId(this@MainActivity, id)
             incognitoState = false
         }
     }
@@ -937,6 +1014,15 @@ class MainActivity : ComponentActivity() {
                     notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
                 screen = Screen.Shell
                 buzz()
+                // Chat continuity: the box kept the conversation; put it back on the screen. Only
+                // when the screen is actually empty (a live in-memory chat wins) and not incognito
+                // (incognito threads are deliberately not persisted anywhere, including here).
+                if (messages.isEmpty() && !incognitoState) {
+                    val last = AppSettings.lastChatId(this@MainActivity)
+                    if (last > 0) openBoxChat(last)
+                }
+                refreshChats()
+                flushShare()
                 maybeAutoSync()
                 // Each load is independent. Against the real box one endpoint can fail (a daemon down,
                 // a network blip) without the others, so wrap each Loadable load so a failure lands as
@@ -954,7 +1040,7 @@ class MainActivity : ComponentActivity() {
                     localModelPresent = LocalModel.isModelPresent(this@MainActivity)
                     offeredModels = BoxClient.availableModels(this@MainActivity)
                     boxReachable = BoxClient.reachable(this@MainActivity)
-                    conversations = BoxClient.conversations(this@MainActivity)
+                    refreshChats()
                     allowMobileSyncState = AppSettings.allowMobileSync(this@MainActivity)
                     refreshModels()
                     offeredModels.forEach { m -> reattachIfDownloading(m.id) }
@@ -1008,24 +1094,39 @@ class MainActivity : ComponentActivity() {
             if (running) runningSyncWork = workName
             if (!running && runningSyncWork != null && runningSyncWork != workName) return@observe
             if (!running && runningSyncWork == workName) runningSyncWork = null
-            // Live counts published by the worker (setProgressAsync) , fills the on-screen bar with the
-            // same N/total the notification shows, so "54 / 2932" is visible in-app and off-screen alike.
-            val done = info.progress.getInt("done", -1)
-            val total = info.progress.getInt("total", -1)
-            val kind = info.progress.getString("kind") ?: "PHOTO"
-            // Route counts to the RIGHT bar , the worker syncs photos then videos through the same
-            // progress channel, and unrouted counts painted video numbers onto the PHOTOS bar.
-            if (total > 0) sync = if (kind == "VIDEO")
-                sync.copy(videoDone = done, videoTotal = total)
-            else
-                sync.copy(photoDone = done, photoTotal = total)
+            // Live counts published by the worker (setProgressAsync). The worker now publishes the
+            // COMPLETE set , both kinds plus the byte meter , on every update, so this observer just
+            // paints; no merging of partial updates into stale state, which was how last run's photo
+            // numbers stayed frozen mid-bar while this run moved the video ones (three counters
+            // apparently racing) and the byte line sat dead at "0KB / measuring…" forever.
+            val pTotal = info.progress.getInt("ptotal", -1)
+            if (pTotal >= 0) {
+                sync = sync.copy(
+                    photoDone = info.progress.getInt("pdone", 0), photoTotal = pTotal,
+                    videoDone = info.progress.getInt("vdone", 0), videoTotal = info.progress.getInt("vtotal", 0),
+                    bytesSent = info.progress.getLong("bytes", 0), bytesTotal = info.progress.getLong("bytestotal", 0),
+                    speedBps = info.progress.getDouble("speed", 0.0), etaSeconds = info.progress.getLong("eta", 0),
+                )
+            } else {
+                // Legacy shape (kind + done/total) from an old worker mid-flight across an app update.
+                val done = info.progress.getInt("done", -1)
+                val total = info.progress.getInt("total", -1)
+                val kind = info.progress.getString("kind") ?: "PHOTO"
+                if (total > 0) sync = if (kind == "VIDEO")
+                    sync.copy(videoDone = done, videoTotal = total)
+                else
+                    sync.copy(photoDone = done, photoTotal = total)
+            }
             when (info.state) {
                 androidx.work.WorkInfo.State.SUCCEEDED ->
-                    sync = sync.copy(busy = false, isError = false, status = "Sync complete , copies are on your box")
+                    sync = sync.copy(busy = false, isError = false, status = "Sync complete , copies are on your box",
+                        bytesSent = 0, bytesTotal = 0, speedBps = 0.0, etaSeconds = 0)
                 androidx.work.WorkInfo.State.FAILED ->
-                    sync = sync.copy(busy = false, isError = true, status = "Sync failed , it will retry automatically")
+                    sync = sync.copy(busy = false, isError = true, status = "Sync failed , it will retry automatically",
+                        bytesSent = 0, bytesTotal = 0, speedBps = 0.0, etaSeconds = 0)
                 androidx.work.WorkInfo.State.CANCELLED ->
-                    sync = sync.copy(busy = false, status = "Sync cancelled")
+                    sync = sync.copy(busy = false, status = "Sync cancelled",
+                        bytesSent = 0, bytesTotal = 0, speedBps = 0.0, etaSeconds = 0)
                 else -> {} // ENQUEUED / RUNNING / BLOCKED: keep the "syncing in background" line
             }
         }

@@ -10,8 +10,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"log/slog"
 	"strings"
 
+	"github.com/LocalGhostDao/localghost/server/internal/framed"
 	"github.com/LocalGhostDao/localghost/server/internal/hw"
 	"github.com/LocalGhostDao/localghost/server/internal/profile"
 	"github.com/LocalGhostDao/localghost/server/internal/setup"
@@ -193,6 +195,18 @@ func (s *System) writeServicesConfig() error {
 	werr := hw.WriteServicesConfig(tmp, cfg)
 	if werr == nil {
 		werr = s.seedVolume(tmp) // bin/ (daemon binaries), logs/, run/, owned by the service user
+	}
+	if werr == nil {
+		// EVERYTHING on the drive, at the one moment we legitimately hold the PIN and a mounted
+		// fresh volume. Before this, provisioning seeded binaries and config but deferred the
+		// database to first unlock and left the DB runtime bundle and the model engine as separate
+		// post-setup rituals (setup_llama, bundle_db_runtime, each with its own namespace footgun).
+		// A box should work the FIRST time it is unlocked, with nothing left on the OS disk that
+		// belongs inside , so the interior is finished here: Postgres initdb'd, roles and schema
+		// converged, hba written with the peer bootstrap line, stopped clean; the pg+redis runtime
+		// bundled onto the volume; llama-server seeded when built. First unlock then just STARTS
+		// things , the convergence machinery remains as repair, not as deferred setup.
+		werr = s.provisionVolumeInterior(tmp)
 	}
 	if uerr := run("umount", tmp); uerr != nil && werr == nil {
 		werr = fmt.Errorf("umount after volume seed: %w", uerr)
@@ -457,4 +471,155 @@ func (s *System) HardenConsole() error {
 	// Best-effort; the operator's console policy is theirs, we just remove an obvious autologin.
 	_ = os.Remove("/etc/systemd/system/getty@tty1.service.d/autologin.conf")
 	return nil
+}
+
+// RepoDir is the repository root, derived from the running ghost-setup binary's own location
+// (repo/bin/ghost-setup , setup.sh always invokes it from there). Used to find sibling tools like
+// the DB runtime bundler. Falls back to the working directory when the executable path is opaque.
+func (s *System) RepoDir() string {
+	exe, err := os.Executable()
+	if err != nil {
+		wd, _ := os.Getwd()
+		return wd
+	}
+	return filepath.Dir(filepath.Dir(exe))
+}
+
+// provisionVolumeInterior finishes the inside of a freshly formatted volume so first unlock STARTS
+// things instead of building them. Runs with the container mounted at mount, PIN-derived key already
+// consumed by the format , the one window where "put everything on the drive" costs nothing extra.
+//
+// What it does, and why here:
+//   - frames tree + preview/thumb dirs, service-user owned , previously created by StartCache's heal
+//     at first unlock; a heal should repair drift, not perform initial construction.
+//   - llama-server seeded from ExecDir when built , previously a stage-then-ingest dance across a
+//     redeploy and an unlock, with the /home-invisible-in-namespace trap waiting at each step.
+//   - Postgres FULLY initialised through the same hw.DataStore machinery the box runs on: initdb,
+//     roles, database, ownership, schema (app + search + grants), hba with the peer bootstrap line ,
+//     then stopped clean. First unlock's convergence then verifies instead of constructs.
+//   - the pg+redis runtime bundled onto the volume (tools/bundle_db_runtime.sh against this mount,
+//     no namespace games , setup owns the mount) so the box prefers its own runtime from day one and
+//     the OS packages are removable immediately.
+//
+// The bundle and llama are BEST-EFFORT (logged, not fatal): a box provisioned before building llama
+// or without the bundler still comes up on OS postgres, exactly as before. The database init is
+// FATAL on failure , a fresh volume whose DB cannot initialise is a broken provision and must say so
+// now, on the setup terminal, not at first unlock in an app error.
+func (s *System) provisionVolumeInterior(mount string) error {
+	user := s.SvcUser
+	if user == "" {
+		user = "ghost"
+	}
+	// Frames + preview trees. 0750, service user , same shape StartCache's heal maintains.
+	dirs := []string{
+		filepath.Join(mount, "frames", "incoming"),
+		filepath.Join(mount, "frames", "archive"),
+		filepath.Join(mount, "preview"),
+		filepath.Join(mount, "thumb"),
+	}
+	for _, d := range dirs {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			return fmt.Errorf("provision dir %s: %w", d, err)
+		}
+	}
+	if err := run("chown", "-R", user+":"+user, filepath.Join(mount, "frames"),
+		filepath.Join(mount, "preview"), filepath.Join(mount, "thumb")); err != nil {
+		return fmt.Errorf("chown frames tree: %w", err)
+	}
+
+	// llama-server, when the operator built it before provisioning (setup_llama installs to ExecDir).
+	if src := filepath.Join(s.ExecDir, "llama-server"); fileReadable(src) {
+		if err := copyFile(src, filepath.Join(mount, "bin", "llama-server"), 0o750); err != nil {
+			fmt.Printf("  note: llama-server seed failed (%v) , stage it later, unlock ingests it\n", err)
+		} else {
+			_ = run("chown", user+":"+user, filepath.Join(mount, "bin", "llama-server"))
+			fmt.Println("  llama-server seeded onto the volume")
+		}
+	} else {
+		fmt.Println("  note: no llama-server in " + s.ExecDir + " , build with setup_llama.sh, then stage; unlock ingests it")
+	}
+
+	// The DB runtime bundle , best-effort, the OS packages remain the working fallback.
+	bundler := filepath.Join(s.RepoDir(), "tools", "bundle_db_runtime.sh")
+	if fileReadable(bundler) {
+		if err := run(bundler, mount, "--user", user); err != nil {
+			fmt.Printf("  note: DB runtime bundle failed (%v) , box will use OS postgres/redis; run bundle_db_runtime.sh later\n", err)
+		}
+	} else {
+		fmt.Println("  note: bundler not found , box will use OS postgres/redis until bundle_db_runtime.sh is run")
+	}
+
+	// Geo data, straight onto the ENCRYPTED volume , public datasets (GeoNames CC-BY + Natural
+	// Earth PD), fetched at the one moment it is privacy-clean: setup, before any personal data
+	// exists. Best-effort and skippable (GHOST_NO_GEO=1); a miss costs empty place strings until
+	// the operator runs fetch_geo.sh + geo-import by hand. Never staged on the OS disk.
+	geoDir := filepath.Join(mount, "geo")
+	if os.Getenv("GHOST_NO_GEO") == "" {
+		fetcher := filepath.Join(s.RepoDir(), "tools", "fetch_geo.sh")
+		if fileReadable(fetcher) {
+			if err := run(fetcher, geoDir); err != nil {
+				fmt.Printf("  note: geo fetch reported trouble (%v) , geocoding stays off until geo-import
+", err)
+			}
+		} else {
+			fmt.Println("  note: fetch_geo.sh not found , geocoding stays off until the operator provides data")
+		}
+	} else {
+		fmt.Println("  geo fetch skipped (GHOST_NO_GEO=1)")
+	}
+
+	// Postgres, fully initialised through the REAL machinery: the same DataStore secd runs, pointed
+	// at this mount. Start does initdb + roles + database + ownership + schema + grants + the
+	// peer-line hba (the full firstRun and EnsureSchema path), Stop checkpoints it clean. Anything
+	// this box will ever converge at unlock exists on the volume before setup returns.
+	store := hw.NewDataStore(func(int) string { return mount }, user)
+	if _, err := store.Start(0); err != nil {
+		return fmt.Errorf("provision database: %w", err)
+	}
+	// While Postgres is up: import whatever geo data landed, through the SAME code path the
+	// running box uses (framed.Store.ImportGeo) , the schema exists (EnsureSchema just ran inside
+	// Start), so a brand-new machine finishes setup with the geocoder ready and first unlock
+	// geocodes from photo one. Best-effort: an import failure is a note, the box works without it.
+	if hasGeoData(geoDir) {
+		cfg, cerr := hw.LoadServicesConfig(mount)
+		if cerr == nil {
+			gs := framed.NewStore(hw.SocketForMount(mount), cfg.Postgres.Port, cfg.Postgres.RWUser, cfg.Postgres.RWPass, cfg.Postgres.Name)
+			pts, nm, ierr := gs.ImportGeo(geoDir, slog.Default())
+			if ierr != nil {
+				fmt.Printf("  note: geo import failed after %d rows (%v) , run geo-import later
+", pts, ierr)
+			} else {
+				fmt.Printf("  geo imported: %d points, %d names , the geocoder is live from first unlock
+", pts, nm)
+			}
+		}
+	}
+	if err := store.Stop(0); err != nil {
+		return fmt.Errorf("stop provisioned database: %w", err)
+	}
+	fmt.Println("  database initialised on the volume (roles, schema, grants, hba) and stopped clean")
+	return nil
+}
+
+// hasGeoData reports whether the geo dir holds at least one importable TSV.
+func hasGeoData(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".txt") {
+			return true
+		}
+	}
+	return false
+}
+
+func fileReadable(p string) bool {
+	f, err := os.Open(p)
+	if err != nil {
+		return false
+	}
+	_ = f.Close()
+	return true
 }

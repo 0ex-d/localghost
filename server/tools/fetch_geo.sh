@@ -1,0 +1,59 @@
+#!/bin/sh
+# fetch_geo.sh <dest-dir> , downloads the public geodata the box geocodes and draws maps with:
+# GeoNames (CC-BY: allCountries + admin1/admin2 code names + countryInfo) and the Natural Earth
+# 110m countries GeoJSON (public domain). ~400MB compressed, one-time, at SETUP , before any
+# personal data exists, so the only thing revealed is "this IP provisioned a box once", the same
+# class of disclosure as the apt installs setup already performs. NEVER run this against personal
+# coordinates or from a running box's context; the whole point of on-box geocoding is that photo
+# coordinates never touch the network.
+#
+# Best-effort per file: a miss is a loud note, not a failure , the box works without geo data, and
+# `ghost-cli ghost.framed geo-import` picks up whatever the operator drops in later.
+set -u
+# GHOST_GEO_REFRESH=1 re-downloads everything even if present , the UPDATE path: GeoNames ships
+# daily dumps; refresh then `ghost-cli ghost.framed geo-import` (upserts) then `reprocess` if you
+# want existing frames re-resolved against the newer names.
+DEST="${1:?usage: fetch_geo.sh <dest-dir>}"
+FORCE="${GHOST_GEO_REFRESH:-}"
+mkdir -p "$DEST"
+GN="https://download.geonames.org/export/dump"
+NE="https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_admin_0_countries.geojson"
+
+get() { # get <url> <outfile>
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --retry 2 -o "$2" "$1"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -O "$2" "$1"
+    else
+        echo "  note: neither curl nor wget present , skipping $(basename "$2")"
+        return 1
+    fi
+}
+
+for f in admin1CodesASCII.txt admin2Codes.txt countryInfo.txt; do
+    if [ -s "$DEST/$f" ] && [ -z "$FORCE" ]; then
+        echo "  geo: $f already present (GHOST_GEO_REFRESH=1 to re-fetch)"
+    elif get "$GN/$f" "$DEST/$f"; then
+        echo "  geo: fetched $f"
+    else
+        echo "  note: could not fetch $f , place names will use raw codes until it is provided"
+    fi
+done
+
+if [ -s "$DEST/allCountries.txt" ] && [ -z "$FORCE" ]; then
+    echo "  geo: allCountries.txt already present (GHOST_GEO_REFRESH=1 to re-fetch)"
+elif command -v unzip >/dev/null 2>&1 && get "$GN/allCountries.zip" "$DEST/allCountries.zip"; then
+    unzip -q -o "$DEST/allCountries.zip" -d "$DEST" && rm -f "$DEST/allCountries.zip"
+    echo "  geo: fetched + unpacked allCountries.txt ($(du -h "$DEST/allCountries.txt" 2>/dev/null | cut -f1))"
+else
+    echo "  note: could not fetch allCountries.zip (or unzip missing) , geocoding stays off until"
+    echo "        the operator drops GeoNames TSVs in $DEST and runs geo-import"
+fi
+
+if [ -s "$DEST/world.geojson" ] && [ -z "$FORCE" ]; then
+    echo "  geo: world.geojson already present"
+elif get "$NE" "$DEST/world.geojson"; then
+    echo "  geo: fetched Natural Earth world.geojson"
+else
+    echo "  note: could not fetch world.geojson , the MAP draws graticule + dots without landmass"
+fi

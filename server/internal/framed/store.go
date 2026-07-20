@@ -7,8 +7,17 @@ package framed
 // frames and points); reads use the same connection.
 
 import (
+	"bufio"
 	"fmt"
+	"log/slog"
+	"math"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
 
+	"github.com/LocalGhostDao/localghost/server/internal/geo"
 	"github.com/LocalGhostDao/localghost/server/internal/poltergres"
 )
 
@@ -17,6 +26,7 @@ type Frame struct {
 	Hash        string
 	TakenAt     int64
 	Lat, Lon    float64
+	Place       string // reverse-geocoded hierarchy; "" until geo data exists
 	HasGPS      bool
 	ArchivePath string
 	PreviewPath string
@@ -48,11 +58,12 @@ func (s *Store) Ping() error { return s.db.Ping() }
 // hash is the identity, so re-uploading the same photo is a no-op.
 func (s *Store) InsertFrame(f Frame) error {
 	return s.db.Exec(
-		`INSERT INTO frames (hash, taken_at, lat, lon, has_gps, archive_path, preview_path, thumb_path, bytes, source, received_at, kind, mime, taken_src)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-		 ON CONFLICT (hash) DO NOTHING`,
+		`INSERT INTO frames (hash, taken_at, lat, lon, has_gps, archive_path, preview_path, thumb_path, bytes, source, received_at, kind, mime, taken_src, place)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+		 ON CONFLICT (hash) DO UPDATE SET place = EXCLUDED.place
+		   WHERE frames.place = '' AND EXCLUDED.place <> ''`,
 		f.Hash, f.TakenAt, f.Lat, f.Lon, f.HasGPS,
-		f.ArchivePath, f.PreviewPath, f.ThumbPath, f.Bytes, f.Source, f.ReceivedAt, f.Kind, f.MIME, f.TakenSrc)
+		f.ArchivePath, f.PreviewPath, f.ThumbPath, f.Bytes, f.Source, f.ReceivedAt, f.Kind, f.MIME, f.TakenSrc, f.Place)
 }
 
 // HasFrame reports whether a hash is already archived (dedupe before doing any work).
@@ -130,4 +141,299 @@ func (s *Store) DayFrameCount(dayStart, dayEnd int64) (int, error) {
 		return 0, err
 	}
 	return int(atoi64(*rows.Vals[0][0])), nil
+}
+
+// --- on-box reverse geocoding, DB-backed (geo_points / geo_names, imported from GeoNames TSVs) ---
+
+// ImportGeo streams GeoNames files from dir into postgres. The RAM geocoder this replaces had to
+// filter the dataset down to stay loadable; postgres does not care, so the filter widens to the
+// whole populated-place class plus parks, reserves, and the interesting physical features , at
+// allCountries scale that is millions of rows, a couple of GB on a 7TB volume, and the nearest
+// named point drops from "the one town cities1000 knew" to typically a village or suburb within
+// a few km. geonameid is the PK, ON CONFLICT DO NOTHING, so re-import after a newer dump is safe.
+// Batched inserts (500-row VALUES), progress logged every 100k , a full allCountries import is
+// minutes of background work, run once.
+func (s *Store) ImportGeo(dir string, log *slog.Logger) (points int64, names int64, err error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		switch {
+		case strings.HasPrefix(e.Name(), "admin1"):
+			names += s.importCodes(p, "1:")
+		case strings.HasPrefix(e.Name(), "admin2"):
+			names += s.importCodes(p, "2:")
+		case strings.HasPrefix(e.Name(), "countryInfo"):
+			names += s.importCountries(p)
+		case strings.HasSuffix(e.Name(), ".txt"):
+			n, ierr := s.importPoints(p, log)
+			points += n
+			if ierr != nil {
+				return points, names, ierr
+			}
+		}
+	}
+	return points, names, nil
+}
+
+func geoKind(fclass, fcode string) byte {
+	switch {
+	case fclass == "P":
+		return 'P'
+	case fclass == "L" && (strings.HasPrefix(fcode, "PRK") || strings.HasPrefix(fcode, "RES")):
+		return 'K'
+	case fclass == "H" && (fcode == "FLLS" || fcode == "LK" || fcode == "BAY" || fcode == "GLCR"),
+		fclass == "T" && (fcode == "PK" || fcode == "MT" || fcode == "VLC"),
+		fclass == "R" && fcode == "TRL":
+		return 'F'
+	}
+	return 0
+}
+
+func (s *Store) importPoints(path string, log *slog.Logger) (int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, nil // absent/unreadable file is a skip, not a failure
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 512*1024), 512*1024)
+	const batch = 500
+	vals := make([]any, 0, batch*9)
+	rows := 0
+	var total int64
+	flush := func() error {
+		if rows == 0 {
+			return nil
+		}
+		var sb strings.Builder
+		sb.WriteString("INSERT INTO geo_points (geonameid,name,lat,lon,kind,fcode,country,admin1,admin2) VALUES ")
+		for i := 0; i < rows; i++ {
+			if i > 0 {
+				sb.WriteByte(',')
+			}
+			base := i * 9
+			sb.WriteString("($" + strconv.Itoa(base+1) + ",$" + strconv.Itoa(base+2) + ",$" + strconv.Itoa(base+3) +
+				",$" + strconv.Itoa(base+4) + ",$" + strconv.Itoa(base+5) + ",$" + strconv.Itoa(base+6) +
+				",$" + strconv.Itoa(base+7) + ",$" + strconv.Itoa(base+8) + ",$" + strconv.Itoa(base+9) + ")")
+		}
+		// DO UPDATE, not DO NOTHING , re-importing a NEWER GeoNames dump must refresh renamed and
+		// moved places, or "update" quietly means "append". Deletions are not propagated (a
+		// removed geonameid lingers); named limit, acceptable for place data.
+		sb.WriteString(" ON CONFLICT (geonameid) DO UPDATE SET name = EXCLUDED.name, lat = EXCLUDED.lat, lon = EXCLUDED.lon, kind = EXCLUDED.kind, fcode = EXCLUDED.fcode, country = EXCLUDED.country, admin1 = EXCLUDED.admin1, admin2 = EXCLUDED.admin2")
+		if err := s.db.Exec(sb.String(), vals...); err != nil {
+			return err
+		}
+		total += int64(rows)
+		vals = vals[:0]
+		rows = 0
+		return nil
+	}
+	for sc.Scan() {
+		c := strings.Split(sc.Text(), "\t")
+		if len(c) < 12 {
+			continue
+		}
+		kind := geoKind(c[6], c[7])
+		if kind == 0 {
+			continue
+		}
+		id, e0 := strconv.ParseInt(c[0], 10, 64)
+		lat, e1 := strconv.ParseFloat(c[4], 64)
+		lon, e2 := strconv.ParseFloat(c[5], 64)
+		if e0 != nil || e1 != nil || e2 != nil {
+			continue
+		}
+		vals = append(vals, id, c[1], lat, lon, string(kind), c[7], c[8], c[10], c[11])
+		rows++
+		if rows >= batch {
+			if err := flush(); err != nil {
+				return total, err
+			}
+			if total%100000 < batch {
+				log.Info("geo import progress", "fn", "ImportGeo", "file", filepath.Base(path), "rows", total)
+			}
+		}
+	}
+	if err := flush(); err != nil {
+		return total, err
+	}
+	log.Info("geo file imported", "fn", "ImportGeo", "file", filepath.Base(path), "rows", total)
+	return total, nil
+}
+
+func (s *Store) importCodes(path, prefix string) int64 {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	var n int64
+	for sc.Scan() {
+		c := strings.Split(sc.Text(), "\t")
+		if len(c) >= 2 {
+			if s.db.Exec("INSERT INTO geo_names (code,name) VALUES ($1,$2) ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name",
+				prefix+c[0], c[1]) == nil {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+var geoContinents = map[string]string{
+	"AF": "Africa", "AS": "Asia", "EU": "Europe", "NA": "North America",
+	"OC": "Oceania", "SA": "South America", "AN": "Antarctica",
+}
+
+func (s *Store) importCountries(path string) int64 {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	var n int64
+	for sc.Scan() {
+		line := sc.Text()
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		c := strings.Split(line, "\t")
+		if len(c) >= 9 {
+			_ = s.db.Exec("INSERT INTO geo_names (code,name) VALUES ($1,$2) ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name", "c:"+c[0], c[4])
+			_ = s.db.Exec("INSERT INTO geo_names (code,name) VALUES ($1,$2) ON CONFLICT (code) DO UPDATE SET name = EXCLUDED.name", "k:"+c[0], geoContinents[c[8]])
+			n += 2
+		}
+	}
+	return n
+}
+
+// GeoReady reports whether the geo tables hold data , the wiring check for the resolver.
+func (s *Store) GeoReady() bool {
+	rows, err := s.db.Query("SELECT 1 FROM geo_points LIMIT 1")
+	return err == nil && len(rows.Vals) > 0
+}
+
+// ResolvePlace is the DB-backed reverse geocode: expanding-bbox nearest lookups per kind, exact
+// haversine over the candidate set in Go. Radii are HONESTY CAPS, not precision , precision is the
+// distance to the nearest row, and with allCountries loaded that is typically a suburb or village
+// within a few km. Beyond the cap the field stays empty rather than claiming a far-away name.
+func (s *Store) ResolvePlace(lat, lon float64) geo.Place {
+	var out geo.Place
+	if lat == 0 && lon == 0 {
+		return out
+	}
+	if p, ok := s.geoNearest(lat, lon, 'P', 120); ok {
+		out.Locality = p.name
+		out.Country = s.geoName("c:" + p.country)
+		out.Continent = s.geoName("k:" + p.country)
+		out.Admin1 = s.geoName("1:" + p.country + "." + p.admin1)
+		out.Admin2 = s.geoName("2:" + p.country + "." + p.admin1 + "." + p.admin2)
+		if out.Country == "" {
+			out.Country = p.country
+		}
+	}
+	if p, ok := s.geoNearest(lat, lon, 'K', 15); ok {
+		out.Park = p.name
+	}
+	if p, ok := s.geoNearest(lat, lon, 'F', 2.5); ok {
+		out.Feature = p.name
+	}
+	return out
+}
+
+type geoRow struct {
+	name, country, admin1, admin2 string
+	lat, lon                      float64
+}
+
+func (s *Store) geoName(code string) string {
+	rows, err := s.db.Query("SELECT name FROM geo_names WHERE code = $1", code)
+	if err != nil || len(rows.Vals) == 0 || rows.Vals[0][0] == nil {
+		return ""
+	}
+	return *rows.Vals[0][0]
+}
+
+func (s *Store) geoNearest(lat, lon float64, kind byte, maxKm float64) (geoRow, bool) {
+	cosLat := math.Cos(lat * math.Pi / 180)
+	if cosLat < 0.05 {
+		cosLat = 0.05
+	}
+	// Expanding bbox, ascending and CLIPPED to the cap. Candidates come back ordered by
+	// approximate squared-degree distance (cos-corrected), so LIMIT 400 keeps the CLOSEST 400 ,
+	// in dense areas (central London is thousands of rows in the first window) an unordered
+	// LIMIT could exclude the true nearest. Exact haversine in Go then picks among them.
+	capDeg := maxKm/111.0 + 0.05
+	windows := make([]float64, 0, 3)
+	for _, w := range []float64{0.05, 0.3, capDeg} {
+		if w > capDeg {
+			w = capDeg
+		}
+		if len(windows) == 0 || w > windows[len(windows)-1] {
+			windows = append(windows, w)
+		}
+	}
+	for _, degWin := range windows {
+		dLat := degWin
+		dLon := degWin / cosLat
+		rows, err := s.db.Query(
+			`SELECT name, country, admin1, admin2, lat, lon FROM geo_points
+			 WHERE kind = $1 AND lat BETWEEN $2 AND $3 AND lon BETWEEN $4 AND $5
+			 ORDER BY (lat-$6)*(lat-$6) + (lon-$7)*(lon-$7)*$8 LIMIT 400`,
+			string(kind), lat-dLat, lat+dLat, lon-dLon, lon+dLon, lat, lon, cosLat*cosLat)
+		if err != nil {
+			return geoRow{}, false
+		}
+		best := geoRow{}
+		bestD := maxKm + 1
+		for _, v := range rows.Vals {
+			if len(v) < 6 || v[0] == nil || v[4] == nil || v[5] == nil {
+				continue
+			}
+			rlat, _ := strconv.ParseFloat(*v[4], 64)
+			rlon, _ := strconv.ParseFloat(*v[5], 64)
+			d := haversineKm(lat, lon, rlat, rlon)
+			if d < bestD {
+				bestD = d
+				best = geoRow{name: *v[0], lat: rlat, lon: rlon}
+				if v[1] != nil {
+					best.country = *v[1]
+				}
+				if v[2] != nil {
+					best.admin1 = *v[2]
+				}
+				if v[3] != nil {
+					best.admin2 = *v[3]
+				}
+			}
+		}
+		if bestD <= maxKm {
+			return best, true
+		}
+	}
+	return geoRow{}, false
+}
+
+func haversineKm(lat1, lon1, lat2, lon2 float64) float64 {
+	dLat := (lat2 - lat1) * math.Pi / 180
+	dLon := (lon2 - lon1) * math.Pi / 180
+	a := math.Sin(dLat/2)*math.Sin(dLat/2) +
+		math.Cos(lat1*math.Pi/180)*math.Cos(lat2*math.Pi/180)*math.Sin(dLon/2)*math.Sin(dLon/2)
+	return 2 * 6371.0 * math.Asin(math.Min(1, math.Sqrt(a)))
+}
+
+// InsertJournal writes framed's journal entry for one frame , the ingestion diary ghost.synthd
+// distills memories from. Idempotent by (source, ref): reprocess re-writes every entry as a no-op.
+func (s *Store) InsertJournal(hash string, ts int64, title, body string) error {
+	return s.db.Exec(
+		"INSERT INTO journal_entries (source, ref, ts, title, body, created_at) VALUES ('ghost.framed', $1, $2, $3, $4, $5) ON CONFLICT (source, ref) DO NOTHING",
+		hash, ts, title, body, time.Now().UnixMilli())
 }

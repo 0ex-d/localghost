@@ -70,3 +70,51 @@ func downscale(src image.Image, maxEdge int) image.Image {
 	}
 	return dst
 }
+
+// applyOrientation renders src the way the EXIF Orientation tag says it should be DISPLAYED.
+// Orientations 2..8 are the axis-aligned flips and quarter-turns; 0/1 (and anything out of range)
+// return src unchanged. Called AFTER downscale on purpose: these operations commute with the box
+// average (both are axis-aligned), and rotating a 1600px preview costs a fraction of rotating the
+// 12-megapixel original. Pure stdlib, same policy as downscale.
+//
+// The mapping table is destination-to-source , for each dst pixel, which src pixel fills it:
+//
+//	2 flip H       · 3 rot 180 · 4 flip V
+//	5 transpose    · 6 rot 90 CW
+//	7 transverse   · 8 rot 270 CW
+func applyOrientation(src image.Image, orientation int) image.Image {
+	if orientation <= 1 || orientation > 8 {
+		return src
+	}
+	sb := src.Bounds()
+	w, h := sb.Dx(), sb.Dy()
+	swapped := orientation >= 5 // the quarter-turn family swaps the axes
+	dw, dh := w, h
+	if swapped {
+		dw, dh = h, w
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, dw, dh))
+	for dy := 0; dy < dh; dy++ {
+		for dx := 0; dx < dw; dx++ {
+			var sx, sy int
+			switch orientation {
+			case 2:
+				sx, sy = w-1-dx, dy
+			case 3:
+				sx, sy = w-1-dx, h-1-dy
+			case 4:
+				sx, sy = dx, h-1-dy
+			case 5:
+				sx, sy = dy, dx
+			case 6:
+				sx, sy = dy, h-1-dx
+			case 7:
+				sx, sy = w-1-dy, h-1-dx
+			case 8:
+				sx, sy = w-1-dy, dx
+			}
+			dst.Set(dx, dy, src.At(sb.Min.X+sx, sb.Min.Y+sy))
+		}
+	}
+	return dst
+}

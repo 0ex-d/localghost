@@ -1,7 +1,7 @@
 # FULLY AI GENERATED NOT YET REVIEWD
 # ghost.synthd
 
-The memory layer. Consumes journal entries from ghost.noted, resolves mentions into canonical entities, clusters entries into memories, rolls memories into episodes at any time granularity, maintains the queue of user decisions the system cannot make on its own, and serves the app layer and ghost.cued with memories and episodes ranked for the moment.
+The memory layer. THE ONLY MEMORY-MAKER. Consumes JOURNAL ENTRIES , the shared ingestion diary that framed, voiced, noted, and tallyd each write in their own words (journal_entries, idempotent by source+ref) , plus saved conversations (the first live source, distilled through oracled every 10 minutes), resolves mentions into canonical entities, clusters entries into memories, rolls memories into episodes at any time granularity, maintains the queue of user decisions the system cannot make on its own, and serves the app layer and ghost.cued with memories and episodes ranked for the moment.
 
 ## Status
 

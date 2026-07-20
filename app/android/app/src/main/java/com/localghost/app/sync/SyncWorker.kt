@@ -67,6 +67,26 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         setForeground(foregroundInfo(0, 0, 0))
 
         val engine = SyncEngine(applicationContext)
+        // The worker OWNS every on-screen number and publishes the COMPLETE set on every update ,
+        // both kinds' counters plus the byte meter. The old shape (kind + done/total only) forced
+        // the Activity to merge partial updates into whatever state it already had, which produced
+        // exactly the observed screen: last run's photo numbers frozen mid-bar while this run
+        // painted videos (three counters apparently racing), and a byte line permanently stuck at
+        // "0KB / measuring…" because worker mode never fed bytes at all , the 9510.6MB total on
+        // screen was a stale leftover from a legacy in-Activity run.
+        var pDone = 0; var pTotal = 0
+        var vDone = 0; var vTotal = 0
+        var phaseBytes = 0L; var phaseBytesTotal = 0L
+        var speed = 0.0; var eta = 0L
+        var lastBytesPub = 0L
+        fun publish() {
+            setProgressAsync(androidx.work.Data.Builder()
+                .putInt("pdone", pDone).putInt("ptotal", pTotal)
+                .putInt("vdone", vDone).putInt("vtotal", vTotal)
+                .putLong("bytes", phaseBytes).putLong("bytestotal", phaseBytesTotal)
+                .putDouble("speed", speed).putLong("eta", eta)
+                .build())
+        }
         var doneCount = 0
         var totalCount = 0
         // Progress drives the notification so a long upload shows N/total off-screen, and publishes the
@@ -75,9 +95,16 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             override fun onStart(kind: MediaKind, total: Int, totalBytes: Long) {
                 doneCount = 0 // fresh counter per kind , photo counts must not bleed into the video bar
                 totalCount = total
-                setProgressAsync(androidx.work.Data.Builder()
-                    .putString("kind", kind.name)
-                    .putInt("done", doneCount).putInt("total", totalCount).build())
+                if (kind == MediaKind.PHOTO) {
+                    // Photos are phase ONE of a run , this is the run boundary, so the video bar's
+                    // numbers from the PREVIOUS run are cleared here instead of lingering mid-fill.
+                    pDone = 0; pTotal = total
+                    vDone = 0; vTotal = 0
+                } else {
+                    vDone = 0; vTotal = total
+                }
+                phaseBytes = 0; phaseBytesTotal = totalBytes; speed = 0.0; eta = 0L
+                publish()
                 // Show the notification from the SCAN phase onward , previously it only became visible
                 // once bytes started flowing, so the checking/skipping stretch looked like nothing was
                 // happening at all when the app was backgrounded.
@@ -87,13 +114,17 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
                 try { setForegroundAsync(foregroundInfo(doneCount, totalCount, 0)) } catch (_: Exception) {}
             }
             override fun onItemBytes(kind: MediaKind, read: Long, size: Long, runBytesSent: Long, speedBps: Double, etaSeconds: Long) {
+                phaseBytes = runBytesSent; speed = speedBps; eta = etaSeconds
+                // Byte callbacks fire per chunk; publishing each one churns WorkManager's progress DB
+                // for nothing a human can perceive. Two a second is plenty for a smooth meter.
+                val now = System.currentTimeMillis()
+                if (now - lastBytesPub >= 500) { lastBytesPub = now; publish() }
                 try { setForegroundAsync(foregroundInfo(doneCount, totalCount, runBytesSent)) } catch (_: Exception) {}
             }
             override fun onItemDone(kind: MediaKind, sent: Int, total: Int) {
                 doneCount = sent; totalCount = total
-                setProgressAsync(androidx.work.Data.Builder()
-                    .putString("kind", kind.name)
-                    .putInt("done", doneCount).putInt("total", totalCount).build())
+                if (kind == MediaKind.PHOTO) { pDone = sent; pTotal = total } else { vDone = sent; vTotal = total }
+                publish()
                 try { setForegroundAsync(foregroundInfo(doneCount, totalCount, 0)) } catch (_: Exception) {}
             }
             override fun onDone(result: CommandResult) {}

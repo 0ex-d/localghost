@@ -1,9 +1,21 @@
-// ghost.shadowd , STUB. The CRITICAL daemon: it is the deniability / answer path (the "shadow" that
-// stands in front of the real capabilities). watchd marks it critical, so if it will not stay up the
-// box serves with that capability erroring , but stays mounted, never dark. This binary is the honest
-// placeholder: it binds its loopback health port, answers OK, and exits cleanly on SIGTERM so watchd's
-// stop-and-confirm-dead teardown never leaves it holding the mount. Replace the body with real logic
-// behind the same ghosthealth.Reporter contract.
+// ghost.shadowd , the ANTI-POSSESSION DAEMON (charter: hard-truths/should-not-possess,
+// /dictator-brain, /critic-worth-listening-to). NOT the memory layer , that is ghost.synthd. This
+// daemon is a fleet of manipulation-pattern DETECTORS (the 28-entry catalogue: gaslighting, DARVO,
+// coercive control, addiction-by-design, engagement-driven loneliness, filter-bubble-of-one,
+// sunk-cost amplification, memory laundering, self-narrative calcification, arbiter capture, and
+// the rest) plus the COLD-READ ARBITER , a separate model that was never shaped by the user, so it
+// can disagree (you cannot prompt your way out of a reward function; you cannot configure your way
+// out of one either, hence the scheduled arbiter reset to a published baseline).
+//
+// The contract, from the charter: NAMING IS THE ACTION. Detectors name the pattern, point at the
+// data, and stop. No blocking, no refusing, no lockouts unless the user wrote the rule themselves
+// (Ulysses contracts, parental controls). Detectors are individually tunable and mutable for
+// bounded windows, never disableable as a fleet. The first tractable detectors are the
+// [LOCALGHOST]-origin ones that read data the box already holds: total interaction time and
+// session-past-task-completion (addiction by design), share of emotional processing done with the
+// ghost vs humans (engagement-driven loneliness), sunk-cost retrieval framing, topic-surface
+// narrowing (filter bubble of one). This binary is the honest stub of all that: health + ctl only,
+// detectors pending, and the box will not ship v1 without it running.
 //
 // Runs only while the account is UNLOCKED (data lives on the encrypted volume). Spawned by ghost.watchd
 // from <mount>/bin/ghost.shadowd; its stdout/stderr go to <mount>/logs/ghost.shadowd.log.
@@ -87,7 +99,7 @@ func main() {
 		}()
 	}
 
-	lg.Info("stub up", "fn", "main", "healthPort", *port)
+	lg.Info("stub up (charter recorded, detectors pending)", "fn", "main", "healthPort", *port)
 
 	<-ctx.Done()
 	lg.Info("shutting down", "fn", "main")

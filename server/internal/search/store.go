@@ -248,6 +248,38 @@ func (s *Store) CompleteJob(id int64) error {
 	return s.db.Exec("DELETE FROM search.jobs WHERE id = $1", id)
 }
 
+// UnparkJobs resets PARKED jobs (attempts >= 5, permanently dead to ClaimJob) so the worker claims
+// them again. The parking rule protects the queue from a poison job retrying forever; it has no
+// answer for the OTHER cause of five failures , an environment that was broken and is now fixed (a
+// night of role errors, an oracled that could not see). This is the operator's lever for that case:
+// attempts back to zero, run_after to now, per kind or across all kinds. Poison jobs will simply
+// park again after five more tries , the lever costs nothing to pull wrongly.
+func (s *Store) UnparkJobs(kind string) (int64, error) {
+	countQ := "SELECT count(*) FROM search.jobs WHERE attempts >= 5"
+	updQ := "UPDATE search.jobs SET attempts = 0, run_after = now(), last_error = '' WHERE attempts >= 5"
+	args := []any{}
+	if kind != "" {
+		countQ += " AND kind = $1"
+		updQ += " AND kind = $1"
+		args = append(args, kind)
+	}
+	rows, err := s.db.Query(countQ, args...)
+	if err != nil {
+		return 0, err
+	}
+	var n int64
+	if len(rows.Vals) > 0 && rows.Vals[0][0] != nil {
+		n, _ = strconv.ParseInt(*rows.Vals[0][0], 10, 64)
+	}
+	if n == 0 {
+		return 0, nil
+	}
+	if err := s.db.Exec(updQ, args...); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 // FailJob applies the spec's backoff: run_after = now() + attempts^2 minutes.
 func (s *Store) FailJob(id int64, jobErr error) error {
 	msg := jobErr.Error()
