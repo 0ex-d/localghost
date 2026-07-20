@@ -577,6 +577,19 @@ func (s *Server) handleGeoWorld(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.Close()
+	// ETag = mtime+size (cheap, changes exactly when the operator swaps the file). The app caches
+	// the multi-MB world locally and revalidates with If-None-Match; a match costs a 304 and zero
+	// bytes , the map opens instantly offline-first and updates only when the world actually does.
+	fi, _ := f.Stat()
+	etag := ""
+	if fi != nil {
+		etag = fmt.Sprintf(""w-%d-%d"", fi.ModTime().Unix(), fi.Size())
+		w.Header().Set("ETag", etag)
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = io.Copy(w, f)
 }

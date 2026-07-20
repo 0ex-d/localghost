@@ -61,7 +61,9 @@ func (v *VisionOracle) Caption(ctx context.Context, imagePath string) (string, e
 		Priority:   oracle.PriorityBackground,
 		Input:      CaptionPrompt,
 		Images:     []string{imagePath},
-		MaxTokens:  900, // the structured contract fits comfortably; screenshots with heavy TEXT need room
+		MaxTokens:  1800, // this model THINKS first; if the template ignores enable_thinking=false,
+		// the budget must cover monologue + answer , at ~45 tok/s that is ~40s worst case per
+		// caption, acceptable for a background queue and moot once suppression works
 		DeadlineMS: int(deadline.Milliseconds()),
 	})
 	if err != nil {

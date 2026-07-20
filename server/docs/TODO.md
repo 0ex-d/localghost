@@ -224,6 +224,16 @@ Started 2026-07-15, the night the box learned to repair itself on unlock.
       distance/kcal/avg-HR-with-peak; /v1/health/stats serves 30-day daily series per metric;
       HEALTH in the drawer (♥) , the FIRST per-daemon screen: per-metric bar strips scaled to
       own range, latest + min/avg/max, stats not judgements. Manifest gains the read perms.
+- [x] **53. Offline map + clusters + the mmproj hunt** (2026-07-20, live-fire): vision was dead
+      because the projector on the volume was named "mmpr" AND truncated at 175MB of ~800 , a
+      July 11 copy died mid-transfer and every caption since returned <20 chars from a model
+      that could not see; fix = clean download under the expected name + oracled respawn, the
+      retry loop becomes the recovery. World map now CACHED on the phone (filesDir + ETag
+      mtime+size; 304 = zero bytes; box unreachable = map still draws , landmass only, never
+      photos or locations). MAP clusters at low zoom: 48px grid buckets, count labels, density-
+      triggered (>250 dots on screen) so sparse archives never cluster. fetch_geo upgraded to
+      10m coastline (110m drew Vancouver Island as a twelve-vertex cartoon , the dots were
+      right, the shoreline was lying). Remaining polish: tap-dot -> gallery.
 - [x] **52. First-build fixes** (2026-07-15): a backticked command name inside a SQL comment
       TERMINATED the schema's Go raw string ("unexpected name ghost" , my own documentation
       broke the build); backticks stripped from schema comments and audited. Unused "io" dropped

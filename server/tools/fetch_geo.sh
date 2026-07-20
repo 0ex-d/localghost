@@ -17,7 +17,9 @@ DEST="${1:?usage: fetch_geo.sh <dest-dir>}"
 FORCE="${GHOST_GEO_REFRESH:-}"
 mkdir -p "$DEST"
 GN="https://download.geonames.org/export/dump"
-NE="https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_admin_0_countries.geojson"
+# 10m, not 110m: at 110m Vancouver Island is a twelve-vertex cartoon and photo dots sit "in the
+# ocean" next to a coastline that is the thing that is wrong. 24MB buys real fjords.
+NE="https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_10m_admin_0_countries.geojson"
 
 get() { # get <url> <outfile>
     if command -v curl >/dev/null 2>&1; then

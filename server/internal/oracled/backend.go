@@ -184,8 +184,10 @@ func (b *llamaBackend) Infer(ctx context.Context, req oracle.Request) (oracle.Re
 	defer resp.Body.Close()
 	var out struct {
 		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
+				Content   string `json:"content"`
+				Reasoning string `json:"reasoning_content"`
 			} `json:"message"`
 		} `json:"choices"`
 	}
@@ -195,7 +197,13 @@ func (b *llamaBackend) Infer(ctx context.Context, req oracle.Request) (oracle.Re
 	if len(out.Choices) == 0 {
 		return oracle.Response{}, fmt.Errorf("chat/completions: empty choices")
 	}
-	return oracle.Response{Output: out.Choices[0].Message.Content, Model: b.cfg.ModelName}, nil
+	ch := out.Choices[0]
+	if ch.Message.Content == "" && ch.Message.Reasoning != "" {
+		// The model reasoned the budget away and never answered , name it precisely so the log
+		// reads "reasoning consumed the budget", not "the model said something short".
+		return oracle.Response{}, fmt.Errorf("reasoning consumed the token budget (finish=%s, %d reasoning chars, no content) , raise MaxTokens or suppress thinking", ch.FinishReason, len(ch.Message.Reasoning))
+	}
+	return oracle.Response{Output: ch.Message.Content, Model: b.cfg.ModelName}, nil
 }
 
 // inferMultimodal builds an OpenAI-style chat completion with image content parts.
@@ -215,6 +223,12 @@ func (b *llamaBackend) inferMultimodal(ctx context.Context, req oracle.Request) 
 	}
 	payload := map[string]any{
 		"messages": []map[string]any{{"role": "user", "content": content}},
+		// This gemma THINKS NATIVELY and llama-server parses the thinking into reasoning_content ,
+		// caption jobs were burning their whole budget on an internal monologue and returning
+		// EMPTY content ("implausibly short", literally). Ask the template to skip thinking for
+		// these one-shot vision tasks; templates that ignore the kwarg are covered by the budget
+		// and the reasoning-aware parse below.
+		"chat_template_kwargs": map[string]any{"enable_thinking": false},
 	}
 	if req.MaxTokens > 0 {
 		payload["max_tokens"] = req.MaxTokens
@@ -239,8 +253,10 @@ func (b *llamaBackend) inferMultimodal(ctx context.Context, req oracle.Request) 
 	}
 	var out struct {
 		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
+				Content   string `json:"content"`
+				Reasoning string `json:"reasoning_content"`
 			} `json:"message"`
 		} `json:"choices"`
 	}
@@ -250,7 +266,13 @@ func (b *llamaBackend) inferMultimodal(ctx context.Context, req oracle.Request) 
 	if len(out.Choices) == 0 {
 		return oracle.Response{}, fmt.Errorf("chat/completions: empty choices")
 	}
-	return oracle.Response{Output: out.Choices[0].Message.Content, Model: b.cfg.ModelName}, nil
+	ch := out.Choices[0]
+	if ch.Message.Content == "" && ch.Message.Reasoning != "" {
+		// The model reasoned the budget away and never answered , name it precisely so the log
+		// reads "reasoning consumed the budget", not "the model said something short".
+		return oracle.Response{}, fmt.Errorf("reasoning consumed the token budget (finish=%s, %d reasoning chars, no content) , raise MaxTokens or suppress thinking", ch.FinishReason, len(ch.Message.Reasoning))
+	}
+	return oracle.Response{Output: ch.Message.Content, Model: b.cfg.ModelName}, nil
 }
 
 // dataURI wraps image bytes as a data URI, sniffing jpeg/png/webp by magic bytes (jpeg default).
