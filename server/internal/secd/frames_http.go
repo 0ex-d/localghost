@@ -583,7 +583,7 @@ func (s *Server) handleGeoWorld(w http.ResponseWriter, r *http.Request) {
 	fi, _ := f.Stat()
 	etag := ""
 	if fi != nil {
-		etag = fmt.Sprintf(""w-%d-%d"", fi.ModTime().Unix(), fi.Size())
+		etag = fmt.Sprintf("\"w-%d-%d\"", fi.ModTime().Unix(), fi.Size())
 		w.Header().Set("ETag", etag)
 		if r.Header.Get("If-None-Match") == etag {
 			w.WriteHeader(http.StatusNotModified)
