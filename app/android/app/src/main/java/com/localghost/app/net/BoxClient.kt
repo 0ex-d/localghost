@@ -623,7 +623,7 @@ object BoxClient {
         samples.forEach { (m, ts, v) ->
             sarr.put(org.json.JSONObject().put("metric", m).put("ts", ts).put("value", v))
         }
-        BoxHttp.postJson(ctx, "/v1/health",
+        BoxHttp.postJson(ctx, "/v1/health/upload",
             org.json.JSONObject().put("days", arr).put("samples", sarr)); true
     } catch (_: Exception) { false }
 

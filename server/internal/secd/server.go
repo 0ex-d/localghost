@@ -215,7 +215,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/notes", s.handleNoteAdd)                // app -> noted inbox -> journal
 	mux.HandleFunc("/v1/onthisday", s.handleOnThisDay)          // synthd's retrospective, cached per day
 	mux.HandleFunc("/v1/day/summary", s.handleDaySummary)       // one day at a glance, check-in prefill
-	mux.HandleFunc("/v1/health", s.handleHealthUpload)          // Health Connect readout -> tallyd inbox
+	mux.HandleFunc("/v1/health/upload", s.handleHealthUpload)   // Health Connect readout -> tallyd inbox
+	// NOTE: bare /v1/health was ALREADY the box health endpoint , registering the upload there
+	// too made mux panic at startup and secd die before binding. Route names are a namespace;
+	// grep before you claim one.
 	mux.HandleFunc("/v1/health/stats", s.handleHealthStats)     // daily series per metric
 	mux.HandleFunc("/v1/chat", s.handleChat)                  // ask the box's model (via synthd's retrieval seam)
 	mux.HandleFunc("/v1/locations", s.handleLocations)
