@@ -16,6 +16,7 @@ object CrashHandler {
         val appCtx = ctx.applicationContext
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            Log.e("LocalGhost", "uncaught exception on ${thread.name}", throwable)
             try { write(appCtx, thread, throwable) } catch (_: Throwable) {}
             previous?.uncaughtException(thread, throwable)
         }
