@@ -103,8 +103,16 @@ say "4/4  restart ghost.secd"
 # THEN does systemd swap the binary. Without a PIN this falls back to systemctl restart, where
 # secd's SIGTERM handler races systemd's kill timeout , the race that produced mounted-but-dead;
 # the convergent unlock repairs that state now, but "repairable" is not "good", so say so loudly.
+# PROMPT for the PIN rather than taking it from the environment or command line , env vars leak
+# into shell history, ps output, and sudo logs; a silent read leaks nowhere. Enter to skip: the
+# deploy then falls back to a plain restart, and you unlock from the app afterwards either way.
+if [ -z "${GHOST_PIN:-}" ] && [ -t 0 ] && [ "$NGINX_ONLY" = "0" ]; then
+    printf "main PIN for graceful halt (Enter to skip): "
+    read -rs GHOST_PIN
+    echo
+fi
 if [ -n "${GHOST_PIN:-}" ] && systemctl is-active --quiet ghost.secd; then
-    echo "GHOST_PIN provided , graceful halt before the binary swap"
+    echo "graceful halt before the binary swap"
     "$REPO/bin/ghost-cli" --run-dir=/var/lib/ghost/run ghost.secd halt "pin=$GHOST_PIN" || true
     # halt replies ok unconditionally (PIN-opaque); confirm by watching the volume's services die.
     for i in $(seq 1 30); do

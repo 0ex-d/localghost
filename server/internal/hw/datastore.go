@@ -297,7 +297,7 @@ ALTER TABLE frames ADD COLUMN IF NOT EXISTS taken_src TEXT NOT NULL DEFAULT 'mti
 -- Empty until geocoded (no GPS, or no GeoNames data on the volume yet); reprocess backfills.
 ALTER TABLE frames ADD COLUMN IF NOT EXISTS place TEXT NOT NULL DEFAULT '';
 -- On-box reverse geocoding, DB-backed: the full GeoNames set is millions of rows , RAM was the
--- wrong home. Imported once by `ghost-cli ghost.framed geo-import`; the lat/lon btrees make the
+-- wrong home. Imported once by ghost-cli ghost.framed geo-import; the lat/lon btrees make the
 -- expanding-bbox nearest queries cheap. kind: P populated, K park/reserve, F physical feature.
 CREATE TABLE IF NOT EXISTS geo_points (
   geonameid BIGINT PRIMARY KEY,

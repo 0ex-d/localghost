@@ -224,6 +224,11 @@ Started 2026-07-15, the night the box learned to repair itself on unlock.
       distance/kcal/avg-HR-with-peak; /v1/health/stats serves 30-day daily series per metric;
       HEALTH in the drawer (♥) , the FIRST per-daemon screen: per-metric bar strips scaled to
       own range, latest + min/avg/max, stats not judgements. Manifest gains the read perms.
+- [x] **52. First-build fixes** (2026-07-15): a backticked command name inside a SQL comment
+      TERMINATED the schema's Go raw string ("unexpected name ghost" , my own documentation
+      broke the build); backticks stripped from schema comments and audited. Unused "io" dropped
+      from timeline.go. redeploy.sh now PROMPTS silently for the PIN (env vars leak into history
+      and ps; a silent read leaks nowhere; Enter skips to the plain-restart path).
 - [x] **51. Smoothness pass** (2026-07-15): animateContentSize on every expanding surface ,
       thinking panel, check-in card, OTD years, memory rows, health cards , expansion glides
       instead of jump-cutting; thinking toggle tap target enlarged; gallery search keyboard
