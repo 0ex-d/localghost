@@ -33,10 +33,24 @@ fun ImageViewer(hash: String, caption: String = "", onDismiss: () -> Unit) {
     val ctx = LocalContext.current
     var bmp by remember(hash) { mutableStateOf<android.graphics.Bitmap?>(null) }
     var failed by remember(hash) { mutableStateOf(false) }
+    var quality by remember(hash) { mutableStateOf("") }
     LaunchedEffect(hash) {
-        val bytes = BoxClient.framePreview(ctx, hash) ?: BoxClient.frameThumb(ctx, hash)
-        if (bytes == null) failed = true
-        else bmp = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        // ORIGINAL first , the untouched archive bytes (the phone can decode jpeg/heic/png
+        // natively). Preview then thumb are FALLBACKS for originals the codec refuses, not the
+        // ceiling. The quality tag says which one you are looking at , no silent downgrades.
+        for ((label, bytes) in listOf(
+            "original" to BoxClient.frameOriginal(ctx, hash),
+            "preview" to BoxClient.framePreview(ctx, hash),
+            "thumb" to BoxClient.frameThumb(ctx, hash))) {
+            if (bytes == null) continue
+            val b = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            if (b != null) {
+                bmp = b
+                quality = label
+                return@LaunchedEffect
+            }
+        }
+        failed = true
     }
     var scale by remember(hash) { mutableStateOf(1f) }
     var offX by remember(hash) { mutableStateOf(0f) }
@@ -79,6 +93,11 @@ fun ImageViewer(hash: String, caption: String = "", onDismiss: () -> Unit) {
             }
             Text("[ close ]", color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
                 modifier = Modifier.align(Alignment.TopEnd).padding(16.dp).clickable { onDismiss() })
+            if (quality.isNotEmpty() && quality != "original" && scale <= 1.05f) {
+                Text("showing $quality , original would not decode on this phone",
+                    color = TerminalDim, style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.align(Alignment.TopStart).padding(16.dp))
+            }
         }
     }
 }

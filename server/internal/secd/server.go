@@ -172,6 +172,7 @@ func New(cfg Config) (*Server, error) {
 	if s.unlock.Warm(profile.MainSlot) {
 		s.mounted = profile.MainSlot
 	}
+	go s.checkinReminderLoop() // evening ask, once daily, silent if already answered
 	return s, nil
 }
 
@@ -195,6 +196,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/frames/list", s.handleFramesList)     // gallery paging, newest first
 	mux.HandleFunc("/v1/frames/thumb", s.handleFrameThumb)    // one thumbnail's bytes
 	mux.HandleFunc("/v1/frames/preview", s.handleFramePreview) // full-size for the pinch-zoom viewer
+	mux.HandleFunc("/v1/frames/original", s.handleFrameOriginal) // untouched archive bytes, mime-typed
 	mux.HandleFunc("/v1/frames/exists", s.handleFramesExists) // pre-upload dedup by content hash
 	mux.HandleFunc("/v1/sync/cursor", s.handleSyncCursor)     // device sync position, survives reinstall
 	mux.HandleFunc("/v1/frames/tag", s.handleFrameTag)        // user tag corrections (tombstoned removes)
@@ -207,6 +209,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/frames/geo", s.handleFramesGeo)        // GPS frames as dots, for the map
 	mux.HandleFunc("/v1/frames/search", s.handleFramesSearch)  // place + name + tags, AND per term
 	mux.HandleFunc("/v1/geo/world", s.handleGeoWorld)
+	mux.HandleFunc("/v1/daemon/summary", s.handleDaemonSummary) // per-daemon drill-in
 	mux.HandleFunc("/v1/frames/geo/lod", s.handleFramesGeoLOD) // 4-level map aggregation
 	mux.HandleFunc("/v1/frames/newest", s.handleFramesNewest)  // map's opening view
 	mux.HandleFunc("/v1/geo/days", s.handleGeoDays)            // which day tracks exist
@@ -217,6 +220,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/memories/edit", s.handleMemoryEdit)     // the person's version IS the memory
 	mux.HandleFunc("/v1/notes", s.handleNoteAdd)                // app -> noted inbox -> journal
 	mux.HandleFunc("/v1/onthisday", s.handleOnThisDay)          // synthd's retrospective, cached per day
+	mux.HandleFunc("/v1/checkins", s.handleCheckins)            // past check-ins, newest first
 	mux.HandleFunc("/v1/day/summary", s.handleDaySummary)       // one day at a glance, check-in prefill
 	mux.HandleFunc("/v1/health/upload", s.handleHealthUpload)   // Health Connect readout -> tallyd inbox
 	// NOTE: bare /v1/health was ALREADY the box health endpoint , registering the upload there

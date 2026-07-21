@@ -114,6 +114,10 @@ class MainActivity : ComponentActivity() {
 
     private val messages = mutableStateListOf<Message>()
     private var streaming by mutableStateOf(false)
+    private var pendingNav by mutableStateOf("")   // set by notification tap, consumed post-unlock
+    private var genStartMs = 0L
+    private var genChars = 0
+    var lastGenStats by mutableStateOf("")
     private var chatJob: Job? = null
     private var pendingAttachments by mutableStateOf<List<Attachment>>(emptyList())
     private var permTick by mutableIntStateOf(0)   // bump to recompute PermState on resume
@@ -187,6 +191,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        intent?.getStringExtra("nav")?.let { pendingNav = it }
         com.localghost.app.net.BoxClient.appCtx = applicationContext
         sync = sync.copy(paused = AppSettings.syncPaused(this))
         thinkLevelState = AppSettings.thinkLevel(this)
@@ -252,6 +257,8 @@ class MainActivity : ComponentActivity() {
                     Screen.Gate -> LockScreen(error, unlocking = lockProgress != null, progress = lockProgress, onLocalOnly = ::enterLocalOnly, onReenroll = { scannedLink = null; error = null; scanEnrolOk = null; screen = Screen.Scan }) { passBiometric() }
                     Screen.Pin -> PinScreen(busy, error, unlockProgress) { submit(it) }
                     Screen.Shell -> MainShell(
+                genStats = lastGenStats,
+                navRequest = pendingNav, onNavConsumed = { pendingNav = "" },
                         messages = messages, streaming = streaming, onSend = ::sendChat, onStopChat = ::stopChat,
                         pendingAttachments = pendingAttachments,
                         onClearAttachment = ::clearAttachment,
@@ -410,12 +417,24 @@ class MainActivity : ComponentActivity() {
                     else messages.add(Message(Message.Role.GHOST, body, mems, reasoning = reasoning))
                 }
                 is BoxClient.ChatChunk.Token -> {
+                    if (genStartMs == 0L) genStartMs = System.currentTimeMillis()
+                    genChars += chunk.text.length
                     reply += chunk.text
                     if (messages.lastOrNull()?.role == Message.Role.GHOST)
                         messages[messages.size - 1] = Message(Message.Role.GHOST, reply, mems, reasoning = reasoning)
                     else messages.add(Message(Message.Role.GHOST, reply, mems, reasoning = reasoning))
                 }
-                BoxClient.ChatChunk.Done -> streaming = false
+                BoxClient.ChatChunk.Done -> {
+                    streaming = false
+                    // DEBUG tok/s , chars/4 approximates tokens well enough for a health readout;
+                    // timed from FIRST answer token so model thinking does not dilute the rate.
+                    if (genStartMs > 0 && genChars > 0) {
+                        val secs = (System.currentTimeMillis() - genStartMs).coerceAtLeast(1) / 1000.0
+                        lastGenStats = "≈ %.1f tok/s · %d chars · %.1fs".format(
+                            (genChars / 4.0) / secs, genChars, secs)
+                    }
+                    genStartMs = 0L; genChars = 0
+                }
             }
         }
     }
@@ -860,6 +879,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
+        intent.getStringExtra("nav")?.let { pendingNav = it }
         captureShare(intent)
         flushShare()
     }

@@ -54,6 +54,9 @@ enum class Dest(val label: String, val glyph: String) {
 
 @Composable
 fun MainShell(
+    genStats: String = "",
+    navRequest: String = "",
+    onNavConsumed: () -> Unit = {},
     messages: List<Message>,
     streaming: Boolean,
     onSend: (String) -> Unit,
@@ -119,6 +122,15 @@ fun MainShell(
     onDeleteConversation: (String) -> Unit,
 ) {
     var dest by rememberSaveable { mutableStateOf(Dest.CHAT) }
+    // A notification tap lands here AFTER the security gate (MainShell only exists unlocked):
+    // navigate to the thing the notification was about, once.
+    LaunchedEffect(navRequest) {
+        when (navRequest) {
+            "notifications" -> dest = Dest.NOTIFICATIONS
+            "memories" -> dest = Dest.MEMORIES
+        }
+        if (navRequest.isNotEmpty()) onNavConsumed()
+    }
     var showWipe by remember { mutableStateOf(false) }
     var showAddSheet by remember { mutableStateOf(false) }
     val drawerState = rememberDrawerState(DrawerValue.Closed)
@@ -166,7 +178,9 @@ fun MainShell(
                             onSend, onStopChat, { showAddSheet = true }, onClearAttachment,
                             brainLabel, brainIsBox, phoneModels, onPickBox, onPickPhoneModel,
                             { dest = Dest.MODELS },
-                            incognito = incognito, onToggleIncognito = onToggleIncognito)
+                            incognito = incognito, onToggleIncognito = onToggleIncognito,
+                            genStats = if (com.localghost.app.settings.AppSettings.debugMode(
+                                    androidx.compose.ui.platform.LocalContext.current)) genStats else "")
                         Dest.CHATS -> ChatsScreen(conversations, activeConvId,
                             onSelect = { onSelectConversation(it); dest = Dest.CHAT },
                             onNew = { onNewConversation(); dest = Dest.CHAT },

@@ -444,6 +444,53 @@ func (s *Server) handleFramePreview(w http.ResponseWriter, r *http.Request) {
 
 // handleLocations accepts a JSON batch of location points ({"source":..,"points":[{ts,lat,lon}..]})
 // and spools it. secd does not parse it; framed validates and drops malformed batches.
+// handleFrameOriginal , GET /v1/frames/original?hash= , the UNTOUCHED archived bytes, mime-typed.
+// The viewer asks for this first; preview and thumb are the fallbacks, not the ceiling.
+func (s *Server) handleFrameOriginal(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	hash := r.URL.Query().Get("hash")
+	if len(hash) < 16 || len(hash) > 128 {
+		s.appearsDown(w)
+		return
+	}
+	for _, ch := range hash {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+			s.appearsDown(w) // not lowercase hex -> not one of our hashes; no path characters ever
+			return
+		}
+	}
+	path, mime, err := s.notif.FrameOriginalPath(mounted, hash)
+	if err != nil || path == "" {
+		s.appearsDown(w)
+		return
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		secdLog.Warn("original open failed", "fn", "handleFrameOriginal", "path", path, "err", err)
+		s.appearsDown(w)
+		return
+	}
+	defer f.Close()
+	if mime != "" {
+		w.Header().Set("Content-Type", mime)
+	} else {
+		w.Header().Set("Content-Type", "application/octet-stream")
+	}
+	_, _ = io.Copy(w, f)
+}
+
+// handleLocations accepts a JSON batch of location points ({"source":..,"points":[{ts,lat,lon}..]})
+// and spools it. secd does not parse it; framed validates and drops malformed batches.
 func (s *Server) handleLocations(w http.ResponseWriter, r *http.Request) {
 	if !s.session.Valid(bearer(r)) {
 		secdLog.Warn("location upload rejected: invalid session", "fn", "handleLocations", "bearerPresent", bearer(r) != "", "remote", r.RemoteAddr)
@@ -864,4 +911,56 @@ func (s *Server) handleFramesNewest(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(g)
+}
+
+// handleDaemonSummary , GET /v1/daemon/summary?name=ghost.framed , the per-daemon drill-in feed.
+func (s *Server) handleDaemonSummary(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodGet {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	name := r.URL.Query().Get("name")
+	if len(name) > 40 {
+		s.appearsDown(w)
+		return
+	}
+	kv, err := s.notif.DaemonSummary(mounted, name)
+	if err != nil {
+		secdLog.Warn("daemon summary failed", "fn", "handleDaemonSummary", "name", name, "err", err)
+		s.appearsDown(w)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"name": name, "rows": kv})
+}
+
+// handleCheckins , GET /v1/checkins?days=N , past daily check-ins for the MEMORIES strip.
+func (s *Server) handleCheckins(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodGet {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	n, _ := strconv.Atoi(r.URL.Query().Get("days"))
+	rows, err := s.notif.CheckinHistory(mounted, n)
+	if err != nil {
+		secdLog.Warn("checkins failed", "fn", "handleCheckins", "err", err)
+		s.appearsDown(w)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"checkins": rows})
 }

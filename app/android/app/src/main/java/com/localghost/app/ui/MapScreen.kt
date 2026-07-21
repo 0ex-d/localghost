@@ -124,10 +124,17 @@ fun MapScreen() {
     var zoom by remember { mutableStateOf(1f) }
     // OPENS ON THE NEWEST PHOTO, close in , the map answers "where was I last" before it answers
     // "where have I ever been". Pan/pinch out from there; the whole archive is one gesture away.
-    LaunchedEffect(newest) {
-        newest?.let {
-            cx = mercX(it.lon); cy = mercY(it.lat)
+    LaunchedEffect(newest, cells) {
+        val nw = newest
+        if (nw != null) {
+            cx = mercX(nw.lon); cy = mercY(nw.lat)
             zoom = 6000f
+        } else if (cells.isNotEmpty() && zoom <= 1f) {
+            // Skew fallback: no newest endpoint , fit everything, like the map used to.
+            val xs = cells.map { mercX(it.lon) }; val ys = cells.map { mercY(it.lat) }
+            cx = (xs.min() + xs.max()) / 2f; cy = (ys.min() + ys.max()) / 2f
+            val span = maxOf(xs.max() - xs.min(), ys.max() - ys.min(), 4f)
+            zoom = (WORLD / span * 0.6f).coerceIn(1f, 400f)
         }
     }
     // THE LEVEL-OF-DETAIL LOOP. Zoom decides the tier, the viewport decides the bbox, and postgres
@@ -149,9 +156,21 @@ fun MapScreen() {
         val latTop = invMercY(cy - halfH); val latBot = invMercY(cy + halfH)
         val lonL = invMercX(cx - halfW); val lonR = invMercX(cx + halfW)
         level = lvl
-        cells = BoxClient.framesGeoLod(ctx, lvl,
+        val lod = BoxClient.framesGeoLod(ctx, lvl,
             minOf(latTop, latBot), maxOf(latTop, latBot),
-            minOf(lonL, lonR), maxOf(lonL, lonR)) ?: cells
+            minOf(lonL, lonR), maxOf(lonL, lonR))
+        cells = when {
+            lod != null -> lod
+            cells.isNotEmpty() -> cells
+            else -> {
+                // VERSION SKEW SHIELD , a new app against a box without the LOD endpoints must
+                // still show a map. The old full-fetch endpoint carries every geotagged frame;
+                // slower, but dots beat blankness until the operator redeploys.
+                (BoxClient.framesGeo(ctx) ?: emptyList()).map {
+                    BoxClient.GeoCell(it.lat, it.lon, 1, it.hash, it.takenAt)
+                }
+            }
+        }
         loadNote = when {
             cells.isEmpty() -> "no geotagged photos in view"
             else -> cells.sumOf { it.n }.toString() + " photos · detail " + (lvl + 1) + "/4"

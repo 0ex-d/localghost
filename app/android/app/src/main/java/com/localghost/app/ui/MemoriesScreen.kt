@@ -35,9 +35,13 @@ fun MemoriesScreen(context: LifeContext?) {
     val scope = rememberCoroutineScope()
     var rows by remember { mutableStateOf<List<BoxClient.MemRow>?>(null) }
     var adding by remember { mutableStateOf(false) }
+    var memQuery by remember { mutableStateOf("") }
     var otd by remember { mutableStateOf<List<BoxClient.OtdYear>?>(null) }
     var otdOpen by remember { mutableStateOf(false) }
     var otdLoading by remember { mutableStateOf(false) }
+    var checkinHist by remember { mutableStateOf<List<BoxClient.CheckinRow>>(emptyList()) }
+    var histOpen by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { checkinHist = BoxClient.checkins(ctx) ?: emptyList() }
     var jotting by remember { mutableStateOf(false) }
     var jotSent by remember { mutableStateOf(false) }
     fun reload() { scope.launch { rows = BoxClient.memoriesList(ctx) } }
@@ -68,7 +72,22 @@ fun MemoriesScreen(context: LifeContext?) {
             if (jotSent) Text("sent to the journal , distilled within minutes", color = TerminalDim,
                 style = MaterialTheme.typography.labelMedium)
         }
-        item { CheckinCard() }
+        item {
+            val y = checkinHist.firstOrNull()
+            CheckinCard(yesterday = if (y != null) "${y.day} you felt ${y.feelings}" else "")
+        }
+        if (checkinHist.isNotEmpty()) item {
+            Text(if (histOpen) "[ − past check-ins ]" else "[ + past check-ins (${checkinHist.size}) ]",
+                color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.clickable { histOpen = !histOpen })
+            if (histOpen) Column(Modifier.animateContentSize()) {
+                checkinHist.take(14).forEach { r ->
+                    Text("${r.day} · ${r.feelings}", color = GhostTextDim,
+                        style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.padding(vertical = 2.dp))
+                }
+            }
+        }
         item {
             // ON THIS DAY , synthd's retrospective. Loaded on TAP, not on entry: the first build
             // of a day narrates through the model and can take a minute; cached days are instant.
@@ -120,11 +139,22 @@ fun MemoriesScreen(context: LifeContext?) {
             }
             else -> {
                 item {
+                    BasicTextField(memQuery, { memQuery = it }, singleLine = true,
+                        textStyle = MaterialTheme.typography.bodySmall.copy(color = GhostText),
+                        cursorBrush = SolidColor(TerminalGreen),
+                        decorationBox = { inner -> Box(Modifier.fillMaxWidth()
+                            .border(1.dp, GhostBorder, RectangleShape).padding(8.dp)) {
+                            if (memQuery.isEmpty()) Text("filter memories…", color = TerminalDim,
+                                style = MaterialTheme.typography.bodySmall); inner() } },
+                        modifier = Modifier.fillMaxWidth())
+                    Spacer(Modifier.height(6.dp))
                     val yours = rows!!.count { it.kind == "user" }
                     Text("${rows!!.size} memories" + (if (yours > 0) " · $yours yours" else ""),
                         color = TerminalDim, style = MaterialTheme.typography.labelMedium)
                 }
-                items(rows!!, key = { "mem-${it.id}" }) { m ->
+                items(rows!!.filter { memQuery.isBlank() ||
+                        it.title.contains(memQuery, true) || it.body.contains(memQuery, true) },
+                    key = { "mem-${it.id}" }) { m ->
                 MemoryRowCard(m,
                     onEdit = { t, b -> scope.launch { BoxClient.memoryEdit(ctx, m.id, t, b); reload() } },
                     onDelete = { scope.launch { BoxClient.memoryDelete(ctx, m.id); reload() } })
@@ -141,7 +171,7 @@ fun MemoriesScreen(context: LifeContext?) {
  *  distills it, so feelings become memories with the same sovereignty as everything else. Once a
  *  day: after sending, the card collapses to a checkmark until tomorrow. */
 @Composable
-private fun CheckinCard() {
+private fun CheckinCard(yesterday: String = "") {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val today = remember { java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date()) }
@@ -187,6 +217,10 @@ private fun CheckinCard() {
                 }
             })
         if (open) {
+            if (yesterday.isNotEmpty()) {
+                Spacer(Modifier.height(4.dp))
+                Text(yesterday, color = TerminalDim, style = MaterialTheme.typography.labelMedium)
+            }
             Spacer(Modifier.height(8.dp))
             // chips, wrapping rows of 4 , pick up to three, tap again to unpick
             feelings.chunked(4).forEach { rowFeels ->

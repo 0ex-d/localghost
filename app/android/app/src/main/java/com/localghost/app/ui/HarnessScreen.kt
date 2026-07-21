@@ -116,6 +116,10 @@ private fun stateColor(s: DaemonStatus.State) = when (s) {
 @Composable
 private fun ServiceStatsDialog(name: String, onDismiss: () -> Unit) {
     val ctx = LocalContext.current
+    // The DRILL-IN , each daemon's domain from its own tables (/v1/daemon/summary), stacked above
+    // the sparklines. Box Status is the menu; this dialog is the per-daemon screen.
+    var detail by remember(name) { mutableStateOf<List<Pair<String, String>>?>(null) }
+    LaunchedEffect(name) { detail = com.localghost.app.net.BoxClient.daemonSummary(ctx, name) }
     var stats by remember { mutableStateOf<BoxClient.ServiceStats?>(null) }
     var failed by remember { mutableStateOf(false) }
     LaunchedEffect(name) {
@@ -126,6 +130,16 @@ private fun ServiceStatsDialog(name: String, onDismiss: () -> Unit) {
         Column(Modifier.background(Void).border(1.dp, TerminalDim).padding(16.dp)) {
             Text(name, color = TerminalGreen, style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(8.dp))
+            detail?.let { rows ->
+                rows.forEach { (k, v) ->
+                    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+                        Text("$k  ", color = GhostTextDim, style = MaterialTheme.typography.labelMedium,
+                            modifier = Modifier.weight(1f))
+                        Text(v, color = GhostText, style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+                if (rows.isNotEmpty()) Spacer(Modifier.height(10.dp))
+            }
             val st = stats
             when {
                 failed -> Text("stats unavailable , the sampler needs a deploy + a few minutes of uptime",

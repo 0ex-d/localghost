@@ -11,6 +11,7 @@ import androidx.health.connect.client.records.SleepSessionRecord
 import androidx.health.connect.client.records.StepsRecord
 import androidx.health.connect.client.records.TotalCaloriesBurnedRecord
 import androidx.health.connect.client.records.WeightRecord
+import androidx.health.connect.client.request.AggregateGroupByPeriodRequest
 import androidx.health.connect.client.request.ReadRecordsRequest
 import androidx.health.connect.client.time.TimeRangeFilter
 import com.localghost.app.net.BoxClient
@@ -113,21 +114,67 @@ object HealthSync {
                 android.util.Log.w("LocalGhost", "health read $name skipped: ${e.message}")
             }
         }
-        tryRead("steps", StepsRecord::class) { recs ->
+        // DAILY TOTALS VIA THE AGGREGATE API , the double-counting fix. When the watch AND the
+        // phone both write steps, raw record-summing counts both; aggregate() dedupes across data
+        // origins with Health Connect's own source-priority rules. One call covers steps,
+        // distance, calories, floors and exercise duration, bucketed per local day. If aggregate
+        // itself fails (older provider), the raw per-record fallback below still runs , counts
+        // may inflate there, which the skipped-list names honestly.
+        var aggregated = false
+        try {
+            val zStart = from.atZone(zone).toLocalDateTime()
+            val zEnd = now.atZone(zone).toLocalDateTime()
+            val buckets = client.aggregateGroupByPeriod(
+                AggregateGroupByPeriodRequest(
+                    metrics = setOf(
+                        StepsRecord.COUNT_TOTAL,
+                        DistanceRecord.DISTANCE_TOTAL,
+                        TotalCaloriesBurnedRecord.ENERGY_TOTAL,
+                        FloorsClimbedRecord.FLOORS_CLIMBED_TOTAL,
+                        ExerciseSessionRecord.EXERCISE_DURATION_TOTAL,
+                    ),
+                    timeRangeFilter = TimeRangeFilter.between(zStart, zEnd),
+                    timeRangeSlicer = java.time.Period.ofDays(1)))
+            buckets.forEach { b ->
+                val d = b.startTime.toLocalDate().format(fmt)
+                val m = days.getOrPut(d) { HashMap() }
+                b.result[StepsRecord.COUNT_TOTAL]?.let { m["steps"] = it.toDouble() }
+                b.result[DistanceRecord.DISTANCE_TOTAL]?.let { m["distance_km"] = it.inKilometers }
+                b.result[TotalCaloriesBurnedRecord.ENERGY_TOTAL]?.let { m["calories"] = it.inKilocalories }
+                b.result[FloorsClimbedRecord.FLOORS_CLIMBED_TOTAL]?.let { m["floors"] = it }
+                b.result[ExerciseSessionRecord.EXERCISE_DURATION_TOTAL]?.let {
+                    m["exercise_minutes"] = it.seconds / 60.0
+                }
+            }
+            aggregated = true
+        } catch (e: Exception) {
+            android.util.Log.w("LocalGhost", "aggregate unavailable, raw fallback: ${e.message}")
+        }
+        if (!aggregated) tryRead("steps", StepsRecord::class) { recs ->
             recs.forEach { r ->
                 val m = bucket(r.startTime)
                 m["steps"] = (m["steps"] ?: 0.0) + r.count.toDouble()
             }
         }
         tryRead("sleep", SleepSessionRecord::class) { recs ->
-            recs.forEach { r ->
-                // A night's sleep belongs to the day you WAKE , bucket by end time.
-                val m = bucket(r.endTime)
-                m["sleep_minutes"] = (m["sleep_minutes"] ?: 0.0) +
-                    (r.endTime.epochSecond - r.startTime.epochSecond) / 60.0
+            // OVERLAP MERGE , two origins (watch app + phone app) can record the SAME night as two
+            // overlapping sessions; naive summing invents extra sleep. Merge intervals first, then
+            // bucket each merged block by its END (a night belongs to the day you wake).
+            val ivs = recs.map { it.startTime.epochSecond to it.endTime.epochSecond }
+                .filter { it.second > it.first }.sortedBy { it.first }
+            val merged = ArrayList<Pair<Long, Long>>()
+            for (iv in ivs) {
+                val last = merged.lastOrNull()
+                if (last != null && iv.first <= last.second) {
+                    merged[merged.size - 1] = last.first to maxOf(last.second, iv.second)
+                } else merged.add(iv)
+            }
+            merged.forEach { (st, en) ->
+                val m = bucket(Instant.ofEpochSecond(en))
+                m["sleep_minutes"] = (m["sleep_minutes"] ?: 0.0) + (en - st) / 60.0
             }
         }
-        tryRead("exercise", ExerciseSessionRecord::class) { recs ->
+        if (!aggregated) tryRead("exercise", ExerciseSessionRecord::class) { recs ->
             recs.forEach { r ->
                 val m = bucket(r.startTime)
                 m["exercise_minutes"] = (m["exercise_minutes"] ?: 0.0) +
@@ -161,19 +208,19 @@ object HealthSync {
                 m["hr_max"] = vals.max()
             }
         }
-        tryRead("distance", DistanceRecord::class) { recs ->
+        if (!aggregated) tryRead("distance", DistanceRecord::class) { recs ->
             recs.forEach { r ->
                 val m = bucket(r.startTime)
                 m["distance_km"] = (m["distance_km"] ?: 0.0) + r.distance.inKilometers
             }
         }
-        tryRead("calories", TotalCaloriesBurnedRecord::class) { recs ->
+        if (!aggregated) tryRead("calories", TotalCaloriesBurnedRecord::class) { recs ->
             recs.forEach { r ->
                 val m = bucket(r.startTime)
                 m["calories"] = (m["calories"] ?: 0.0) + r.energy.inKilocalories
             }
         }
-        tryRead("floors", FloorsClimbedRecord::class) { recs ->
+        if (!aggregated) tryRead("floors", FloorsClimbedRecord::class) { recs ->
             recs.forEach { r ->
                 val m = bucket(r.startTime)
                 m["floors"] = (m["floors"] ?: 0.0) + r.floors

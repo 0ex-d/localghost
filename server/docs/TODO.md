@@ -1,9 +1,140 @@
-# TODO
+# LocalGhost TODO
 
-Working list. Tick items off as they land, add new ones at the bottom of their section.
-Started 2026-07-15, the night the box learned to repair itself on unlock.
+Two sections, no mixing: what remains, then the build log. New done items go to the TOP
+of DONE (reverse chronological); open items live in TO DO until they move.
 
-## App , chat rendering and UX
+## TO DO
+
+- [ ] **7. Reprocess pass , RUN IT** (the command now exists, written 2026-07-15): framed walks
+      the archive, re-inserts records (idempotent), re-derives previews (force=true also fixes
+      pre-existing sideways portrait thumbs), re-notifies search, rebuilds GPS days. Run:
+        ghost-cli ghost.framed reprocess force=true        (via ns.sh)
+        ghost-cli ghost.searchd unpark                     (revive jobs dead at 5 attempts)
+      then watch nvidia-smi while the caption backlog drains and "tags pending" resolves.
+      Root cause of the idle GPU, diagnosed: the degraded window's photos were never ingested
+      (no ingest, no caption job , the queue was honestly empty), searchd's rebuild cannot
+      discover them (it regenerates derived state from originals, not from the archive), and
+      any jobs that did burn 5 attempts against the broken DB were parked forever with no
+      unpark lever. All three now have answers.
+
+## Sync
+
+- [ ] **9. Runtime bundle switchover** , bundle_db_runtime.sh --verify, then halt + unlock,
+      confirm ps shows postgres from runtime/pgroot, decide on purging the OS packages. First
+      real use of `halt`.
+- [ ] **25b. Gallery grouping** (was 25 remainder) (UX, next session's opener): tags as tappable
+      chips on tiles and in the detail dialog; place line under the date (the geocoded
+      hierarchy); group/filter by place and by day; search box wired to /v1/frames/search;
+      correct-orientation thumbs land via reprocess. The data all exists now , this is pure
+      presentation.
+- [ ] **26. PIN/key derivation review** (assessed 2026-07-15; deliberate, not urgent , needs a
+      registry re-enrol migration, wrong thing to hot-fix). Findings: (a) PinKey doubles as the
+      registry identifier AND the wrapping key, so registry.blob stores the PIN-derived half of
+      the wrapping key in the clear , fix is domain separation (id = HKDF(PinKey,"id"), wrap =
+      HKDF(PinKey,"wrap"), x/crypto/hkdf), blob then holds only a one-way derivative; (b) the
+      registry is an OFFLINE PIN oracle at Argon2 speed (6 digits ≈ a day for box root),
+      bypassing the TPM's rate limiting because Resolve is pure software , fix on the TPM tier is
+      a TPM-resident HMAC mixed into the identifier so every guess transits the TPM dwell;
+      software tier cannot have this and must say so. What is already RIGHT and must not
+      regress: Argon2id 64MiB/t4, full-registry constant-time scan with fillers (no timing/count
+      leak), wipe-PIN indistinguishability, Gate online rate limiting.
+
+- [ ] **30. Memory system, next slices** , (a) DONE (item 34); (b) DONE 2026-07-15 as
+      memoriesSource: retrieval lives in synthd's context-injection path (FIRST in source order ,
+      what the box knows about the person outranks document search), keyword term-overlap over
+      live memories, top 2 by hits then recency, source="memory" with an honest Why; the Index
+      interface upgrade folds into (c) embeddings; (c) embeddings via the search layer's
+      embedder into memories.emb, PGIndex upgrades to semantic; (d) frames as a memory source
+      (places + dates + tags -> "was in Strathcona Park mid-July"); (e) cued gating policy.
+
+- [ ] **31. ghost.shadowd, the real charter** (recorded 2026-07-15 from hard-truths/should-not-
+      possess + dictator-brain + critic-worth-listening-to): the anti-possession daemon , a fleet
+      of individually-tunable manipulation-pattern detectors (28-entry catalogue) plus the
+      COLD-READ ARBITER (separate model never shaped by the user, scheduled reset to a published
+      baseline against arbiter capture). Contract: NAMING IS THE ACTION , no blocking, no
+      refusing, mute-not-disable, enforcement only for user-written Ulysses contracts. First
+      tractable detectors read data the box already holds: interaction time + sessions past task
+      completion (addiction by design), ghost-vs-human emotional-processing share (engagement
+      loneliness), sunk-cost retrieval framing, topic-surface narrowing (filter bubble of one).
+      Vlad ships no v1 without shadowd running.
+- [ ] **32. Fleet gaps inventory** (per cmd READMEs, 2026-07-15): ghost.noted , first slice DONE
+      (see 35), pullers/upload/mentions remain; ghost.voiced (audio -> transcripts ->
+      noted; ephemeral live-capture vs kept voice-memos) , stub; ghost.tallyd (structured data ->
+      time-series + narrative summaries -> noted) , stub; framed's README says descriptions push
+      through noted's inbox , currently framed notifies searchd directly, reconcile when noted
+      is real; synthd's entities/episodes/decision-queue layers , not started (distillation loop
+      is the first slice only).
+
+## Security / longer arc (deprioritized 2026-07-15 , UX first, per the operator)
+
+- [ ] **15. Re-pair gating on FIDO2.**
+- [ ] **16. Backup system** , weekly fulls + daily incremental diffs on the always-mounted HDD,
+      asymmetric encryption (daily job never holds the key), folder unreachable by the app.
+- [ ] **17. Box security threat model blog post** (separate from the Border Agent post).
+
+## Done (this era)
+
+## DONE
+
+- [x] **64. Model gate + attempt refunds + framed pipeline visibility** (2026-07-21): searchd's
+      model-dependent lanes (caption, tag) now REST behind a 20s hold the moment a "no backend"
+      lands , no more machine-gunning a warming oracled. The deeper find: warmup fast-fails were
+      CONSUMING job attempts (five storms = a photo permanently uncaptioned , "captions
+      exhausted"); UnclaimJob refunds the attempt since it never reached the model. One log line
+      per storm, not one per job. FRAMED's drill-in now shows the whole enrichment pipeline:
+      archived -> geotagged -> placed -> named -> described -> tagged, plus caption queue and
+      captions exhausted , the operator watches tagging happen in numbers.
+
+- [x] **63. QR detection round three** (2026-07-21): (a) STRIDE-2 scanning , a finder is >=7
+      modules tall so every-2nd-line scanning loses nothing decodable and halves the cost, which
+      is what lets sticky + probe both run every frame; a NEAR-MISS (1-2 finders seen) flips the
+      next frame to stride-1 precision , the extra rows are exactly where the missing finder
+      hides. (b) TWO-OF-THREE RESCUE , the most common near-miss: two finders fix scale and
+      orientation up to six candidate spots (right-angle completions about each + the diagonal
+      hypotheses); a tight (3-module) window at each is searched with the lenient matcher, one
+      hit completes the triple, the decoder judges. Detection now degrades gracefully instead of
+      binarily: 3 finders decode, 2 finders usually still decode, 1 finder sharpens the next
+      frame.
+
+- [x] **62. Map skew shield + original-quality viewer** (2026-07-21): the blank map was VERSION
+      SKEW , new APK calling /v1/frames/geo/lod + /newest against a secd that predates them, every
+      call 503, zero cells. The redeploy fixes it, and the app now survives it forever: LOD null
+      falls back to the old full-fetch endpoint (dots beat blankness), missing /newest falls back
+      to fit-all camera. Viewer upgraded ORIGINAL-first: /v1/frames/original streams the untouched
+      archive bytes mime-typed (phone decodes jpeg/heic/png natively); preview then thumb are
+      fallbacks for undecodable originals, and a quality tag names any downgrade , no silent webp.
+
+- [x] **61. Health correctness + check-in depth** (2026-07-21): DOUBLE-COUNTING fixed , when
+      watch AND phone both write steps, raw record-summing counted both; daily totals (steps,
+      distance, calories, floors, exercise) now come from the AGGREGATE API which dedupes across
+      data origins with Health Connect's source priority; raw summing survives only as a named
+      fallback for older providers. Sleep OVERLAP MERGE , two origins recording the same night no
+      longer invent extra sleep (intervals merged before bucketing by wake day). Check-in grew
+      memory: "yesterday you felt calm, tired" continuity line, a [ + past check-ins ] strip
+      (/v1/checkins parses the journal entries back into day/feelings rows), memory list gained
+      a filter box anda provenance line ("yours" / "distilled from your days" + date).
+
+- [x] **60. Real notifications + tap-through + QR far-scan** (2026-07-21): the two FAKES in
+      pollPending are dead , the app now reads /v1/notifications (per-device push cursor, offered
+      once). Two real producers: framed's WEEKLY HIGHLIGHT (best day of the last 7 by geotagged
+      photo count, once per ISO week, factual not engagement bait , "Thursday was the big one ,
+      34 photos around Strathcona") and secd's evening CHECK-IN ask (19-21h, once, SILENT if the
+      person already checked in , no streaks, no guilt). Tapping any notification opens the app;
+      AFTER the security gate MainShell navigates to it (NOTIFICATIONS; the check-in ask lands on
+      MEMORIES). QR: small-module leniency in matches11311 , sub-2.5px arms get 0.85 tolerance
+      and a 1.7x centre floor (integer runs make far-QR ratios inherently ragged).
+
+- [x] **59. Debug mode + tok/s + per-daemon drill-ins** (2026-07-21): global DEBUG MODE flag ,
+      Settings > DEVELOPER > "set app in debug mode" (tap toggles, more diagnostics attach here);
+      chat tok/s meter (13c done) , timed from FIRST answer token so thinking does not dilute the
+      rate, chars/4 approximation, shown under the composer only in debug. Per-daemon screens
+      (44 done) reached from Box Status rows as designed: the stats dialog now opens with a
+      DRILL-IN section fed by /v1/daemon/summary , framed (archived/photos/videos/geotagged/
+      placed/named/described/track points/geo places), noted (journal by source, awaiting
+      distillation), synthd (memories live/yours/tombstoned, queue, reports), searchd (caption
+      jobs pending/exhausted, chunks, tags), tallyd (health days/rows/samples/earliest),
+      shadowd + oracled (charter/role lines). All flat SELECTs from each daemon's own tables.
+      TODO restructured into TO DO / DONE sections , no more mixed reading.
 
 - [x] **1. Markdown rendering in chat** , stdlib only. Range-based renderer, streaming-safe by
       construction (all parsing in remember/runCatching, plain-text fallback, fuzzed over 3485
@@ -44,20 +175,6 @@ Started 2026-07-15, the night the box learned to repair itself on unlock.
       1600px beats rotating 12MP). Originals untouched. Landed 2026-07-15. Existing wrong thumbs
       need the item-7 reprocess , which it turns out DOES NOT EXIST yet (the pipeline comment
       "regenerated by the reprocess command" is aspirational); item 7 now includes writing it.
-- [ ] **7. Reprocess pass , RUN IT** (the command now exists, written 2026-07-15): framed walks
-      the archive, re-inserts records (idempotent), re-derives previews (force=true also fixes
-      pre-existing sideways portrait thumbs), re-notifies search, rebuilds GPS days. Run:
-        ghost-cli ghost.framed reprocess force=true        (via ns.sh)
-        ghost-cli ghost.searchd unpark                     (revive jobs dead at 5 attempts)
-      then watch nvidia-smi while the caption backlog drains and "tags pending" resolves.
-      Root cause of the idle GPU, diagnosed: the degraded window's photos were never ingested
-      (no ingest, no caption job , the queue was honestly empty), searchd's rebuild cannot
-      discover them (it regenerates derived state from originals, not from the archive), and
-      any jobs that did burn 5 attempts against the broken DB were parked forever with no
-      unpark lever. All three now have answers.
-
-## Sync
-
 - [x] **8. Sync screen counters** , the worker was already sequential (photos then videos); the
       three-numbers-racing screen was stale Activity state (worker only published kind+done/total,
       so last run's photo bar froze mid-fill while this run painted videos) and the byte line was
@@ -68,9 +185,6 @@ Started 2026-07-15, the night the box learned to repair itself on unlock.
 
 ## Server
 
-- [ ] **9. Runtime bundle switchover** , bundle_db_runtime.sh --verify, then halt + unlock,
-      confirm ps shows postgres from runtime/pgroot, decide on purging the OS packages. First
-      real use of `halt`.
 - [x] **10. Drawer recents box-backed + chat rename/delete** , the old drawer source was a STUB
       (delay + unused params, backed by nothing); recents now map /v1/chats, selection is chatId
       adoption, refresh on unlock/adoption/rename/delete. New endpoints: POST /v1/chats/rename
@@ -126,7 +240,6 @@ Started 2026-07-15, the night the box learned to repair itself on unlock.
       freshest sample is >35s old (the one condition the stats cannot self-report); Box Status
       shows a warning banner naming the rows below as the past, not the present. Landed
       2026-07-15.
-- [ ] **13c. Chat tok/s metric** , parked, pure gravy.
 - [x] **14. Redis persistence at lock** , folded into item 12 (shutdown save). Landed 2026-07-15.
 
 - [x] **22. Setup provisions the volume interior** , at format time (PIN in hand, fresh mount):
@@ -157,23 +270,6 @@ Started 2026-07-15, the night the box learned to repair itself on unlock.
       3-char boundary) , only the post-</think> answer is persisted. Landed 2026-07-15.
 - [x] **28. Chats history polish** , box-chat rows gained two-tap delete (reuses the /v1/chats/
       delete path) beside the inline rename. Landed 2026-07-15.
-- [ ] **25b. Gallery grouping** (was 25 remainder) (UX, next session's opener): tags as tappable
-      chips on tiles and in the detail dialog; place line under the date (the geocoded
-      hierarchy); group/filter by place and by day; search box wired to /v1/frames/search;
-      correct-orientation thumbs land via reprocess. The data all exists now , this is pure
-      presentation.
-- [ ] **26. PIN/key derivation review** (assessed 2026-07-15; deliberate, not urgent , needs a
-      registry re-enrol migration, wrong thing to hot-fix). Findings: (a) PinKey doubles as the
-      registry identifier AND the wrapping key, so registry.blob stores the PIN-derived half of
-      the wrapping key in the clear , fix is domain separation (id = HKDF(PinKey,"id"), wrap =
-      HKDF(PinKey,"wrap"), x/crypto/hkdf), blob then holds only a one-way derivative; (b) the
-      registry is an OFFLINE PIN oracle at Argon2 speed (6 digits ≈ a day for box root),
-      bypassing the TPM's rate limiting because Resolve is pure software , fix on the TPM tier is
-      a TPM-resident HMAC mixed into the identifier so every guess transits the TPM dwell;
-      software tier cannot have this and must say so. What is already RIGHT and must not
-      regress: Argon2id 64MiB/t4, full-registry constant-time scan with fillers (no timing/count
-      leak), wipe-PIN indistinguishability, Gate online rate limiting.
-
 - [x] **29. Memory system, foundation** (landed 2026-07-15; CORRECTED same night , the memory
       layer is ghost.SYNTHD per its charter, hard-truths/how-memory-gets-made; the distillation
       loop was briefly misfiled in shadowd and now lives in synthd's main). Division of labour, corrected: ghost.SYNTHD owns memory end to end (journal entries ->
@@ -189,24 +285,6 @@ Started 2026-07-15, the night the box learned to repair itself on unlock.
       /v1/memories/delete on secd. Sovereignty is structural: tombstones are never resurrected
       (chats with ANY memory rows are never re-distilled), user_edited never overwritten,
       incognito is invisible by inheritance (never reaches the chats table).
-- [ ] **30. Memory system, next slices** , (a) DONE (item 34); (b) DONE 2026-07-15 as
-      memoriesSource: retrieval lives in synthd's context-injection path (FIRST in source order ,
-      what the box knows about the person outranks document search), keyword term-overlap over
-      live memories, top 2 by hits then recency, source="memory" with an honest Why; the Index
-      interface upgrade folds into (c) embeddings; (c) embeddings via the search layer's
-      embedder into memories.emb, PGIndex upgrades to semantic; (d) frames as a memory source
-      (places + dates + tags -> "was in Strathcona Park mid-July"); (e) cued gating policy.
-
-- [ ] **31. ghost.shadowd, the real charter** (recorded 2026-07-15 from hard-truths/should-not-
-      possess + dictator-brain + critic-worth-listening-to): the anti-possession daemon , a fleet
-      of individually-tunable manipulation-pattern detectors (28-entry catalogue) plus the
-      COLD-READ ARBITER (separate model never shaped by the user, scheduled reset to a published
-      baseline against arbiter capture). Contract: NAMING IS THE ACTION , no blocking, no
-      refusing, mute-not-disable, enforcement only for user-written Ulysses contracts. First
-      tractable detectors read data the box already holds: interaction time + sessions past task
-      completion (addiction by design), ghost-vs-human emotional-processing share (engagement
-      loneliness), sunk-cost retrieval framing, topic-surface narrowing (filter bubble of one).
-      Vlad ships no v1 without shadowd running.
 - [x] **33. Journal-entry architecture** (landed 2026-07-15): each ingester writes its OWN diary
       , journal_entries table, idempotent by (source, ref), distilled flag as synthd's high-water
       mark. framed writes entries at archive AND reprocess with what it knows then (kind, when,
@@ -337,11 +415,6 @@ Started 2026-07-15, the night the box learned to repair itself on unlock.
       rebuilt once each (progress logged every 200); one journal line per import records the
       span; rejects to gps-inbox/rejected. Polled every 5 min + ghost-cli ghost.framed
       gps-import to skip the wait. YEARS of map history from one Takeout drop.
-- [ ] **44. Per-daemon screens** , the HEALTH pattern extended: FRAMED (archive counts, recent,
-      reprocess progress), NOTED (recent journal entries, inbox/rejected counts), SYNTHD
-      (memories count, distillation queue depth, reports), SEARCHD (jobs/parked/runnable),
-      ORACLED (model, load), SHADOWD (charter + detector status when real). Each reads its own
-      daemon's tables; Box Status rows link through.
 - [x] **42. Health via tallyd + data-driven check-in** (landed 2026-07-15): app reads the
       phone's Health Connect store (where Samsung Health writes) , steps, sleep sessions
       (bucketed to the WAKE day), exercise , last 7 days, only network hop is phone->box; POST
@@ -397,23 +470,6 @@ Started 2026-07-15, the night the box learned to repair itself on unlock.
       content hash; canonical copy content-addressed in noted/archive; rejects to inbox/rejected
       with reason logged, never deleted, never looped. Remaining for noted: IMAP/upstream
       pullers, secd upload endpoint for the app share sheet, mentions extraction.
-- [ ] **32. Fleet gaps inventory** (per cmd READMEs, 2026-07-15): ghost.noted , first slice DONE
-      (see 35), pullers/upload/mentions remain; ghost.voiced (audio -> transcripts ->
-      noted; ephemeral live-capture vs kept voice-memos) , stub; ghost.tallyd (structured data ->
-      time-series + narrative summaries -> noted) , stub; framed's README says descriptions push
-      through noted's inbox , currently framed notifies searchd directly, reconcile when noted
-      is real; synthd's entities/episodes/decision-queue layers , not started (distillation loop
-      is the first slice only).
-
-## Security / longer arc (deprioritized 2026-07-15 , UX first, per the operator)
-
-- [ ] **15. Re-pair gating on FIDO2.**
-- [ ] **16. Backup system** , weekly fulls + daily incremental diffs on the always-mounted HDD,
-      asymmetric encryption (daily job never holds the key), folder unreachable by the app.
-- [ ] **17. Box security threat model blog post** (separate from the Border Agent post).
-
-## Done (this era)
-
 - [x] Convergent unlock , mounted-but-dead is repairable; Warm gates only Unseal/Mount.
 - [x] EnsureSchema bootstrap , pg_hba peer line for the run user; owner role, service roles,
       database, and ownership converged as superuser; grants (public + search) as owner.

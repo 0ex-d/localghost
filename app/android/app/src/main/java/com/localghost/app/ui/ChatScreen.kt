@@ -49,6 +49,7 @@ fun ChatScreen(
     onGetModel: () -> Unit,                // no models installed -> go to MODELS
     incognito: Boolean = false,
     onToggleIncognito: () -> Unit = {},
+    genStats: String = "",                 // debug-mode tok/s line ("" = hidden)
 ) {
     var input by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
@@ -110,7 +111,11 @@ fun ChatScreen(
         if (pendingAttachments.isNotEmpty()) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
                 pendingAttachments.forEach { a ->
-                    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                    if (genStats.isNotEmpty()) {
+            Text(genStats, color = TerminalDim, style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.padding(horizontal = 16.dp))
+        }
+        Row(Modifier.fillMaxWidth().padding(vertical = 2.dp),
                         verticalAlignment = Alignment.CenterVertically) {
                         Text(if (a.kind == Attachment.Kind.IMAGE) "▣" else "◍",
                             color = TerminalGreen, style = MaterialTheme.typography.bodyMedium)

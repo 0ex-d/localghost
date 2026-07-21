@@ -223,6 +223,14 @@ func (s *Store) EnqueueJob(kind string, payload any) error {
 }
 
 // ClaimJob claims one runnable job of the kind (attempts incremented atomically).
+// UnclaimJob refunds a claim , the attempt did not reach the model (oracled warming), so it must
+// not count against the job's five lives. Warmup storms were quietly EXHAUSTING jobs: five
+// restarts and a photo would never be captioned. Deferred 20s so the lane rests while llama loads.
+func (s *Store) UnclaimJob(id int64) error {
+	return s.db.Exec(
+		"UPDATE search.jobs SET attempts = GREATEST(attempts - 1, 0), run_after = now() + interval '20 seconds' WHERE id = $1", id)
+}
+
 func (s *Store) ClaimJob(kind string) (*Job, error) {
 	rows, err := s.db.Query(`
 		UPDATE search.jobs SET attempts = attempts + 1

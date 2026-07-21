@@ -187,12 +187,21 @@ func main() {
 	go func() {
 		t := time.NewTicker(5 * time.Minute)
 		defer t.Stop()
+		hl := time.NewTicker(6 * time.Hour)
+		defer hl.Stop()
+		if err := store.WeeklyHighlight(); err != nil {
+			lg.Warn("weekly highlight", "fn", "main", "err", err)
+		}
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-t.C:
 				pipe.IngestTimelineDir(*mount, lg)
+			case <-hl.C:
+				if err := store.WeeklyHighlight(); err != nil {
+					lg.Warn("weekly highlight", "fn", "main", "err", err)
+				}
 			}
 		}
 	}()

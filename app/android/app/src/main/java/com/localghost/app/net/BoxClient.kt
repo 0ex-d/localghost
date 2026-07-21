@@ -19,7 +19,8 @@ import kotlinx.coroutines.flow.flow
 import java.io.InputStream
 import org.json.JSONObject
 
-data class PendingNotification(val daemonId: String, val title: String, val body: String)
+data class PendingNotification(val daemonId: String, val title: String, val body: String,
+    val id: Long = 0, val kind: String = "message")
 
 /** A saved conversation. Lives on the box (synthd); the phone lists + loads, holds the active
  *  one in memory only. */
@@ -497,18 +498,25 @@ object BoxClient {
     }
 
     // --- notifications ---
+    /** REAL notifications from the box , /v1/notifications is a per-device push cursor (the box
+     *  advances it, so each notification is offered to this phone exactly once). The fakes that
+     *  lived here are dead; if the list is empty, the box genuinely has nothing to say. */
     suspend fun pollPending(ctx: Context): List<PendingNotification> {
-        delay(150)
         if (NotifyState.isMuted(ctx)) return emptyList()
         val now = System.currentTimeMillis()
         if (now - NotifyState.lastPostedAt(ctx) < CADENCE_MS) return emptyList()
-        NotifyState.setLastPostedAt(ctx, now)
-        return listOf(
-            PendingNotification("ghost.watchd", "Dog check",
-                "Paul please don't get another dog, 10 is enough."),
-            PendingNotification("ghost.cued", "Reflection waiting",
-                "A question is ready when you have a moment."),
-        )
+        return try {
+            val r = BoxHttp.getJson(ctx, "/v1/notifications")
+            val a = r.optJSONArray("notifications") ?: return emptyList()
+            val out = (0 until a.length()).mapNotNull { i ->
+                val o = a.optJSONObject(i) ?: return@mapNotNull null
+                PendingNotification(o.optString("service", "ghost.secd"),
+                    o.optString("title"), o.optString("body"),
+                    o.optLong("id"), o.optString("kind", "message"))
+            }
+            if (out.isNotEmpty()) NotifyState.setLastPostedAt(ctx, now)
+            out
+        } catch (_: Exception) { emptyList() }
     }
 
     // --- sync ---
@@ -644,6 +652,17 @@ object BoxClient {
         }
     } catch (_: Exception) { null }
 
+    data class CheckinRow(val day: String, val feelings: String, val why: String)
+
+    suspend fun checkins(ctx: Context, days: Int = 30): List<CheckinRow>? = try {
+        val r = BoxHttp.getJson(ctx, "/v1/checkins?days=$days")
+        val a = r.optJSONArray("checkins") ?: org.json.JSONArray()
+        (0 until a.length()).mapNotNull { i ->
+            val o = a.optJSONObject(i) ?: return@mapNotNull null
+            CheckinRow(o.optString("day"), o.optString("feelings"), o.optString("why"))
+        }
+    } catch (_: Exception) { null }
+
     data class DaySummary(val photos: Int, val videos: Int, val places: List<String>, val notes: List<String>,
         val steps: Int = 0, val sleepMinutes: Int = 0, val exerciseMinutes: Int = 0,
         val suggested: List<String> = emptyList())
@@ -727,6 +746,16 @@ object BoxClient {
                 o.optLong("taken_at"), o.optString("place"))
         }
     } catch (e: Exception) { android.util.Log.w("LocalGhost", "frames geo: ${e.message}"); null }
+
+    /** Per-daemon drill-in rows for the Box Status detail screens. */
+    suspend fun daemonSummary(ctx: Context, name: String): List<Pair<String, String>>? = try {
+        val r = BoxHttp.getJson(ctx, "/v1/daemon/summary?name=$name")
+        val a = r.optJSONArray("rows") ?: org.json.JSONArray()
+        (0 until a.length()).mapNotNull { i ->
+            val o = a.optJSONObject(i) ?: return@mapNotNull null
+            Pair(o.optString("k"), o.optString("v"))
+        }
+    } catch (_: Exception) { null }
 
     data class GeoCell(val lat: Double, val lon: Double, val n: Int, val hash: String, val takenAt: Long)
 
@@ -861,6 +890,10 @@ object BoxClient {
     }
 
     /** One thumbnail's bytes (webp or jpeg). Null when the frame has none (videos) or on failure. */
+    /** The UNTOUCHED archived original , full quality, mime-typed by the box. Multi-MB. */
+    suspend fun frameOriginal(ctx: Context, hash: String): ByteArray? =
+        BoxHttp.getBytes(ctx, "/v1/frames/original?hash=$hash")
+
     /** The big derived JPEG , full-screen viewing and pinch-zoom. */
     suspend fun framePreview(ctx: Context, hash: String): ByteArray? =
         BoxHttp.getBytes(ctx, "/v1/frames/preview?hash=$hash")

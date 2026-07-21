@@ -331,3 +331,40 @@ func decodeID(w http.ResponseWriter, r *http.Request) (int64, bool) {
 	}
 	return req.ID, true
 }
+
+// checkinReminderLoop , the box asking, once a day in the early evening, if the person has not
+// already answered: "how are you feeling today?". The rule against engagement bait applies:
+// exactly one ask, no streaks, no guilt language, silence after. If the person checked in
+// (the app journals it via /v1/notes), no notification at all.
+func (s *Server) checkinReminderLoop() {
+	t := time.NewTicker(30 * time.Minute)
+	defer t.Stop()
+	for range t.C {
+		s.mu.Lock()
+		mounted := s.mounted
+		s.mu.Unlock()
+		if mounted < 0 || s.notif == nil {
+			continue
+		}
+		h := time.Now().Hour()
+		if h < 19 || h > 21 {
+			continue
+		}
+		today := time.Now().Format("2006-01-02")
+		if v, err := s.notif.GetSetting(mounted, "checkin_reminded"); err == nil && v == today {
+			continue
+		}
+		if done, err := s.notif.CheckinDoneToday(mounted, today); err != nil || done {
+			if err == nil {
+				_ = s.notif.SetSetting(mounted, "checkin_reminded", today) // answered on their own , stay silent
+			}
+			continue
+		}
+		_, _ = s.notif.InsertNotification(mounted, hw.Notification{
+			Service: "ghost.secd", Kind: "checkin",
+			Title: "how are you feeling today?",
+			Body:  "your day is already prefilled , 30 seconds on the MEMORIES screen",
+		})
+		_ = s.notif.SetSetting(mounted, "checkin_reminded", today)
+	}
+}

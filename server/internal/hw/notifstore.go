@@ -1395,3 +1395,182 @@ func (s *NotifStore) NewestGeoFrame(slot int) (GeoCluster, error) {
 	}
 	return g, nil
 }
+
+// DaemonKV is one row of a daemon's drill-in summary.
+type DaemonKV struct {
+	K string `json:"k"`
+	V string `json:"v"`
+}
+
+// DaemonSummary , the per-daemon screens' feed. Each daemon's domain summarized from ITS OWN
+// tables (rule 1 in DATA.md: single writer, single reader-of-record). All flat SELECTs.
+func (s *NotifStore) DaemonSummary(slot int, name string) ([]DaemonKV, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return nil, err
+	}
+	one := func(q string, args ...any) string {
+		rows, qerr := c.Query(q, args...)
+		if qerr != nil || len(rows.Vals) == 0 || len(rows.Vals[0]) == 0 || rows.Vals[0][0] == nil {
+			return "0"
+		}
+		return *rows.Vals[0][0]
+	}
+	kv := []DaemonKV{}
+	add := func(k, v string) { kv = append(kv, DaemonKV{k, v}) }
+	switch name {
+	case "ghost.framed":
+		add("frames archived", one("SELECT count(*) FROM frames"))
+		add("photos", one("SELECT count(*) FROM frames WHERE kind = 'photo'"))
+		add("videos", one("SELECT count(*) FROM frames WHERE kind = 'video'"))
+		add("geotagged", one("SELECT count(*) FROM frames WHERE has_gps"))
+		add("placed", one("SELECT count(*) FROM frames WHERE place <> ''"))
+		add("named", one("SELECT count(*) FROM frames WHERE display_name <> ''"))
+		add("described", one("SELECT count(*) FROM frames WHERE description <> ''"))
+		add("tagged", one("SELECT count(DISTINCT hash) FROM frame_tags WHERE source <> 'user_removed'"))
+		add("caption queue", one("SELECT count(*) FROM search.jobs WHERE kind = 'caption' AND attempts < 5"))
+		add("captions exhausted", one("SELECT count(*) FROM search.jobs WHERE kind = 'caption' AND attempts >= 5"))
+		add("track points", one("SELECT count(*) FROM location_points"))
+		add("geo places loaded", one("SELECT count(*) FROM geo_points"))
+		if ts := one("SELECT max(taken_at) FROM frames"); ts != "0" {
+			add("newest capture", ts)
+		}
+	case "ghost.noted":
+		add("journal entries", one("SELECT count(*) FROM journal_entries"))
+		add("from noted", one("SELECT count(*) FROM journal_entries WHERE source = 'ghost.noted'"))
+		add("from framed", one("SELECT count(*) FROM journal_entries WHERE source = 'ghost.framed'"))
+		add("from tallyd", one("SELECT count(*) FROM journal_entries WHERE source = 'ghost.tallyd'"))
+		add("awaiting distillation", one("SELECT count(*) FROM journal_entries WHERE NOT distilled"))
+	case "ghost.synthd":
+		add("memories (live)", one("SELECT count(*) FROM memories WHERE NOT tombstoned"))
+		add("yours (user-made)", one("SELECT count(*) FROM memories WHERE kind = 'user' AND NOT tombstoned"))
+		add("tombstoned", one("SELECT count(*) FROM memories WHERE tombstoned"))
+		add("distill queue", one("SELECT count(*) FROM journal_entries WHERE NOT distilled"))
+		add("cached reports", one("SELECT count(*) FROM reports"))
+	case "ghost.searchd":
+		add("caption jobs pending", one("SELECT count(*) FROM search.jobs WHERE kind = 'caption' AND attempts < 5"))
+		add("caption jobs exhausted", one("SELECT count(*) FROM search.jobs WHERE kind = 'caption' AND attempts >= 5"))
+		add("all jobs pending", one("SELECT count(*) FROM search.jobs WHERE attempts < 5"))
+		add("indexed chunks", one("SELECT count(*) FROM search.chunks"))
+		add("tags written", one("SELECT count(*) FROM frame_tags WHERE source <> 'user_removed'"))
+	case "ghost.tallyd":
+		add("health days", one("SELECT count(DISTINCT day) FROM health_metrics"))
+		add("metrics rows", one("SELECT count(*) FROM health_metrics"))
+		add("high-res samples", one("SELECT count(*) FROM health_samples"))
+		if d := one("SELECT min(day) FROM health_metrics"); d != "0" {
+			add("earliest day", d)
+		}
+	case "ghost.shadowd":
+		add("charter", "anti-possession: watches usage patterns FOR you, never for engagement")
+		add("detectors", "pending (TODO 31): interaction time, ghost-vs-human share, sunk-cost, topic narrowing")
+	case "ghost.oracled":
+		add("role", "the only daemon that talks to the model; everyone else asks it")
+		add("queue + model state", "see Box Status sparklines (stats sampler)")
+	default:
+		add("note", "no drill-in for this daemon yet")
+	}
+	return kv, nil
+}
+
+// GetSetting / SetSetting , the shared settings KV (single row per key).
+func (s *NotifStore) GetSetting(slot int, key string) (string, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return "", err
+	}
+	rows, err := c.Query("SELECT value FROM settings WHERE key = $1", key)
+	if err != nil || len(rows.Vals) == 0 || rows.Vals[0][0] == nil {
+		return "", err
+	}
+	return *rows.Vals[0][0], nil
+}
+
+func (s *NotifStore) SetSetting(slot int, key, value string) error {
+	c, err := s.pg(slot)
+	if err != nil {
+		return err
+	}
+	return c.Exec("INSERT INTO settings (key, value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", key, value)
+}
+
+// CheckinDoneToday , did a daily check-in land in the journal for this date.
+func (s *NotifStore) CheckinDoneToday(slot int, day string) (bool, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return false, err
+	}
+	rows, err := c.Query(
+		"SELECT 1 FROM journal_entries WHERE source = 'ghost.noted' AND title LIKE 'Daily check-in%' AND body LIKE '%' || $1 || '%' LIMIT 1", day)
+	if err != nil {
+		return false, err
+	}
+	return len(rows.Vals) > 0, nil
+}
+
+// CheckinRow is one past daily check-in, parsed back out of its journal entry.
+type CheckinRow struct {
+	Day      string `json:"day"`
+	Feelings string `json:"feelings"`
+	Why      string `json:"why,omitempty"`
+}
+
+// CheckinHistory , past check-ins, newest first. The check-in is a journal entry by design (one
+// write path, full sovereignty); this parses the structured text back into rows for the strip and
+// the "yesterday you felt" continuity line.
+func (s *NotifStore) CheckinHistory(slot, n int) ([]CheckinRow, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return nil, err
+	}
+	if n <= 0 || n > 90 {
+		n = 30
+	}
+	rows, err := c.Query(
+		"SELECT body FROM journal_entries WHERE source = 'ghost.noted' AND title LIKE 'Daily check-in%' ORDER BY ts DESC LIMIT "+strconv.Itoa(n))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]CheckinRow, 0, len(rows.Vals))
+	for _, v := range rows.Vals {
+		if len(v) == 0 || v[0] == nil {
+			continue
+		}
+		var r CheckinRow
+		for _, line := range strings.Split(*v[0], "\n") {
+			line = strings.TrimSpace(line)
+			switch {
+			case strings.HasPrefix(line, "Daily check-in "):
+				r.Day = strings.TrimPrefix(line, "Daily check-in ")
+			case strings.HasPrefix(line, "Feeling: "):
+				r.Feelings = strings.TrimPrefix(line, "Feeling: ")
+			case strings.HasPrefix(line, "Why: "):
+				r.Why = strings.TrimPrefix(line, "Why: ")
+			}
+		}
+		if r.Day != "" {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+// FrameOriginalPath , the untouched archived original and its mime, for the full-quality viewer.
+func (s *NotifStore) FrameOriginalPath(slot int, hash string) (string, string, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return "", "", err
+	}
+	rows, err := c.Query("SELECT archive_path, mime FROM frames WHERE hash = $1", hash)
+	if err != nil || len(rows.Vals) == 0 {
+		return "", "", err
+	}
+	v := rows.Vals[0]
+	p, m := "", ""
+	if len(v) > 0 && v[0] != nil {
+		p = *v[0]
+	}
+	if len(v) > 1 && v[1] != nil {
+		m = *v[1]
+	}
+	return p, m, nil
+}

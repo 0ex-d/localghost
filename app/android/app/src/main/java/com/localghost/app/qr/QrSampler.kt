@@ -111,10 +111,14 @@ object QrSampler {
             val r = candidatesForBias(lum, width, height, sb)
             if (r.first.isNotEmpty()) {
                 stickyMisses = 0
+                precisionScan = false
                 return r
             }
             // Seeing SOME finders means the bias is still right and the hand moved , not a miss.
             val partial = (r.second as? Diag.FewFinders)?.found ?: 0
+            // NEAR-MISS -> precision: next frame scans every line (stride 1) , when a finder or
+            // two are in view, the extra rows are exactly where the missing one hides.
+            precisionScan = partial > 0
             if (partial > 0) stickyMisses = 0 else stickyMisses++
             if (stickyMisses >= 12) { stickyBias = null; stickyMisses = 0 }
         }
@@ -144,8 +148,22 @@ object QrSampler {
         // Surface how many finders this pass saw (max across biases within the frame), even when a grid
         // never samples , the analyser reads it to keep the sampling rate high while a code is in view.
         if (clusters.size > ScanGeom.findersSeen) ScanGeom.findersSeen = clusters.size
-        if (clusters.size < 3) {
-            return emptyList<Sampled>() to Diag.FewFinders(clusters.size, "finders ${clusters.size}/3 @bias$bias")
+        var clusters3 = clusters
+        if (clusters.size == 2) {
+            // TWO-OF-THREE RESCUE , the most common near-miss. Two finders fix the code's scale
+            // and orientation up to two hypotheses: the missing corner sits at b + (b-a) rotated
+            // ±90° (the two right-angle completions) or , if these two are the diagonal , at the
+            // midpoint ± the half-diagonal rotated 90°. Search a tight window at each predicted
+            // spot with a LENIENT local check; one hit completes the triple and the decoder,
+            // as ever, is the judge of whether we guessed right.
+            val a = clusters[0].first; val b = clusters[1].first
+            val rescued = rescueThirdFinder(bin, w = width, h = height, a = a, b = b)
+            if (rescued != null) {
+                clusters3 = clusters + Pair(rescued, 1)
+            }
+        }
+        if (clusters3.size < 3) {
+            return emptyList<Sampled>() to Diag.FewFinders(clusters3.size, "finders ${clusters3.size}/3 @bias$bias")
         }
         // A finder-shaped data coincidence (often at the bottom-right corner of a small or rounded code)
         // can out-score a real but weak finder, so the single best triple is sometimes the wrong three
@@ -153,7 +171,7 @@ object QrSampler {
         // the judge: only the genuine finder set yields a grid with a clean timing pattern that actually
         // decodes. The cheap timing-based version estimate skips most wrong triples before the costly
         // sampling, so considering several stays affordable. Grids are returned best-timing first.
-        val triples = selectFinderTriples(clusters, MAX_TRIPLES)
+        val triples = selectFinderTriples(clusters3, MAX_TRIPLES)
 
         data class Cand(val grid: Array<BooleanArray>, val conf: Array<IntArray>, val score: Int, val roles: Corners, val centrality: Double)
         val cands = ArrayList<Cand>()
@@ -374,9 +392,15 @@ object QrSampler {
 
     private data class Pt(val x: Double, val y: Double, val mod: Double = 0.0)
 
+    // Stride 1 when the last pass NEARLY had it (partial finders), stride 2 otherwise , a finder
+    // is >= 7 modules tall, so every-2nd-line scanning cannot miss one big enough to decode, and
+    // the halved cost is what lets sticky + probe both run every frame without stalling.
+    @Volatile var precisionScan = false
+
     private fun finderClusters(bin: BooleanArray, w: Int, h: Int): List<Pair<Pt, Int>> {
+        val step = if (precisionScan) 1 else 2
         val candidates = ArrayList<Pt>()
-        for (y in 0 until h) {
+        for (y in 0 until h step step) {
             var x = 0
             while (x < w) {
                 if (dark(bin, w, x, y)) {
@@ -416,7 +440,7 @@ object QrSampler {
         // Second pass: scan columns for the same 1:1:3:1:1 vertically. A finder whose centre row is
         // clipped by rotation can be missed by the horizontal pass but caught here (and vice versa).
         // Clustering merges the two passes, so a finder seen either way survives.
-        for (x in 0 until w) {
+        for (x in 0 until w step step) {
             var y = 0
             while (y < h) {
                 if (dark(bin, w, x, y)) {
@@ -639,10 +663,16 @@ object QrSampler {
         // real finder (centre 2.5-3.5x), and keeping the arms near-equal rejects ragged data coincidences.
         val arm = (r[0] + r[1] + r[3] + r[4]) / 4.0
         if (arm < 1.0) return false
+        // SMALL-MODULE leniency: at a distance a module is 1-2px and integer run lengths make the
+        // arm ratios inherently ragged (a 1px vs 2px arm is a 100% "error" that means nothing).
+        // Below ~2.5px arms the equality tolerance widens and the centre floor drops slightly ,
+        // measured against the far-QR misses, not guessed.
+        val tol = if (arm < 2.5) 0.85 else 0.6
         for (v in intArrayOf(r[0], r[1], r[3], r[4])) {
-            if (abs(v - arm) > 0.6 * arm) return false      // arms must be roughly equal
+            if (abs(v - arm) > tol * arm) return false      // arms must be roughly equal
         }
-        if (r[2] < 2.0 * arm || r[2] > 4.5 * arm) return false   // centre must be a real wide bar
+        val lo = if (arm < 2.5) 1.7 else 2.0
+        if (r[2] < lo * arm || r[2] > 4.5 * arm) return false   // centre must be a real wide bar
         return true
     }
 
@@ -1164,4 +1194,59 @@ object QrSampler {
 
     private fun dist(a: Pt, b: Pt): Double = hypot(a.x - b.x, a.y - b.y)
     private fun distD(a: DoublePt, b: DoublePt): Double = hypot(a.x - b.x, a.y - b.y)
+
+    /** Predicts where a missing third finder must sit given two found ones, and searches a tight
+     *  window at each hypothesis with a lenient vertical-profile check. Geometry: if a,b are two
+     *  corners of the finder right-angle, the third is at a+(b-a) rotated ±90° about a or about b;
+     *  if a,b are the DIAGONAL pair, the third is at the midpoint ± half-diagonal rotated 90°.
+     *  Six candidate spots, each a (3·mod)-radius window , cheap, targeted, decoder-judged. */
+    private fun rescueThirdFinder(bin: BooleanArray, w: Int, h: Int, a: Pt, b: Pt): Pt? {
+        val mod = if (a.mod > 0 && b.mod > 0) (a.mod + b.mod) / 2.0 else maxOf(a.mod, b.mod, 3.0)
+        val dx = b.x - a.x; val dy = b.y - a.y
+        val spots = listOf(
+            Pt(a.x - dy, a.y + dx), Pt(a.x + dy, a.y - dx),           // right angle at a
+            Pt(b.x - dy, b.y + dx), Pt(b.x + dy, b.y - dx),           // right angle at b
+            Pt((a.x + b.x) / 2 - dy / 2, (a.y + b.y) / 2 + dx / 2),   // a,b diagonal
+            Pt((a.x + b.x) / 2 + dy / 2, (a.y + b.y) / 2 - dx / 2),
+        )
+        val win = (mod * 3).toInt().coerceIn(4, 40)
+        for (sp in spots) {
+            val cx = sp.x.toInt(); val cy = sp.y.toInt()
+            if (cx < win || cy < win || cx >= w - win || cy >= h - win) continue
+            // Lenient local check: walk a few rows around the spot looking for any 1:1:3:1:1-ish
+            // horizontal run whose centre lands inside the window; confirm with verticalCentre.
+            var y = cy - win
+            while (y <= cy + win) {
+                var x = (cx - win).coerceAtLeast(0)
+                val xEnd = (cx + win).coerceAtMost(w - 1)
+                while (x < xEnd) {
+                    if (dark(bin, w, x, y)) {
+                        val runs = IntArray(5)
+                        var ri = 0
+                        var px = x
+                        var expectDark = true
+                        val runStart = x
+                        while (px <= xEnd && ri < 5) {
+                            var run = 0
+                            while (px <= xEnd && dark(bin, w, px, y) == expectDark) { run++; px++ }
+                            runs[ri++] = run
+                            expectDark = !expectDark
+                        }
+                        if (ri == 5 && matches11311(runs)) {
+                            val midStart = runStart + runs[0] + runs[1]
+                            val cXd = midStart + runs[2] / 2.0
+                            val cYd = verticalCentre(bin, w, h, cXd.toInt(), y)
+                            if (!cYd.isNaN() &&
+                                kotlin.math.abs(cXd - sp.x) <= win && kotlin.math.abs(cYd - sp.y) <= win) {
+                                return Pt(cXd, cYd, runs.sum() / 7.0)
+                            }
+                        }
+                        x = px
+                    } else x++
+                }
+                y += 2
+            }
+        }
+        return null
+    }
 }

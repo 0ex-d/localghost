@@ -14,6 +14,7 @@ import (
 )
 
 type Worker struct {
+	modelHoldUntil time.Time // caption/tag lanes rest until here while oracled warms
 	Store    *Store
 	Embed    *Embedder // nil = vector-less; embed jobs are not claimed
 	Caption  Captioner
@@ -43,6 +44,12 @@ func (w *Worker) tick(ctx context.Context) {
 		for w.one(ctx, "embed_text", w.doEmbed) {
 		}
 	}
+	// MODEL GATE , while oracled is warming (llama loading 7GB), model-dependent lanes REST
+	// instead of machine-gunning fast-fails through the queue. The first "no backend" sets the
+	// hold; nothing model-bound runs until it lapses. Embeds and reconsolidation are unaffected.
+	if time.Now().Before(w.modelHoldUntil) {
+		return
+	}
 	for w.one(ctx, "caption", w.doCaption) {
 	}
 	for w.one(ctx, "tag", w.doTags) {
@@ -60,6 +67,16 @@ func (w *Worker) one(ctx context.Context, kind string, do func(context.Context, 
 		return false
 	}
 	if err := do(ctx, job); err != nil {
+		if strings.Contains(err.Error(), "no backend") {
+			// Oracled is warming , refund the attempt (it never reached the model) and hold the
+			// model lanes. One log line per storm, not one per job.
+			_ = w.Store.UnclaimJob(job.ID)
+			if time.Now().After(w.modelHoldUntil) {
+				w.Log.Info("model warming , caption/tag lanes resting 20s", "fn", "one")
+			}
+			w.modelHoldUntil = time.Now().Add(20 * time.Second)
+			return false
+		}
 		w.Log.Warn("job failed", "fn", "one", "kind", kind, "job", job.ID, "err", err)
 		_ = w.Store.FailJob(job.ID, err)
 		return true
