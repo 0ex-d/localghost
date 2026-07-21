@@ -3,6 +3,7 @@ package hw
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"log/slog"
 	"path/filepath"
 	"strconv"
@@ -1435,6 +1436,25 @@ func (s *NotifStore) DaemonSummary(slot int, name string) ([]DaemonKV, error) {
 		if ts := one("SELECT to_char(to_timestamp(max(taken_at)), 'YYYY-MM-DD HH24:MI') FROM frames"); ts != "0" && ts != "" {
 			add("newest capture", ts)
 		}
+		if ents, derr := os.ReadDir("/var/lib/ghost/backup"); derr == nil {
+			seals, latest := 0, ""
+			for _, e := range ents {
+				if strings.HasSuffix(e.Name(), ".tar.seal") {
+					seals++
+					if e.Name() > latest {
+						latest = e.Name()
+					}
+				}
+			}
+			if seals > 0 {
+				add("backups on disk", strconv.Itoa(seals))
+				add("latest backup", latest)
+			} else {
+				add("backups", "directory present, none written yet")
+			}
+		} else {
+			add("backups", "idle , no key (ghost.restore keygen)")
+		}
 	case "ghost.noted":
 		add("journal entries", one("SELECT count(*) FROM journal_entries"))
 		add("from noted", one("SELECT count(*) FROM journal_entries WHERE source = 'ghost.noted'"))
@@ -1446,6 +1466,7 @@ func (s *NotifStore) DaemonSummary(slot int, name string) ([]DaemonKV, error) {
 		add("yours (user-made)", one("SELECT count(*) FROM memories WHERE kind = 'user' AND NOT tombstoned"))
 		add("tombstoned", one("SELECT count(*) FROM memories WHERE tombstoned"))
 		add("distill queue", one("SELECT count(*) FROM journal_entries WHERE NOT distilled"))
+		add("day episodes", one("SELECT count(*) FROM memories WHERE kind = 'episode' AND NOT tombstoned"))
 		add("cached reports", one("SELECT count(*) FROM reports"))
 	case "ghost.searchd":
 		add("caption jobs pending", one("SELECT count(*) FROM search.jobs WHERE kind = 'caption' AND attempts < 5"))
@@ -1464,7 +1485,14 @@ func (s *NotifStore) DaemonSummary(slot int, name string) ([]DaemonKV, error) {
 		}
 	case "ghost.shadowd":
 		add("charter", "anti-possession: watches usage patterns FOR you, never for engagement")
-		add("detectors", "pending (TODO 31): interaction time, ghost-vs-human share, sunk-cost, topic narrowing")
+		add("your messages (7d)", one("SELECT count(*) FROM chat_messages WHERE role = 'user' AND ts >= extract(epoch from now())::bigint - 7*86400"))
+		add("prior 7d", one("SELECT count(*) FROM chat_messages WHERE role = 'user' AND ts >= extract(epoch from now())::bigint - 14*86400 AND ts < extract(epoch from now())::bigint - 7*86400"))
+		add("days you talked (14d)", one("SELECT count(DISTINCT to_char(to_timestamp(ts),'YYYY-MM-DD')) FROM chat_messages WHERE role = 'user' AND ts >= extract(epoch from now())::bigint - 14*86400"))
+		add("detector", "interaction trend LIVE; next: sunk-cost, topic narrowing")
+	case "ghost.cued":
+		add("charter", "surfaces reflections from your life , offerings, not homework")
+		add("episodes to draw from", one("SELECT count(*) FROM memories WHERE kind = 'episode' AND NOT tombstoned"))
+		add("last reflection", one("SELECT coalesce(value,'never') FROM settings WHERE key = 'cued_reflected'"))
 	case "ghost.oracled":
 		add("role", "the only daemon that talks to the model; everyone else asks it")
 		add("queue + model state", "see Box Status sparklines (stats sampler)")

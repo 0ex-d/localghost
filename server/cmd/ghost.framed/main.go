@@ -32,6 +32,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"syscall"
+	"strings"
 	"time"
 
 	"github.com/LocalGhostDao/localghost/server/internal/ctlsock"
@@ -226,6 +227,71 @@ func main() {
 	// reprocess: converge the archive's derived state , frame records, previews (force=true also
 	// re-derives EXISTING previews, the orientation-fix case), search notifies, day paths. Runs in
 	// the background: a full archive pass takes minutes and the socket should answer now.
+	// NIGHTLY BACKUPS , sealed to the operator's public key (opt-in: no /var/lib/ghost/backup.pub,
+	// no backups, one log line, silence). Sunday full, other nights incremental since the last run.
+	backupCfg := framed.BackupConfig{Dir: "/var/lib/ghost/backup", PubFile: "/var/lib/ghost/backup.pub"}
+	framedRoot := filepath.Join(*mount, "framed")
+	runBackup := func(force bool) string {
+		full := force || time.Now().Weekday() == time.Sunday
+		var since time.Time
+		if b, err := os.ReadFile(filepath.Join(backupCfg.Dir, ".watermark")); err == nil {
+			if t, perr := time.Parse(time.RFC3339, strings.TrimSpace(string(b))); perr == nil {
+				since = t
+			} else {
+				full = true
+			}
+		} else {
+			full = true // no watermark = first run = full
+		}
+		start := time.Now()
+		out, files, bytes, err := framed.RunBackup(backupCfg, framedRoot, full, since, lg)
+		if err != nil {
+			lg.Warn("backup failed", "fn", "main", "err", err)
+			return "backup failed: " + err.Error()
+		}
+		_ = os.WriteFile(filepath.Join(backupCfg.Dir, ".watermark"), []byte(start.UTC().Format(time.RFC3339)), 0o600)
+		kind := map[bool]string{true: "full", false: "incremental"}[full]
+		lg.Info("backup written", "fn", "main", "kind", kind, "file", out, "files", files, "bytes", bytes)
+		return fmt.Sprintf("%s backup: %d file(s), %d bytes -> %s", kind, files, bytes, out)
+	}
+	if _, err := os.Stat(backupCfg.PubFile); err != nil {
+		lg.Info("backups idle , no recipient key at /var/lib/ghost/backup.pub (run ghost.restore keygen, copy the pub over)", "fn", "main")
+	}
+	go func() {
+		bt := time.NewTicker(1 * time.Hour)
+		defer bt.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-bt.C:
+				h := time.Now().Hour()
+				if h != 3 { // the 03:00 hour, box time , the machine's quietest
+					continue
+				}
+				if _, err := os.Stat(backupCfg.PubFile); err != nil {
+					continue // opt-in by key, checked live so placing the key needs no restart
+				}
+				day := time.Now().Format("2006-01-02")
+				markFile := filepath.Join(backupCfg.Dir, ".lastday")
+				if b, err := os.ReadFile(markFile); err == nil && strings.TrimSpace(string(b)) == day {
+					continue // tonight already ran
+				}
+				_ = runBackup(false)
+				_ = os.MkdirAll(backupCfg.Dir, 0o700)
+				_ = os.WriteFile(markFile, []byte(day), 0o600)
+			}
+		}
+	}()
+	ctl.Handle("backup", func(args json.RawMessage) (ctlsock.Response, error) {
+		var a struct {
+			Full bool `json:"full"`
+		}
+		if len(args) > 0 {
+			_ = json.Unmarshal(args, &a)
+		}
+		return ctlsock.Response{OK: true, Text: runBackup(a.Full)}, nil
+	})
 	ctl.Handle("reprocess", func(args json.RawMessage) (ctlsock.Response, error) {
 		var a struct {
 			Force bool `json:"force"`
@@ -234,6 +300,7 @@ func main() {
 			_ = json.Unmarshal(args, &a)
 		}
 		go func() {
+			lg.Info("reprocess pass starting (may first queue behind a sync drain)", "fn", "main", "force", a.Force)
 			scanned, recorded, previewed, notified := pipe.Reprocess(a.Force)
 			lg.Info("reprocess done", "fn", "main", "scanned", scanned, "recorded", recorded,
 				"previewed", previewed, "notified", notified)

@@ -170,6 +170,20 @@ func main() {
 	})
 
 	// search: the interactive pipeline.
+	ctl.Handle("reingest", func(args json.RawMessage) (ctlsock.Response, error) {
+		n, err := storeA.ReingestImages()
+		if err != nil {
+			return ctlsock.Response{}, err
+		}
+		return ctlsock.Response{OK: true, Text: fmt.Sprintf("queued %d image(s) for captioning (gap only , already-described images untouched)", n)}, nil
+	})
+	ctl.Handle("revive", func(args json.RawMessage) (ctlsock.Response, error) {
+		n, err := storeA.ReviveJobs()
+		if err != nil {
+			return ctlsock.Response{}, err
+		}
+		return ctlsock.Response{OK: true, Text: fmt.Sprintf("revived %d exhausted job(s)", n)}, nil
+	})
 	ctl.Handle("search", func(args json.RawMessage) (ctlsock.Response, error) {
 		var a struct {
 			Query   string `json:"query"`

@@ -76,6 +76,55 @@ of DONE (reverse chronological); open items live in TO DO until they move.
 
 ## DONE
 
+- [x] **70. pgvector path + idempotent image reimport** (2026-07-21): pgvector needs no code ,
+      the bundle already carries vector.so when Debian's package is present and the schema
+      self-upgrades on CREATE EXTENSION success; documented the activation (install pkg,
+      re-bundle, restart) + the embed-model half (searchd spawns its own llama-server child from
+      embedBin/embedModelPath in svcconf; until a gguf lands, vector mode sits ready, embed lane
+      empty). ghost-cli ghost.searchd reingest: enqueues captions for exactly the image originals
+      with no chunks and no queued job , a healthy library queues zero, a restored one queues the
+      gap. Disaster flow documented: unseal | tar -x, reprocess, reingest, wait.
+
+- [x] **69. Backups + episode backfill** (2026-07-21): BACKUPS live , framed seals its own tree
+      nightly (03:00, Sunday full / else incremental via mtime watermark, four fulls kept, prune
+      follows) into /var/lib/ghost/backup with an ASYMMETRIC seal (X25519 ephemeral + HKDF-SHA256
+      + ChaCha20-Poly1305 chunked STREAM, final-chunk marker so truncation fails auth): the box
+      holds only backup.pub and can write what it can never read. OPT-IN BY KEY , no key, no
+      backups, one log line. cmd/ghost.restore: keygen (private key printed once, stays offline)
+      + unseal (key on stdin never argv, tar to stdout). Manual: ghost-cli ghost.framed backup.
+      App-unreachable by construction. EPISODE BACKFILL , "the last photo might not be from
+      today": a watermark walks 120 historical days per pass from now-90 back to the earliest
+      frame, so imported libraries and quiet seasons get their episodes too, bounded work per
+      pass, all of history eventually.
+
+- [x] **68. Day episodes + morning reflections (30d + 30e)** (2026-07-21): THE LOOP CLOSES ,
+      live a day, the box remembers it, one morning it hands it back. synthd episodePass builds
+      one memory per day (kind='episode', last 90 days, every pass) DETERMINISTICALLY from what
+      the box knows: photos + where (framed), steps + sleep (tallyd), how you said you felt
+      (check-in) , "14 photo(s) around Tofino. 12840 steps. 7h 20m sleep. You said you felt calm,
+      salty." No model call: a memory of a day should exist the day it happened, not when a GPU
+      gets around to it. User edits and tombstones permanently outrank regeneration. cued
+      reflectionLoop: mornings 8-11, once daily , this day ONE YEAR AGO if an episode exists,
+      else a random episode >30d old, else SILENCE (a young archive earns quiet mornings, not
+      filler). Notification kind='reflection', tap lands in MEMORIES. Drill-ins: synthd counts
+      episodes, cued shows episodes available + last reflection day.
+
+- [x] **67. Backlog pass: shadowd wakes + revive + operator UX** (2026-07-21): SHADOWD's first
+      real detector (31 begun) , interaction-time trend: counts the person's OWN messages (never
+      content-analysed), a week doubling the prior past a 60-message floor earns ONE factual
+      observation per ISO week ("not a problem , just a fact you own"); quiet weeks earn silence.
+      Drill-in shows live numbers (7d / prior 7d / days talked). ghost-cli gains `searchd revive`
+      (paved path for tonight's raw-psql resurrection , resets exhausted jobs, reports the count).
+      framed reprocess announces its actual start in the log (vs queued behind a sync drain).
+      Map tap-dot-to-photo satisfied by the item-54 viewer , moved out of TO DO.
+
+- [x] **66b. The 1564.50 confession** (2026-07-21): the phantom was CALORIES , Samsung Health
+      synthesizes a BMR-based TotalCaloriesBurned for ANY queried day (1564.50 kcal, identical,
+      every day since 2006, data or none). Positive, so the zero-guard was blind to it. Rule
+      shipped: a constant is not a measurement , calories only land on days where another metric
+      was actually measured; a day whose only content is the provider's guess about resting
+      metabolism is an empty day. Repair: DELETE all-calories rows, re-sync walks to the real
+      data boundary.
 - [x] **66. Field report triage** (2026-07-21): (a) HEALTH PHANTOMS , empty aggregate buckets
       return non-null ZEROS for some metric types (Duration especially), writing one zero metric
       per day back to 2006: 7,305 phantom health days, the six-empty-months stop never fired, the

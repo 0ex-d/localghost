@@ -26,6 +26,10 @@ import (
 	"flag"
 	"log"
 	"log/slog"
+	"github.com/LocalGhostDao/localghost/server/internal/poltergres"
+	"github.com/LocalGhostDao/localghost/server/internal/hw"
+	"fmt"
+	"time"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -97,6 +101,18 @@ func main() {
 				lg.Error("control server exited", "fn", "main", "err", err)
 			}
 		}()
+		// FIRST REAL DETECTOR , interaction time. The charter in practice: shadowd reads how much
+		// the person talked to the ghost (their OWN messages, counted, never content-analysed
+		// here) and, when a week doubles the prior week past a floor, says so ONCE, factually.
+		// No streaks, no nudges to talk MORE , the only thing this daemon will ever sell you is
+		// your own reflection.
+		mount := filepath.Dir(runDir)
+		if sc, err := hw.LoadServicesConfig(mount); err == nil {
+			db := poltergres.NewReadWrite(hw.SocketForMount(mount), sc.Postgres.Port, sc.Postgres.RWUser, sc.Postgres.RWPass, sc.Postgres.Name)
+			go detectorLoop(ctx, db, lg)
+		} else {
+			lg.Warn("no services config , detectors idle", "fn", "main", "err", err)
+		}
 	}
 
 	lg.Info("stub up (charter recorded, detectors pending)", "fn", "main", "healthPort", *port)
@@ -112,4 +128,53 @@ func envPort(key string) int {
 		}
 	}
 	return 0
+}
+
+// detectorLoop runs the usage-pattern detectors hourly. v1: interaction-time trend.
+func detectorLoop(ctx context.Context, db *poltergres.ReadWrite, lg *slog.Logger) {
+	t := time.NewTicker(1 * time.Hour)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if err := interactionTrend(db, lg); err != nil {
+				lg.Warn("interaction trend", "fn", "detectorLoop", "err", err)
+			}
+		}
+	}
+}
+
+// interactionTrend , this week's user-message count vs the prior week's. Doubling past a floor of
+// 60 messages earns ONE factual observation per ISO week, and quiet weeks earn silence.
+func interactionTrend(db *poltergres.ReadWrite, lg *slog.Logger) error {
+	one := func(q string, args ...any) int64 {
+		rows, err := db.Query(q, args...)
+		if err != nil || len(rows.Vals) == 0 || rows.Vals[0][0] == nil {
+			return 0
+		}
+		n, _ := strconv.ParseInt(*rows.Vals[0][0], 10, 64)
+		return n
+	}
+	now := time.Now().Unix()
+	this7 := one("SELECT count(*) FROM chat_messages WHERE role = 'user' AND ts >= $1", now-7*86400)
+	prior7 := one("SELECT count(*) FROM chat_messages WHERE role = 'user' AND ts >= $1 AND ts < $2", now-14*86400, now-7*86400)
+	if prior7 == 0 || this7 < 60 || this7 < 2*prior7 {
+		return nil
+	}
+	wk := time.Now().UTC().Format("2006-W02")
+	rows, err := db.Query("SELECT value FROM settings WHERE key = 'shadow_interaction_note'")
+	if err == nil && len(rows.Vals) == 1 && rows.Vals[0][0] != nil && *rows.Vals[0][0] == wk {
+		return nil // this week already observed
+	}
+	if err := db.Exec(
+		"INSERT INTO notifications (service, kind, title, body, seen, options, created) VALUES ('ghost.shadowd','observation',$1,$2,FALSE,'',now())",
+		"an observation about this week",
+		fmt.Sprintf("you sent the ghost %d messages this week, up from %d the week before. Not a problem , just a fact you own. The graphs are on Box Status.", this7, prior7)); err != nil {
+		return err
+	}
+	lg.Info("interaction observation posted", "fn", "interactionTrend", "this7", this7, "prior7", prior7)
+	return db.Exec(
+		"INSERT INTO settings (key, value) VALUES ('shadow_interaction_note',$1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", wk)
 }

@@ -26,6 +26,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"flag"
 	"log"
 	"log/slog"
@@ -684,6 +685,11 @@ func distillLoop(ctx context.Context, mount, runDir string, lg *slog.Logger) {
 		if n > 0 {
 			lg.Info("distilled", "fn", "distillLoop", "memories", n)
 		}
+		if en, eerr := episodePass(db, lg); eerr != nil {
+			lg.Warn("episode pass failed", "fn", "distillLoop", "err", eerr)
+		} else if en > 0 {
+			lg.Info("day episodes updated", "fn", "distillLoop", "episodes", en)
+		}
 	}
 }
 
@@ -1011,4 +1017,169 @@ func onThisDay(runDir, day string, lg *slog.Logger) (string, error) {
 		lg.Warn("report cache write failed (report still served)", "fn", "onThisDay", "err", err)
 	}
 	return body, nil
+}
+
+// episodePass , THE GHOST'S MEMORY OF YOUR DAYS. For each of the last 90 days with any signal,
+// one memory (kind='episode', source_ref='episode:<day>') assembled DETERMINISTICALLY from what
+// the box already knows: photos and where they were taken (framed), steps and sleep (tallyd),
+// how the person said they felt (the check-in), what they wrote (noted). No model call , this is
+// honest template text from real data; the model can polish prose later, but a memory of a day
+// should exist the day it happened, not when a GPU gets around to it. User edits and tombstones
+// permanently outrank regeneration, the standing rule.
+func episodePass(db *poltergres.ReadWrite, lg *slog.Logger) (int, error) {
+	type ep struct {
+		photos   int
+		place    string
+		steps    float64
+		sleepMin float64
+		feelings string
+		notes    int
+	}
+	days := map[string]*ep{}
+	get := func(d string) *ep {
+		if days[d] == nil {
+			days[d] = &ep{}
+		}
+		return days[d]
+	}
+	// BACKFILL WATERMARK , "the last photo might not be from today". A library import or a quiet
+	// season means the interesting days are OLD; the recent-90 window alone would never see them.
+	// Each pass also walks a 120-day historical window backwards from the watermark until the
+	// earliest frame is passed, then parks. Bounded work per pass; all of history, eventually.
+	cutoff := time.Now().AddDate(0, 0, -90)
+	back := struct{ from, to time.Time }{}
+	{
+		wm := time.Now().AddDate(0, 0, -90)
+		if rows, err := db.Query("SELECT value FROM settings WHERE key = 'synthd_episode_watermark'"); err == nil && len(rows.Vals) == 1 && rows.Vals[0][0] != nil {
+			if t, perr := time.Parse("2006-01-02", *rows.Vals[0][0]); perr == nil {
+				wm = t
+			}
+		}
+		earliest := time.Time{}
+		if rows, err := db.Query("SELECT min(taken_at) FROM frames WHERE kind = 'photo' AND taken_at > 0"); err == nil && len(rows.Vals) == 1 && rows.Vals[0][0] != nil {
+			if ts, perr := strconv.ParseInt(*rows.Vals[0][0], 10, 64); perr == nil && ts > 0 {
+				earliest = time.Unix(ts, 0)
+			}
+		}
+		if !earliest.IsZero() && wm.After(earliest) {
+			back.to = wm
+			back.from = wm.AddDate(0, 0, -120)
+			if back.from.Before(earliest) {
+				back.from = earliest.AddDate(0, 0, -1)
+			}
+			cutoff = back.from // one query window covers recent + this backfill slice
+			_ = db.Exec("INSERT INTO settings (key, value) VALUES ('synthd_episode_watermark',$1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+				back.from.Format("2006-01-02"))
+		}
+	}
+	cutTS := cutoff.Unix()
+	cutDay := cutoff.Format("2006-01-02")
+
+	rows, err := db.Query(`
+		SELECT to_char(to_timestamp(taken_at), 'YYYY-MM-DD') AS d, count(*)::text,
+		       coalesce(min(place) FILTER (WHERE place <> ''), '')
+		FROM frames WHERE kind = 'photo' AND taken_at >= $1 GROUP BY d`, cutTS)
+	if err != nil {
+		return 0, err
+	}
+	for _, v := range rows.Vals {
+		if len(v) < 3 || v[0] == nil {
+			continue
+		}
+		e := get(*v[0])
+		if v[1] != nil {
+			e.photos, _ = strconv.Atoi(*v[1])
+		}
+		if v[2] != nil && *v[2] != "" {
+			parts := strings.Split(*v[2], " / ")
+			e.place = parts[len(parts)-1]
+		}
+	}
+	rows, err = db.Query("SELECT day, metric, value::text FROM health_metrics WHERE day >= $1 AND metric IN ('steps','sleep_minutes')", cutDay)
+	if err == nil {
+		for _, v := range rows.Vals {
+			if len(v) < 3 || v[0] == nil || v[1] == nil || v[2] == nil {
+				continue
+			}
+			e := get(*v[0])
+			f, _ := strconv.ParseFloat(*v[2], 64)
+			if *v[1] == "steps" {
+				e.steps = f
+			} else {
+				e.sleepMin = f
+			}
+		}
+	}
+	rows, err = db.Query(
+		"SELECT title, body FROM journal_entries WHERE source = 'ghost.noted' AND ts >= $1", cutTS)
+	if err == nil {
+		for _, v := range rows.Vals {
+			if len(v) < 2 || v[0] == nil {
+				continue
+			}
+			if strings.HasPrefix(*v[0], "Daily check-in ") {
+				d := strings.TrimPrefix(*v[0], "Daily check-in ")
+				if v[1] != nil {
+					for _, line := range strings.Split(*v[1], "\n") {
+						if strings.HasPrefix(strings.TrimSpace(line), "Feeling: ") {
+							get(d).feelings = strings.TrimPrefix(strings.TrimSpace(line), "Feeling: ")
+						}
+					}
+				}
+			}
+		}
+	}
+
+	written := 0
+	for d, e := range days {
+		if e.photos == 0 && e.steps == 0 && e.sleepMin == 0 && e.feelings == "" {
+			continue
+		}
+		t, terr := time.Parse("2006-01-02", d)
+		if terr != nil {
+			continue
+		}
+		var b strings.Builder
+		if e.photos > 0 {
+			fmt.Fprintf(&b, "%d photo(s)", e.photos)
+			if e.place != "" {
+				fmt.Fprintf(&b, " around %s", e.place)
+			}
+			b.WriteString(". ")
+		}
+		if e.steps > 0 {
+			fmt.Fprintf(&b, "%.0f steps. ", e.steps)
+		}
+		if e.sleepMin > 0 {
+			fmt.Fprintf(&b, "%dh %02dm sleep. ", int(e.sleepMin)/60, int(e.sleepMin)%60)
+		}
+		if e.feelings != "" {
+			fmt.Fprintf(&b, "You said you felt %s.", e.feelings)
+		}
+		body := strings.TrimSpace(b.String())
+		ref := "episode:" + d
+		ex, qerr := db.Query("SELECT id, user_edited, tombstoned FROM memories WHERE kind = 'episode' AND source_ref = $1", ref)
+		if qerr != nil {
+			return written, qerr
+		}
+		title := t.Format("Mon, Jan 2 2006")
+		if len(ex.Vals) > 0 {
+			v := ex.Vals[0]
+			if (len(v) > 1 && v[1] != nil && *v[1] == "t") || (len(v) > 2 && v[2] != nil && *v[2] == "t") {
+				continue // the person's version of this day outranks the machine's, forever
+			}
+			if err := db.Exec("UPDATE memories SET body = $1, updated_at = $2 WHERE id = $3",
+				body, time.Now().UnixMilli(), *v[0]); err != nil {
+				return written, err
+			}
+		} else {
+			if err := db.Exec(
+				"INSERT INTO memories (title, body, kind, source_ref, created_at, updated_at) VALUES ($1,$2,'episode',$3,$4,$5)",
+				title, body, ref, t.UnixMilli()+12*3600*1000, time.Now().UnixMilli()); err != nil {
+				return written, err
+			}
+		}
+		written++
+	}
+	return written, nil
 }

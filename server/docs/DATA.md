@@ -92,6 +92,35 @@ INGESTION (each daemon writes its own tables, nobody else's)
 - Geocoder candidate sets ride the lat/lon btrees, ordered by approximate squared-degree
   distance so LIMIT keeps the closest candidates even in dense areas; exact haversine picks in Go.
 
+## Backups (the second copy)
+
+framed backs its own tree up nightly at 03:00 box time into /var/lib/ghost/backup , Sunday full,
+other nights incremental since the watermark, four fulls retained. OPT-IN BY KEY: no
+/var/lib/ghost/backup.pub, no backups. The seal is asymmetric (X25519 + HKDF-SHA256 +
+ChaCha20-Poly1305 chunked STREAM, "GHSTBK1"): the box holds only the public key and can write
+backups it can never read; `ghost.restore keygen` makes the pair (private stays OFFLINE with the
+human), `ghost.restore unseal <file> < key.hex | tar -x` is the whole restore. The app has no
+route anywhere near the backup directory. Manual trigger: ghost-cli ghost.framed backup
+(full=true forces a full).
+
+## Reimport and restore (images)
+
+Two idempotent commands cover every "get my images back into the pipeline" case:
+ghost-cli ghost.framed reprocess rebuilds frame records/previews/places from the FILES (after a
+backup restore, after a purge); ghost-cli ghost.searchd reingest enqueues captions for exactly the
+image originals that have no chunks and no queued job (after a chunk purge, after a restore, after
+doubt). A healthy library reingest-s zero. Full disaster flow: ghost.restore unseal | tar -x into
+<mount>/framed, then reprocess, then reingest, then wait for the model to re-describe the gap.
+
+## pgvector (leaving FTS-only mode)
+
+The schema self-upgrades the moment CREATE EXTENSION vector succeeds; the bundle carries vector.so
+"for free" IF Debian's pgvector package was installed when bundle_db_runtime.sh ran. Activation:
+apt-get install postgresql-<ver>-pgvector, re-run the bundle, restart. Embeddings additionally
+need an embed model: searchd spawns its own llama-server child given embedBin + embedModelPath
+(a small gguf like nomic-embed-text on the volume) in its svcconf file; without them, vector mode
+sits ready and the embed lane stays politely empty.
+
 ## Schema evolution (how a box upgrades)
 
 The registry in internal/hw/schemadef.go is the single source of truth. At every unlock, after the
