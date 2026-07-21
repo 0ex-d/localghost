@@ -76,6 +76,32 @@ of DONE (reverse chronological); open items live in TO DO until they move.
 
 ## DONE
 
+- [x] **76. The cursor was account-global** (2026-07-21): the wife's-phone symptom (one recent
+      video, nothing else) diagnosed the single-device era's last artifact , CursorSet wrote to a
+      literal "default" device and handleSyncCursorGet IGNORED the request entirely, answering
+      with the ARCHIVE's newest timestamps: her phone asked where to resume and was told "after
+      his newest photo". Both per-device now (deviceKey from the client cert): a fresh device
+      gets (0,0) and offers its whole library, a reinstall keeps its cert so it resumes, and the
+      global-merge crutch is deleted , the stored per-device row IS the answer. One-time cost:
+      existing phones re-offer once (their rows lived under "default"); hash dedup absorbs it.
+      Bug class named for the ledger: account-global state answering a device-scoped question.
+
+- [x] **75. Sync rewind + second phone** (2026-07-21): POST /v1/sync/reset zeroes THIS device's
+      cursors (per-device by design , a partner's phone rewinding never disturbs yours); the app
+      gains a two-tap-armed "re-offer everything from the beginning" control on SYNC with the
+      honest fine print (hash dedup: cost is time, never duplicates). A NEW device (the wife's
+      phone) needs nothing special , fresh pairing = zero cursor = full library offered, and
+      photos both phones hold archive once.
+
+- [x] **74. The 30-day wall** (2026-07-21): Health Connect serves only the 30 days BEFORE the
+      permission grant unless the app holds READ_HEALTH_DATA_HISTORY , the full-history walk read
+      exactly one month then six empties and stopped, which is the wall's signature, not the
+      record ending. Permission declared (manifest + PERMISSIONS as a literal string, immune to
+      client-version constants), appears as its own "access to past data" toggle in the sheet;
+      the walk now NAMES the wall when it hits it instead of looking like thin data. Units
+      audited: aggregate and raw paths agree (km, kcal, counts). Re-grant + re-run; upserts make
+      the redo free.
+
 - [x] **73. Field triage two: the text lane thinks, the embedder pools** (2026-07-21): the
       reasoning disease's second organ , tags (and all one-shot TEXT inference) never got
       enable_thinking:false, only the multimodal caption path did; ~470 reasoning chars, no

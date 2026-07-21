@@ -163,7 +163,7 @@ func (s *Server) handleSyncCursor(w http.ResponseWriter, r *http.Request) {
 		s.appearsDown(w)
 		return
 	}
-	if err := s.notif.CursorSet(mounted, "default", req.Kind, req.TS, req.ID); err != nil {
+	if err := s.notif.CursorSet(mounted, deviceKey(r), req.Kind, req.TS, req.ID); err != nil {
 		secdLog.Warn("cursor store failed", "fn", "handleSyncCursor", "err", err)
 		s.appearsDown(w)
 		return
@@ -179,7 +179,16 @@ func (s *Server) handleSyncCursor(w http.ResponseWriter, r *http.Request) {
 // side (exif/hint frames, stored in seconds) is scaled up and merged , id 0 on that side, which the
 // tuple comparison treats as "everything with this exact ts re-offers once", and the hash dedup
 // absorbs that overlap for free.
-func (s *Server) handleSyncCursorGet(w http.ResponseWriter, _ *http.Request) {
+// handleSyncCursorGet , THE cursor authority, PER DEVICE. The phone keeps no persistent cursor:
+// it asks here every run and gets ITS OWN stored position , a fresh device (a partner's phone)
+// gets (0,0) and offers its whole library; a reinstall on the same device keeps the same client
+// cert, so the same key, so it resumes. The old global merge against the ARCHIVE's newest frame
+// was the single-device era talking: it handed a second phone the FIRST phone's position, and her
+// library , older than his newest photo , offered exactly one recent video. Account-global state
+// answering a device-scoped question is the bug class; the stored per-device row is the whole
+// answer. ts stays MILLISECONDS (MediaStore's unit); (0,0) on any miss, and hash dedup makes
+// over-offering free.
+func (s *Server) handleSyncCursorGet(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	mounted := s.mounted
 	s.mu.Unlock()
@@ -187,35 +196,28 @@ func (s *Server) handleSyncCursorGet(w http.ResponseWriter, _ *http.Request) {
 		s.appearsDown(w)
 		return
 	}
-	photoTs, videoTs, err := s.notif.FramesLatest(mounted)
+	full, err := s.notif.CursorGetFull(mounted, deviceKey(r))
 	if err != nil {
-		secdLog.Warn("cursor get: latest query failed", "fn", "handleSyncCursorGet", "err", err)
+		secdLog.Warn("cursor get failed", "fn", "handleSyncCursorGet", "err", err)
 		s.appearsDown(w)
 		return
 	}
 	type kcur struct {
 		TS  int64  `json:"ts"`
 		ID  int64  `json:"id"`
-		Src string `json:"src"` // which store answered , visible proof of the redis/postgres roundtrip
+		Src string `json:"src"`
 	}
-	out := map[string]kcur{
-		"photo": {TS: photoTs * 1000, Src: "frames"},
-		"video": {TS: videoTs * 1000, Src: "frames"},
-	}
-	if cur, cerr := s.notif.CursorGetFull(mounted, "default"); cerr == nil {
-		for kind, c := range cur {
-			if c.TS > out[kind].TS {
-				out[kind] = kcur{TS: c.TS, ID: c.ID, Src: c.Src}
-			}
+	out := map[string]kcur{}
+	for _, kind := range []string{"photo", "video"} {
+		c := kcur{Src: "none"}
+		if v, ok := full[kind]; ok {
+			c.TS, c.ID, c.Src = v.TS, v.ID, v.Src
 		}
+		out[kind] = c
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
 }
-
-// handleFrameTag , user tag corrections. POST {"hash","tag","action":"add"|"remove"}. Tag text is
-// user input headed for the DB and later for prompts: lowercase, length-bounded, control chars out.
-// A remove is a TOMBSTONE server-side , the model can never re-propose what a human rejected.
 func (s *Server) handleFrameTag(w http.ResponseWriter, r *http.Request) {
 	if !s.session.Valid(bearer(r)) || r.Method != http.MethodPost {
 		s.appearsDown(w)
@@ -963,4 +965,30 @@ func (s *Server) handleCheckins(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"checkins": rows})
+}
+
+// handleSyncReset , POST /v1/sync/reset , rewind THIS device's cursors to zero. The next sync run
+// re-offers everything; dedup absorbs what the box already holds, so the cost is time, never
+// duplicates. Per-device: a second phone (a partner's, say) rewinding does not disturb the first.
+func (s *Server) handleSyncReset(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodPost {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	device := deviceKey(r)
+	if err := s.notif.ResetSyncCursors(mounted, device); err != nil {
+		secdLog.Warn("sync reset failed", "fn", "handleSyncReset", "err", err)
+		s.appearsDown(w)
+		return
+	}
+	secdLog.Info("sync cursors reset", "fn", "handleSyncReset", "device", device)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"reset": true})
 }

@@ -1604,3 +1604,14 @@ func (s *NotifStore) FrameOriginalPath(slot int, hash string) (string, string, e
 	}
 	return p, m, nil
 }
+
+// ResetSyncCursors zeroes THIS device's sync cursors , the app then re-offers its entire library
+// from the beginning, and hash dedup archives only what the box lacks. Per-device by design: one
+// phone rewinding does not touch another's progress.
+func (s *NotifStore) ResetSyncCursors(slot int, device string) error {
+	c, err := s.pg(slot)
+	if err != nil {
+		return err
+	}
+	return c.Exec("DELETE FROM sync_cursors WHERE device = $1", device)
+}

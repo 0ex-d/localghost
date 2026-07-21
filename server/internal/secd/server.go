@@ -220,6 +220,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/memories/edit", s.handleMemoryEdit)     // the person's version IS the memory
 	mux.HandleFunc("/v1/notes", s.handleNoteAdd)                // app -> noted inbox -> journal
 	mux.HandleFunc("/v1/onthisday", s.handleOnThisDay)          // synthd's retrospective, cached per day
+	mux.HandleFunc("/v1/sync/reset", s.handleSyncReset)         // rewind this device's cursors
 	mux.HandleFunc("/v1/checkins", s.handleCheckins)            // past check-ins, newest first
 	mux.HandleFunc("/v1/day/summary", s.handleDaySummary)       // one day at a glance, check-in prefill
 	mux.HandleFunc("/v1/health/upload", s.handleHealthUpload)   // Health Connect readout -> tallyd inbox

@@ -154,6 +154,35 @@ fun SyncScreen(
         }
         Spacer(Modifier.height(20.dp))
         GhostButton("SYNC NOW", onSync, enabled = !sync.busy, modifier = Modifier.fillMaxWidth())
+        run {
+            // RE-OFFER FROM THE BEGINNING , rewinds THIS phone's cursor on the box. Two taps to
+            // arm (it is a big walk, not a dangerous one): hash dedup means photos the box holds
+            // are skipped, so the cost is time, never duplicates. A partner's phone has its own
+            // cursor and is untouched.
+            val rctx = androidx.compose.ui.platform.LocalContext.current
+            var armed by remember { mutableStateOf(false) }
+            var msg by remember { mutableStateOf("") }
+            Spacer(Modifier.height(8.dp))
+            Text(if (armed) "[ !! ] tap again to RE-OFFER EVERYTHING from the beginning"
+                 else "[ re-offer everything from the beginning ]",
+                color = if (armed) TerminalGreen else GhostTextDim,
+                style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.clickable {
+                    if (!armed) {
+                        armed = true
+                        msg = "rewinds THIS phone's cursor; the box skips what it already holds"
+                    } else {
+                        armed = false
+                        scope.launch {
+                            msg = if (com.localghost.app.net.BoxClient.resetSync(rctx))
+                                "cursor rewound , tap SYNC NOW to walk the whole library"
+                            else "! reset failed (box unreachable?)"
+                        }
+                    }
+                }.padding(vertical = 4.dp))
+            if (msg.isNotEmpty()) Text(msg, color = TerminalDim,
+                style = MaterialTheme.typography.labelMedium)
+        }
         if (sync.partial) {
             Spacer(Modifier.height(12.dp))
             GhostButton("GRANT FULL ACCESS", onRequestFullAccess, modifier = Modifier.fillMaxWidth())

@@ -17,6 +17,10 @@
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 
     <uses-permission android:name="android.permission.health.READ_STEPS" />
+    <!-- Without this, Health Connect serves only the 30 days BEFORE the grant , the full-history
+         walk read one month and hit six empties. "Access to past data" appears as its own toggle
+         in the permission sheet; the person decides, as ever. -->
+    <uses-permission android:name="android.permission.health.READ_HEALTH_DATA_HISTORY" />
     <uses-permission android:name="android.permission.health.READ_SLEEP" />
     <uses-permission android:name="android.permission.health.READ_EXERCISE" />
     <uses-permission android:name="android.permission.health.READ_HEART_RATE" />

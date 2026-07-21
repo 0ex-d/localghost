@@ -36,6 +36,10 @@ object HealthSync {
         HealthPermission.getReadPermission(TotalCaloriesBurnedRecord::class),
         HealthPermission.getReadPermission(FloorsClimbedRecord::class),
         HealthPermission.getReadPermission(WeightRecord::class),
+        // History gate , literal string (the constant arrived in a later client than ours):
+        // without it, reads reach only 30 days before the grant, which is exactly the "one month
+        // then nothing" the first full-history walk produced.
+        "android.permission.health.READ_HEALTH_DATA_HISTORY",
     )
 
     fun available(ctx: Context): Boolean =
@@ -76,6 +80,11 @@ object HealthSync {
             if (r.days == 0) empties++ else { empties = 0; shipped += r.days }
             months++
             onProgress("$shipped day(s) shipped · ${months} month(s) walked")
+        }
+        if (months >= 7 && shipped in 1..35) {
+            // The signature of the history gate: one month of data, then six empty months. Say so
+            // instead of letting it look like the record simply ends.
+            allSkipped.add("older history locked , tap CONNECT HEALTH again and allow access to past data")
         }
         return SyncResult(shipped, allSkipped.toList())
     }

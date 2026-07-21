@@ -520,6 +520,12 @@ object BoxClient {
     }
 
     // --- sync ---
+    /** Rewind THIS device's sync cursors on the box , the next run re-offers everything from the
+     *  beginning and hash dedup archives only the gap. */
+    suspend fun resetSync(ctx: Context): Boolean = try {
+        BoxHttp.postJson(ctx, "/v1/sync/reset", org.json.JSONObject()).optBoolean("reset", false)
+    } catch (_: Exception) { false }
+
     /** The box's authoritative cursor per kind , the ONLY cursor. (0,0) on any failure: the run
      *  then re-offers from the beginning and the hash dedup absorbs it , slow but never wrong. */
     suspend fun getCursor(ctx: Context, kind: MediaKind): com.localghost.app.sync.Cursor = try {
