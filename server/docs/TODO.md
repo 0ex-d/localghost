@@ -76,6 +76,26 @@ of DONE (reverse chronological); open items live in TO DO until they move.
 
 ## DONE
 
+- [x] **66. Field report triage** (2026-07-21): (a) HEALTH PHANTOMS , empty aggregate buckets
+      return non-null ZEROS for some metric types (Duration especially), writing one zero metric
+      per day back to 2006: 7,305 phantom health days, the six-empty-months stop never fired, the
+      walk ran to its 20-year cap, and synthd inherited 7,306 distill-queue entries. Zero is not
+      data: only positive values land, days exist only when something real did. (b) Drill-in
+      LAYOUT , long values squeezed into the row leftover wrapped one letter per line; >24 chars
+      now renders as a full-width paragraph. (c) searchd drill-in breaks jobs out BY KIND (the
+      5642 mystery); framed newest capture formatted as a date. (d) The mush legacy repair
+      (delete reasoning-era image chunks + phantom health rows + re-enqueue captions for every
+      image original) shipped as operator SQL , the box re-describes its whole library properly.
+
+- [x] **65. Map skew shield actually fires + EXIF-upright viewer** (2026-07-21): the shield never
+      triggered because getJson on a 503 returns an EMPTY OBJECT, not an exception , framesGeoLod
+      came back empty-list (an answer) instead of null (unknown), and the map trusted a box that
+      had never heard of the endpoint. Absent points key now = null; and an empty WORLD view with
+      3306 geotagged photos is treated as skew too (a genuinely empty local view stays a real
+      answer). Viewer: BitmapFactory ignores EXIF orientation, so originals arrived sideways
+      (thumbs were pre-uprighted box-side, masking it); framework ExifInterface + one Matrix now
+      uprights rotation and mirroring, with an OOM guard (a sideways photo beats a crash).
+
 - [x] **64. Model gate + attempt refunds + framed pipeline visibility** (2026-07-21): searchd's
       model-dependent lanes (caption, tag) now REST behind a 20s hold the moment a "no backend"
       lands , no more machine-gunning a warming oracled. The deeper find: warmup fast-fails were

@@ -136,14 +136,20 @@ object HealthSync {
                     timeRangeFilter = TimeRangeFilter.between(zStart, zEnd),
                     timeRangeSlicer = java.time.Period.ofDays(1)))
             buckets.forEach { b ->
-                val d = b.startTime.toLocalDate().format(fmt)
-                val m = days.getOrPut(d) { HashMap() }
-                b.result[StepsRecord.COUNT_TOTAL]?.let { m["steps"] = it.toDouble() }
-                b.result[DistanceRecord.DISTANCE_TOTAL]?.let { m["distance_km"] = it.inKilometers }
-                b.result[TotalCaloriesBurnedRecord.ENERGY_TOTAL]?.let { m["calories"] = it.inKilocalories }
-                b.result[FloorsClimbedRecord.FLOORS_CLIMBED_TOTAL]?.let { m["floors"] = it }
-                b.result[ExerciseSessionRecord.EXERCISE_DURATION_TOTAL]?.let {
-                    m["exercise_minutes"] = it.seconds / 60.0
+                // ZERO IS NOT DATA here , empty buckets return non-null zeros for some metric
+                // types (Duration aggregates in particular), and writing them created 7,305
+                // phantom "health days" back to 2006: every day had one zero metric, so the
+                // six-empty-months stop never fired and the walk ran to its 20-year cap. A day
+                // exists only when a POSITIVE value landed.
+                val vals = HashMap<String, Double>()
+                b.result[StepsRecord.COUNT_TOTAL]?.toDouble()?.takeIf { it > 0 }?.let { vals["steps"] = it }
+                b.result[DistanceRecord.DISTANCE_TOTAL]?.inKilometers?.takeIf { it > 0 }?.let { vals["distance_km"] = it }
+                b.result[TotalCaloriesBurnedRecord.ENERGY_TOTAL]?.inKilocalories?.takeIf { it > 0 }?.let { vals["calories"] = it }
+                b.result[FloorsClimbedRecord.FLOORS_CLIMBED_TOTAL]?.takeIf { it > 0 }?.let { vals["floors"] = it }
+                b.result[ExerciseSessionRecord.EXERCISE_DURATION_TOTAL]?.seconds?.takeIf { it > 0 }
+                    ?.let { vals["exercise_minutes"] = it / 60.0 }
+                if (vals.isNotEmpty()) {
+                    days.getOrPut(b.startTime.toLocalDate().format(fmt)) { HashMap() }.putAll(vals)
                 }
             }
             aggregated = true
@@ -229,6 +235,13 @@ object HealthSync {
         tryRead("weight", WeightRecord::class) { recs ->
             recs.forEach { r -> bucket(r.time)["weight_kg"] = r.weight.inKilograms }
         }
+        // A CONSTANT IS NOT A MEASUREMENT. Samsung Health synthesizes a BMR-based calories total
+        // for ANY day you query , 1564.50 kcal, every day since 2006, data or no data ("you were
+        // presumably alive"). One constant made every day in history look like a health day and
+        // marched the full-history walk to its 20-year cap. Rule: calories only count on days
+        // where something was actually MEASURED (any other metric present); a day whose only
+        // content is the provider's guess about your resting metabolism is an empty day.
+        days.entries.removeAll { (_, m) -> m.keys.all { it == "calories" } }
         when {
             days.isEmpty() && hrSamples.isEmpty() ->
                 SyncResult(0, skipped, if (skipped.size >= 8) "every record type failed , re-check permissions" else null)

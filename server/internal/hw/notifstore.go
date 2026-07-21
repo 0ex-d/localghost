@@ -1432,7 +1432,7 @@ func (s *NotifStore) DaemonSummary(slot int, name string) ([]DaemonKV, error) {
 		add("captions exhausted", one("SELECT count(*) FROM search.jobs WHERE kind = 'caption' AND attempts >= 5"))
 		add("track points", one("SELECT count(*) FROM location_points"))
 		add("geo places loaded", one("SELECT count(*) FROM geo_points"))
-		if ts := one("SELECT max(taken_at) FROM frames"); ts != "0" {
+		if ts := one("SELECT to_char(to_timestamp(max(taken_at)), 'YYYY-MM-DD HH24:MI') FROM frames"); ts != "0" && ts != "" {
 			add("newest capture", ts)
 		}
 	case "ghost.noted":
@@ -1450,7 +1450,9 @@ func (s *NotifStore) DaemonSummary(slot int, name string) ([]DaemonKV, error) {
 	case "ghost.searchd":
 		add("caption jobs pending", one("SELECT count(*) FROM search.jobs WHERE kind = 'caption' AND attempts < 5"))
 		add("caption jobs exhausted", one("SELECT count(*) FROM search.jobs WHERE kind = 'caption' AND attempts >= 5"))
-		add("all jobs pending", one("SELECT count(*) FROM search.jobs WHERE attempts < 5"))
+		add("tag jobs pending", one("SELECT count(*) FROM search.jobs WHERE kind = 'tag' AND attempts < 5"))
+		add("embed jobs pending", one("SELECT count(*) FROM search.jobs WHERE kind = 'embed_text' AND attempts < 5"))
+		add("other jobs pending", one("SELECT count(*) FROM search.jobs WHERE kind NOT IN ('caption','tag','embed_text') AND attempts < 5"))
 		add("indexed chunks", one("SELECT count(*) FROM search.chunks"))
 		add("tags written", one("SELECT count(*) FROM frame_tags WHERE source <> 'user_removed'"))
 	case "ghost.tallyd":

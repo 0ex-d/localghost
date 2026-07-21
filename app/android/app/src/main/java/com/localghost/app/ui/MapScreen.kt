@@ -160,7 +160,8 @@ fun MapScreen() {
             minOf(latTop, latBot), maxOf(latTop, latBot),
             minOf(lonL, lonR), maxOf(lonL, lonR))
         cells = when {
-            lod != null -> lod
+            lod != null && lod.isNotEmpty() -> lod
+            lod != null && lvl > 0 -> lod // a genuinely empty local view is a real answer
             cells.isNotEmpty() -> cells
             else -> {
                 // VERSION SKEW SHIELD , a new app against a box without the LOD endpoints must

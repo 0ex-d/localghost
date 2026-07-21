@@ -764,6 +764,10 @@ object BoxClient {
                              minLat: Double, maxLat: Double, minLon: Double, maxLon: Double): List<GeoCell>? = try {
         val r = BoxHttp.getJson(ctx,
             "/v1/frames/geo/lod?level=$level&minlat=$minLat&maxlat=$maxLat&minlon=$minLon&maxlon=$maxLon")
+        // No "points" key at all = a box that has never heard of this endpoint (503 body parsed
+        // into an empty object) , that is NULL (unknown), not an empty answer. The distinction is
+        // what lets the version-skew shield fire.
+        if (!r.has("points")) return null
         val a = r.optJSONArray("points") ?: org.json.JSONArray()
         (0 until a.length()).mapNotNull { i ->
             val o = a.optJSONObject(i) ?: return@mapNotNull null
