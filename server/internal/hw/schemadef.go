@@ -92,6 +92,9 @@ var schemaRegistry = []SchemaTable{
 	}, Indexes: []string{
 		"CREATE INDEX IF NOT EXISTS frames_taken_at ON frames (taken_at)",
 		"CREATE INDEX IF NOT EXISTS frames_kind ON frames (kind)",
+		// The map's LOD queries bbox-filter on lat/lon every pan tick; at a two-person archive
+		// (40k+) that is a full scan per gesture without this. Partial: only GPS rows belong.
+		"CREATE INDEX IF NOT EXISTS frames_gps ON frames (lat, lon) WHERE has_gps",
 	}},
 	{Name: "geo_points", PK: "geonameid", Cols: []SchemaCol{
 		{"geonameid", "BIGINT", true, ""},

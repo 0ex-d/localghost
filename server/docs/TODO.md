@@ -5,6 +5,17 @@ of DONE (reverse chronological); open items live in TO DO until they move.
 
 ## TO DO
 
+- [ ] **77. Google Photos Takeout import** , the family-archive recovery. Her device starts
+      2020-01; Google holds 2012 onward (backup + free-up-space made the phone a cache, the cloud
+      the archive). Design requirements learned from how Google stores things DIFFERENTLY:
+      (a) SIDECARS ARE FIRST-CLASS , every Takeout photo ships a JSON with photoTakenTime and
+      geoData that often knows what the JPEG does not (estimated locations from Location History,
+      dates for mangled EXIF): prefer in-file EXIF, fall back to sidecar, record taken_src
+      accordingly ('sidecar'). (b) Pre-2021 High Quality uploads are RECOMPRESSED , different
+      bytes, so hash dedup rightly treats them as new; expected, not a bug. (c) framed
+      takeout-inbox walks the export dirs, archives through the normal pipeline. This recovers
+      HIS lost years too , shared holidays exist through her lens, and his own Google account may
+      hold photos his broken phones did not.
 - [ ] **7. Reprocess pass , RUN IT** (the command now exists, written 2026-07-15): framed walks
       the archive, re-inserts records (idempotent), re-derives previews (force=true also fixes
       pre-existing sideways portrait thumbs), re-notifies search, rebuilds GPS days. Run:
@@ -75,6 +86,11 @@ of DONE (reverse chronological); open items live in TO DO until they move.
 ## Done (this era)
 
 ## DONE
+
+- [x] **76b. frames_gps index** (2026-07-21): partial (lat, lon) WHERE has_gps , the map's LOD
+      bbox queries stop full-scanning at two-person scale (40k+ incoming). Added to the REGISTRY
+      only; the convergence engine creates it at next unlock , the migration system's first real
+      production moment: one line, zero migration scripts, every box heals itself.
 
 - [x] **76. The cursor was account-global** (2026-07-21): the wife's-phone symptom (one recent
       video, nothing else) diagnosed the single-device era's last artifact , CursorSet wrote to a
