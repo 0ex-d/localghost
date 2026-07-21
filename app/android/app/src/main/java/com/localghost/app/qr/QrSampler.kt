@@ -96,18 +96,46 @@ object QrSampler {
         if (lum.size < width * height) {
             return emptyList<Sampled>() to Diag.NoBinary("frame too small ${width}x${height}")
         }
-        // Spread the binarisation retry across FRAMES, not within one frame. A live preview gives many
-        // frames a second; trying all five thresholds on every frame is 5x the work and backs up the
-        // analyser until the feed stalls. Instead each frame uses one threshold, rotating through them,
-        // so over ~5 frames (well under a second) we still cover them all while keeping per-frame cost
-        // bounded. The decoder remains the judge: whichever frame+threshold yields a decodable grid wins.
+        // STICKY THRESHOLD + ROTATING PROBE. The pure rotation (one bias per frame, cycling five)
+        // fixed the stalled-analyser problem but regressed DETECTION: a code that only resolves
+        // under one particular bias got a shot every FIFTH frame, so lock-on felt five times
+        // slower. The repair keeps both properties: remember the bias that most recently produced
+        // finder candidates and run it EVERY frame (detection recovers to all-biases quality),
+        // while a second, rotating probe pass keeps exploring for a better bias (glare drifts,
+        // hands move). Worst case two binarisation passes per frame , bounded, nowhere near the
+        // 5x that stalled the feed , and the moment any bias shows promise it goes sticky and the
+        // common case is one pass again. A sticky bias that misses 12 straight frames is dropped:
+        // the scene changed, stop flogging it.
         val biases = intArrayOf(8, 4, 12, 0, 16)
-        val bias = biases[(frameCounter++ % biases.size + biases.size) % biases.size]
-        return candidatesForBias(lum, width, height, bias)
+        stickyBias?.let { sb ->
+            val r = candidatesForBias(lum, width, height, sb)
+            if (r.first.isNotEmpty()) {
+                stickyMisses = 0
+                return r
+            }
+            // Seeing SOME finders means the bias is still right and the hand moved , not a miss.
+            val partial = (r.second as? Diag.FewFinders)?.found ?: 0
+            if (partial > 0) stickyMisses = 0 else stickyMisses++
+            if (stickyMisses >= 12) { stickyBias = null; stickyMisses = 0 }
+        }
+        val probe = biases[(frameCounter++ % biases.size + biases.size) % biases.size]
+        if (probe == stickyBias) {
+            // Do not burn the probe re-running the bias that just missed; advance once more.
+            val next = biases[(frameCounter++ % biases.size + biases.size) % biases.size]
+            val r = candidatesForBias(lum, width, height, next)
+            if (r.first.isNotEmpty()) { stickyBias = next; stickyMisses = 0 }
+            return r
+        }
+        val r = candidatesForBias(lum, width, height, probe)
+        if (r.first.isNotEmpty()) { stickyBias = probe; stickyMisses = 0 }
+        return r
     }
 
-    // Rotates the binarisation threshold across successive frames (see sampleCandidates).
+    // Rotates the binarisation threshold across successive frames (see sampleCandidates); the
+    // sticky pair remembers the bias that last produced candidates so it runs every frame.
     private var frameCounter = 0
+    private var stickyBias: Int? = null
+    private var stickyMisses = 0
 
     /** One binarisation pass: binarise at the given bias, detect, and produce ordered candidate grids. */
     private fun candidatesForBias(lum: IntArray, width: Int, height: Int, bias: Int): Pair<List<Sampled>, Diag> {

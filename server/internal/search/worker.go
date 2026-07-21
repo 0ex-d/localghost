@@ -126,6 +126,16 @@ func (w *Worker) doCaption(ctx context.Context, job *Job) error {
 		return err
 	}
 	header := ContextHeader("photo", captured.Format("2006-01-02"), metaCamera(meta))
+	// The SCENE section is the human-facing DESCRIPTION , stored on the frame so the gallery can
+	// show what the photo is without re-running the model. Never overwrites a non-empty value
+	// (a future user-edited description outranks the model, same rule as tags and memories).
+	if scene := captionSection(caption, "SCENE:"); scene != "" {
+		if err := w.Store.db.Exec(
+			`UPDATE frames SET description = $1 WHERE hash = $2 AND (description IS NULL OR description = '')`,
+			scene, hash); err != nil {
+			w.Log.Warn("description write failed", "fn", "doCaption", "hash", hash, "err", err)
+		}
+	}
 	chunks := ChunkText(header, caption)
 	ids, err := w.Store.InsertChunksT0("image", p.OrigID, captured, chunks)
 	if err != nil {
@@ -184,7 +194,7 @@ func (w *Worker) doTags(ctx context.Context, job *Job) error {
 		// Derived display name: date + the first three tags. Set only when EMPTY , a user rename
 		// (future endpoint) must never be overwritten by a background job.
 		name := time.Unix(p.Captured, 0).UTC().Format("2006-01-02")
-		n := 3
+		n := 2 // SHORT: tags, description and place carry the detail; the name is a label
 		if len(tags) < n {
 			n = len(tags)
 		}
@@ -288,3 +298,23 @@ var errNotNumber = jsonErr("not a number")
 type jsonErr string
 
 func (e jsonErr) Error() string { return string(e) }
+
+// captionSection pulls one fixed heading's body out of the structured caption , the sections are a
+// contract (spec 9.2), so this is a scan to the next ALL-CAPS heading, not a parser.
+func captionSection(caption, heading string) string {
+	i := strings.Index(caption, heading)
+	if i < 0 {
+		return ""
+	}
+	rest := caption[i+len(heading):]
+	for _, next := range []string{"OBJECTS:", "PEOPLE:", "TEXT:", "COLOURS_STYLE:", "SETTING_GUESS:"} {
+		if j := strings.Index(rest, next); j >= 0 {
+			rest = rest[:j]
+		}
+	}
+	out := strings.TrimSpace(rest)
+	if r := []rune(out); len(r) > 900 {
+		out = string(r[:900])
+	}
+	return out
+}

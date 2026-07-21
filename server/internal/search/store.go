@@ -229,7 +229,10 @@ func (s *Store) ClaimJob(kind string) (*Job, error) {
 		WHERE id = (
 			SELECT id FROM search.jobs
 			WHERE kind = $1 AND run_after <= now() AND attempts < 5
-			ORDER BY id
+			-- NEWEST FIRST: a person looking at their gallery today wants today's photos named,
+			-- not 2019's. id DESC approximates capture order closely enough (jobs are queued as
+			-- frames archive) without joining frames.
+			ORDER BY id DESC
 			FOR UPDATE SKIP LOCKED
 			LIMIT 1)
 		RETURNING id, payload`, kind)

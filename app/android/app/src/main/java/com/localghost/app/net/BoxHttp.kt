@@ -60,6 +60,20 @@ object BoxHttp {
         }
     }
 
+    /** GET with ETag revalidation: 304 -> (null, sameEtag) , caller keeps its cache. */
+    suspend fun getBytesEtag(ctx: Context, path: String, etag: String?): Pair<ByteArray?, String?> =
+        withContext(Dispatchers.IO) {
+            try {
+                val conn = open(ctx, path, "GET")
+                if (!etag.isNullOrEmpty()) conn.setRequestProperty("If-None-Match", etag)
+                when (conn.responseCode) {
+                    304 -> { conn.disconnect(); Pair(null, etag) }
+                    200 -> Pair(conn.inputStream.use { it.readBytes() }, conn.getHeaderField("ETag"))
+                    else -> { conn.disconnect(); Pair(null, null) }
+                }
+            } catch (e: Exception) { Pair(null, null) }
+        }
+
     suspend fun getJson(ctx: Context, path: String): JSONObject = withContext(Dispatchers.IO) {
         val conn = open(ctx, path, "GET")
         readJson(conn)

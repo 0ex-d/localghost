@@ -53,15 +53,41 @@ object HealthSync {
 
     data class SyncResult(val days: Int, val skipped: List<String>, val error: String? = null)
 
-    /** Read the last 7 days and upload. EACH record type is isolated: a denied permission or a
+    /** FULL HISTORY , walks back month by month from now, syncing each window, until `emptyStop`
+     *  consecutive empty months say the record ends (capped 20 years , if your watch predates
+     *  that, congratulations). Each month is its own upload chunk, so memory and the box's 1MB
+     *  cap stay honoured no matter how dense a life gets. onProgress gets a short status line. */
+    suspend fun syncAll(ctx: Context, onProgress: (String) -> Unit): SyncResult {
+        var months = 0
+        var shipped = 0
+        var empties = 0
+        val allSkipped = LinkedHashSet<String>()
+        val cal = java.util.Calendar.getInstance()
+        while (months < 240 && empties < 6) {
+            val end = cal.timeInMillis
+            cal.add(java.util.Calendar.MONTH, -1)
+            val start = cal.timeInMillis
+            val fmt = java.text.SimpleDateFormat("MMM yyyy", java.util.Locale.US)
+            onProgress("reading ${fmt.format(java.util.Date(start))}…")
+            val r = sync(ctx, Instant.ofEpochMilli(start), Instant.ofEpochMilli(end))
+            allSkipped.addAll(r.skipped)
+            if (r.error != null && shipped == 0 && months == 0) return SyncResult(0, r.skipped, r.error)
+            if (r.days == 0) empties++ else { empties = 0; shipped += r.days }
+            months++
+            onProgress("$shipped day(s) shipped · ${months} month(s) walked")
+        }
+        return SyncResult(shipped, allSkipped.toList())
+    }
+
+    /** Read one window and upload. EACH record type is isolated: a denied permission or a
      *  flaky provider skips that type (named in `skipped`) rather than failing the sync , partial
      *  data honestly labelled beats all-or-nothing. */
-    suspend fun sync(ctx: Context): SyncResult = try {
+    suspend fun sync(ctx: Context, fromT: Instant? = null, toT: Instant? = null): SyncResult = try {
         val client = HealthConnectClient.getOrCreate(ctx)
         val zone = ZoneId.systemDefault()
         val fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd")
-        val now = Instant.now()
-        val from = now.minusSeconds(7L * 86400)
+        val now = toT ?: Instant.now()
+        val from = fromT ?: now.minusSeconds(7L * 86400)
         val range = TimeRangeFilter.between(from, now)
         val days = HashMap<String, HashMap<String, Double>>()
         fun bucket(t: Instant): HashMap<String, Double> {
@@ -72,7 +98,16 @@ object HealthSync {
         suspend fun <T : Any> tryRead(name: String, cls: kotlin.reflect.KClass<T>, use: suspend (List<T>) -> Unit)
             where T : androidx.health.connect.client.records.Record {
             try {
-                use(client.readRecords(ReadRecordsRequest(cls, range)).records)
+                // PAGINATED , Health Connect returns ~1000 records a page; taking only page one
+                // silently dropped everything past it. Loop the token until the store runs dry.
+                var token: String? = null
+                do {
+                    val resp = client.readRecords(
+                        if (token == null) ReadRecordsRequest(cls, range)
+                        else ReadRecordsRequest(cls, range, pageToken = token))
+                    use(resp.records)
+                    token = resp.pageToken
+                } while (!token.isNullOrEmpty())
             } catch (e: Exception) {
                 skipped.add(name)
                 android.util.Log.w("LocalGhost", "health read $name skipped: ${e.message}")

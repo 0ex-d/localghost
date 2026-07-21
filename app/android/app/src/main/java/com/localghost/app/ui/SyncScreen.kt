@@ -89,7 +89,13 @@ fun SyncScreen(
             }
             val permLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
                 androidx.health.connect.client.PermissionController.createRequestPermissionResultContract()) { g ->
-                granted = g.containsAll(com.localghost.app.sync.HealthSync.PERMISSIONS)
+                grantedCount = com.localghost.app.sync.HealthSync.PERMISSIONS.count { it in g }
+                granted = grantedCount == com.localghost.app.sync.HealthSync.PERMISSIONS.size
+                healthMsg = when {
+                    granted -> "all health permissions granted , tap SYNC"
+                    grantedCount > 0 -> "$grantedCount granted , partial sync will ship what it can"
+                    else -> "no permissions granted , health stays off (your call)"
+                }
             }
             val total = com.localghost.app.sync.HealthSync.PERMISSIONS.size
             grantLine("health (steps · sleep · heart · more)",
@@ -101,7 +107,14 @@ fun SyncScreen(
             if (com.localghost.app.sync.HealthSync.available(hctx)) {
                 GhostButton(if (granted) "SYNC HEALTH (7 DAYS)" else "CONNECT HEALTH",
                     onClick = {
-                        if (!granted) permLauncher.launch(com.localghost.app.sync.HealthSync.PERMISSIONS)
+                        if (!granted) {
+                            healthMsg = "opening the Health Connect permission sheet…"
+                            try {
+                                permLauncher.launch(com.localghost.app.sync.HealthSync.PERMISSIONS)
+                            } catch (e: Exception) {
+                                healthMsg = "! permission sheet refused to open: ${e.message ?: "no reason given"}"
+                            }
+                        }
                         else scope.launch {
                             healthMsg = "reading health connect…"
                             val res = com.localghost.app.sync.HealthSync.sync(hctx)
@@ -114,6 +127,22 @@ fun SyncScreen(
                             }
                         }
                     }, modifier = Modifier.fillMaxWidth())
+                if (granted) {
+                    Spacer(Modifier.height(8.dp))
+                    GhostButton("SYNC FULL HISTORY (EVERYTHING)", onClick = {
+                        scope.launch {
+                            healthMsg = "walking your history month by month…"
+                            val res = com.localghost.app.sync.HealthSync.syncAll(hctx) { p -> healthMsg = p }
+                            val skip = if (res.skipped.isEmpty()) "" else
+                                " (skipped: ${res.skipped.joinToString(", ")})"
+                            healthMsg = when {
+                                res.error != null -> "! ${res.error}$skip"
+                                res.days > 0 -> "done , ${res.days} day(s) of history on your box$skip"
+                                else -> "no health history found$skip"
+                            }
+                        }
+                    }, modifier = Modifier.fillMaxWidth())
+                }
                 if (healthMsg.isNotEmpty()) {
                     Spacer(Modifier.height(6.dp))
                     Text(healthMsg, color = GhostTextDim, style = MaterialTheme.typography.labelMedium)

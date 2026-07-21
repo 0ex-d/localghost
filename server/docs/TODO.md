@@ -224,6 +224,47 @@ Started 2026-07-15, the night the box learned to repair itself on unlock.
       distance/kcal/avg-HR-with-peak; /v1/health/stats serves 30-day daily series per metric;
       HEALTH in the drawer (♥) , the FIRST per-daemon screen: per-metric bar strips scaled to
       own range, latest + min/avg/max, stats not judgements. Manifest gains the read perms.
+- [x] **58. Health from the beginning of time** (2026-07-21): (a) PAGINATION , Health Connect
+      pages at ~1000 records and the reader took only page one, silently dropping the rest even
+      for 7 days; the token loop now drains every page. (b) SYNC FULL HISTORY walks back month by
+      month (own upload chunk each , memory + the box's cap honoured at any density), stops after
+      6 empty months or 20 years, live progress line. (c) Box side: upload cap 256KB -> 1MB per
+      chunk; tallyd samples batch 500/statement (a million HR points is an import, not a career);
+      synthd bulk-flips tallyd entries older than 60 days , the model reads recent health, the
+      deep past waits for day-episodes (30d). Re-syncs upsert, so overlap is free.
+- [x] **57. Health sync button dead** (2026-07-21): Health Connect REFUSES to show its
+      permission sheet unless the manifest declares ACTION_SHOW_PERMISSIONS_RATIONALE (+ the
+      Android 14 VIEW_PERMISSION_USAGE/HEALTH_PERMISSIONS activity-alias) , launch() was a
+      silent no-op, the button did literally nothing. Both declared; every button branch now
+      reports (sheet opening, granted n/8, refused-with-reason) so silence is impossible.
+- [x] **56. QR detection regression fixed** (2026-07-21): the perf pass that rotated ONE
+      binarisation bias per frame (to stop the stalled analyser) regressed detection 5x , a code
+      resolving under only one bias got a shot every fifth frame. Repair: STICKY bias + rotating
+      probe , the bias that last produced finder candidates runs EVERY frame, a second pass keeps
+      probing for better; partial finder visibility does not count as a miss (bias right, hand
+      moved); 12 straight true misses drops the sticky. Worst case 2 passes/frame, common case 1,
+      detection back to all-biases quality.
+- [x] **55. Declarative schema convergence** (2026-07-21): the registry (schemadef.go) is the
+      single source of truth; ConvergeSchema introspects information_schema at unlock, diffs, and
+      applies , creates missing tables/columns/indexes, migrates types via ALTER USING cast where
+      postgres allows, REFUSES destructive acts (drift columns loudly logged, never dropped;
+      missing BIGSERIAL flagged for a human). Versioned one-shot data migrations in
+      schema_migrations, run once per box in order. Converge failure is loud but non-fatal ,
+      the bootstrap blob already ran, yesterday's schema keeps working. Users run the latest
+      build, unlock, read the summary line. New schema work goes in the REGISTRY; the blob is
+      frozen bootstrap.
+- [x] **54. Map LOD + image viewer + descriptions** (2026-07-21): MAP opens on the NEWEST photo
+      zoomed close (answers "where was I last" before "where have I been"); four-tier
+      level-of-detail feed /v1/frames/geo/lod , postgres GROUPs by grid cell (1deg / 0.1 / 0.01 /
+      raw), viewport+zoom drive the tier, debounced 220ms, so a continent view ships hundreds of
+      rows not the whole archive; zoom cap raised 2000 -> 250000 so 100m clumps resolve into
+      individual photos; cluster tap dives in, single-photo tap opens. FULL-SCREEN VIEWER
+      (ImageViewer.kt) , box preview JPEG, pinch 1-12x, double-tap 3x, drag to pan, caption
+      underneath; reachable from gallery detail and from map dots. DESCRIPTIONS: frames.description
+      holds the caption SCENE section (2-4 sentences), shown in gallery detail; display_name cut
+      to date + 2 tags , "a name is a label, not a summary". Captions now claim NEWEST-FIRST
+      (ORDER BY id DESC) so today gets named before 2019. Naming stays in searchd (hybrid: framed
+      does fast metadata at archive, searchd enriches async) per the operator's call.
 - [x] **53. Offline map + clusters + the mmproj hunt** (2026-07-20, live-fire): vision was dead
       because the projector on the volume was named "mmpr" AND truncated at 175MB of ~800 , a
       July 11 copy died mid-transfer and every caption since returned <20 chars from a model

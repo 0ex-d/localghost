@@ -558,6 +558,7 @@ object BoxClient {
         val name: String = "",           // derived on the box: date + first tags; empty until tagged
         val tags: List<String> = emptyList(),
         val place: String = "",          // reverse-geocoded hierarchy; "" until geo data lands
+        val description: String = "",    // the caption's SCENE section
     )
 
     /** Page the archive newest-first. before=0 for the first page; pass the last row's takenAt to
@@ -572,6 +573,7 @@ object BoxClient {
                 o.optString("hash"), o.optLong("takenAt"), o.optString("kind"), o.optLong("bytes"),
                 name = o.optString("name", ""),
                 place = o.optString("place", ""),
+                description = o.optString("description", ""),
                 tags = if (tagsArr == null) emptyList()
                        else (0 until tagsArr.length()).mapNotNull { t -> tagsArr.optString(t).takeIf { it.isNotBlank() } },
             )
@@ -726,6 +728,28 @@ object BoxClient {
         }
     } catch (e: Exception) { android.util.Log.w("LocalGhost", "frames geo: ${e.message}"); null }
 
+    data class GeoCell(val lat: Double, val lon: Double, val n: Int, val hash: String, val takenAt: Long)
+
+    /** Level-of-detail map feed , postgres aggregates per zoom tier (0 continent .. 3 raw). */
+    suspend fun framesGeoLod(ctx: Context, level: Int,
+                             minLat: Double, maxLat: Double, minLon: Double, maxLon: Double): List<GeoCell>? = try {
+        val r = BoxHttp.getJson(ctx,
+            "/v1/frames/geo/lod?level=$level&minlat=$minLat&maxlat=$maxLat&minlon=$minLon&maxlon=$maxLon")
+        val a = r.optJSONArray("points") ?: org.json.JSONArray()
+        (0 until a.length()).mapNotNull { i ->
+            val o = a.optJSONObject(i) ?: return@mapNotNull null
+            GeoCell(o.optDouble("lat"), o.optDouble("lon"), o.optInt("n", 1),
+                o.optString("hash", ""), o.optLong("takenAt"))
+        }
+    } catch (_: Exception) { null }
+
+    /** The newest geotagged frame , where the map opens. */
+    suspend fun newestGeoFrame(ctx: Context): GeoCell? = try {
+        val o = BoxHttp.getJson(ctx, "/v1/frames/newest")
+        if (o.optDouble("lat", 0.0) == 0.0 && o.optDouble("lon", 0.0) == 0.0) null
+        else GeoCell(o.optDouble("lat"), o.optDouble("lon"), 1, o.optString("hash", ""), o.optLong("takenAt"))
+    } catch (_: Exception) { null }
+
     /** Which day tracks exist on the box, newest first. */
     suspend fun geoDays(ctx: Context, limit: Int = 30): List<String>? = try {
         val r = BoxHttp.getJson(ctx, "/v1/geo/days?limit=$limit")
@@ -751,7 +775,24 @@ object BoxClient {
     } catch (_: Exception) { null }
 
     /** The operator-provided Natural Earth GeoJSON, or null (map draws graticule-only, by design). */
+    /** The world map, CACHED , only the landmass (never photos, never locations): stored once in
+     *  filesDir, revalidated by ETag each open. Box unreachable = cached world still draws ,
+     *  the map works offline; a 304 costs zero bytes; a new file on the box replaces the cache. */
     suspend fun worldGeoJson(ctx: Context): org.json.JSONObject? = try {
+        val cache = java.io.File(ctx.filesDir, "world.geojson")
+        val prefs = ctx.getSharedPreferences("ghost_geo", Context.MODE_PRIVATE)
+        val (fresh, newTag) = BoxHttp.getBytesEtag(ctx, "/v1/geo/world", prefs.getString("world_etag", null))
+        if (fresh != null) {
+            cache.writeBytes(fresh)
+            prefs.edit().putString("world_etag", newTag ?: "").apply()
+        }
+        if (cache.exists()) org.json.JSONObject(cache.readText()) else null
+    } catch (e: Exception) {
+        val cache = java.io.File(ctx.filesDir, "world.geojson")
+        if (cache.exists()) runCatching { org.json.JSONObject(cache.readText()) }.getOrNull() else null
+    }
+
+    private suspend fun worldGeoJsonDirect(ctx: Context): org.json.JSONObject? = try {
         BoxHttp.getJson(ctx, "/v1/geo/world")
     } catch (_: Exception) { null }
 
@@ -820,6 +861,10 @@ object BoxClient {
     }
 
     /** One thumbnail's bytes (webp or jpeg). Null when the frame has none (videos) or on failure. */
+    /** The big derived JPEG , full-screen viewing and pinch-zoom. */
+    suspend fun framePreview(ctx: Context, hash: String): ByteArray? =
+        BoxHttp.getBytes(ctx, "/v1/frames/preview?hash=$hash")
+
     suspend fun frameThumb(ctx: Context, hash: String): ByteArray? =
         BoxHttp.getBytes(ctx, "/v1/frames/thumb?hash=$hash")
 

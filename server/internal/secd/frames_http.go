@@ -397,6 +397,53 @@ func (s *Server) handleFrameThumb(w http.ResponseWriter, r *http.Request) {
 
 // handleLocations accepts a JSON batch of location points ({"source":..,"points":[{ts,lat,lon}..]})
 // and spools it. secd does not parse it; framed validates and drops malformed batches.
+// handleFramePreview , GET /v1/frames/preview?hash= , the large derived JPEG for full-screen
+// viewing and pinch-zoom. Same hash validation and appears-down discipline as the thumb.
+func (s *Server) handleFramePreview(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	hash := r.URL.Query().Get("hash")
+	if len(hash) < 16 || len(hash) > 128 {
+		s.appearsDown(w)
+		return
+	}
+	for _, ch := range hash {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+			s.appearsDown(w) // not lowercase hex -> not one of our hashes; no path characters ever
+			return
+		}
+	}
+	path, err := s.notif.FramePreviewPath(mounted, hash)
+	if err != nil || path == "" {
+		s.appearsDown(w)
+		return
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		secdLog.Warn("preview open failed", "fn", "handleFramePreview", "path", path, "err", err)
+		s.appearsDown(w)
+		return
+	}
+	defer f.Close()
+	if strings.HasSuffix(path, ".webp") {
+		w.Header().Set("Content-Type", "image/webp")
+	} else {
+		w.Header().Set("Content-Type", "image/jpeg")
+	}
+	_, _ = io.Copy(w, f)
+}
+
+// handleLocations accepts a JSON batch of location points ({"source":..,"points":[{ts,lat,lon}..]})
+// and spools it. secd does not parse it; framed validates and drops malformed batches.
 func (s *Server) handleLocations(w http.ResponseWriter, r *http.Request) {
 	if !s.session.Valid(bearer(r)) {
 		secdLog.Warn("location upload rejected: invalid session", "fn", "handleLocations", "bearerPresent", bearer(r) != "", "remote", r.RemoteAddr)
@@ -708,7 +755,7 @@ func (s *Server) handleHealthUpload(w http.ResponseWriter, r *http.Request) {
 		s.appearsDown(w)
 		return
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 256*1024))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1024*1024)) // app chunks history by month; 1MB covers the densest month
 	if err != nil || len(body) == 0 || !json.Valid(body) {
 		s.appearsDown(w)
 		return
@@ -757,4 +804,64 @@ func (s *Server) handleHealthStats(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"series": series})
+}
+
+// handleFramesGeoLOD , GET /v1/frames/geo/lod?level=0..3&minlat&maxlat&minlon&maxlon , the map's
+// level-of-detail feed. Postgres aggregates; the app ships a viewport and a level and gets back a
+// few hundred cells instead of every point on the planet.
+func (s *Server) handleFramesGeoLOD(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodGet {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	qp := r.URL.Query()
+	pf := func(k string, def float64) float64 {
+		v, err := strconv.ParseFloat(qp.Get(k), 64)
+		if err != nil {
+			return def
+		}
+		return v
+	}
+	level, _ := strconv.Atoi(qp.Get("level"))
+	if level < 0 || level > 3 {
+		level = 0
+	}
+	pts, err := s.notif.FramesGeoLOD(mounted, level,
+		pf("minlat", -90), pf("maxlat", 90), pf("minlon", -180), pf("maxlon", 180), 0)
+	if err != nil {
+		secdLog.Warn("geo lod failed", "fn", "handleFramesGeoLOD", "err", err)
+		s.appearsDown(w)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"level": level, "points": pts})
+}
+
+// handleFramesNewest , GET /v1/frames/newest , the newest geotagged frame; the map opens here.
+func (s *Server) handleFramesNewest(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodGet {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	g, err := s.notif.NewestGeoFrame(mounted)
+	if err != nil {
+		s.appearsDown(w)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(g)
 }

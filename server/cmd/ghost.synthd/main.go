@@ -703,6 +703,13 @@ func distillPass(db *poltergres.ReadWrite, oc *oracle.Client, lg *slog.Logger) (
 		"UPDATE journal_entries SET distilled = TRUE WHERE NOT distilled AND source = 'ghost.framed' AND ref NOT LIKE 'timeline:%'"); err != nil {
 		return 0, err
 	}
+	// A FULL-HISTORY health import journals thousands of "slept 7h, 9k steps" days. The model
+	// only sees the recent ones (they inform current memories); the deep past flips straight to
+	// distilled , day-level episodes (30d) will read health_metrics directly when they arrive.
+	if err := db.Exec(
+		"UPDATE journal_entries SET distilled = TRUE WHERE NOT distilled AND source = 'ghost.tallyd' AND ts < (extract(epoch from now())::bigint - 60*86400)"); err != nil {
+		return 0, err
+	}
 	rows, err := db.Query(
 		"SELECT id, source, ref, title, body FROM journal_entries WHERE NOT distilled ORDER BY ts DESC LIMIT 8")
 	if err != nil {

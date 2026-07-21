@@ -1,0 +1,84 @@
+package com.localghost.app.ui
+
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import com.localghost.app.net.BoxClient
+import com.localghost.app.ui.theme.*
+
+/**
+ * Full-screen photo viewer with pinch-zoom and pan , the box's own preview JPEG, fetched on open,
+ * never cached to disk (the archive is the box's job; the phone is a window, not a second copy).
+ * Double-tap toggles fit/3x, single tap dismisses, drag pans while zoomed.
+ */
+@Composable
+fun ImageViewer(hash: String, caption: String = "", onDismiss: () -> Unit) {
+    val ctx = LocalContext.current
+    var bmp by remember(hash) { mutableStateOf<android.graphics.Bitmap?>(null) }
+    var failed by remember(hash) { mutableStateOf(false) }
+    LaunchedEffect(hash) {
+        val bytes = BoxClient.framePreview(ctx, hash) ?: BoxClient.frameThumb(ctx, hash)
+        if (bytes == null) failed = true
+        else bmp = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+    }
+    var scale by remember(hash) { mutableStateOf(1f) }
+    var offX by remember(hash) { mutableStateOf(0f) }
+    var offY by remember(hash) { mutableStateOf(0f) }
+    Dialog(onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
+            when {
+                bmp != null -> Image(
+                    bitmap = bmp!!.asImageBitmap(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize()
+                        .graphicsLayer(scaleX = scale, scaleY = scale,
+                            translationX = offX, translationY = offY)
+                        .pointerInput(hash) {
+                            detectTransformGestures { _, pan, gz, _ ->
+                                scale = (scale * gz).coerceIn(1f, 12f)
+                                if (scale > 1f) { offX += pan.x; offY += pan.y }
+                                else { offX = 0f; offY = 0f }
+                            }
+                        }
+                        .pointerInput(hash) {
+                            detectTapGestures(
+                                onDoubleTap = {
+                                    if (scale > 1.2f) { scale = 1f; offX = 0f; offY = 0f } else scale = 3f
+                                },
+                                onTap = { if (scale <= 1.05f) onDismiss() })
+                        })
+                failed -> Text("! could not load this photo from the box",
+                    color = TerminalDim, style = MaterialTheme.typography.bodyMedium)
+                else -> Text("loading…", color = GhostTextDim,
+                    style = MaterialTheme.typography.bodyMedium)
+            }
+            if (caption.isNotBlank() && scale <= 1.05f) {
+                Text(caption, color = GhostTextDim,
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.align(Alignment.BottomStart)
+                        .background(Color(0xCC000000)).padding(12.dp))
+            }
+            Text("[ close ]", color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.align(Alignment.TopEnd).padding(16.dp).clickable { onDismiss() })
+        }
+    }
+}

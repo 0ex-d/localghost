@@ -120,6 +120,7 @@ type FrameRow struct {
 	Name    string   `json:"name,omitempty"` // derived (date + tags) until a user rename exists
 	Tags    []string `json:"tags,omitempty"` // model + user tags; tombstoned removals excluded
 	Place   string   `json:"place,omitempty"` // reverse-geocoded hierarchy, "" until geo data lands
+	Description string `json:"description,omitempty"` // the caption's SCENE section
 }
 
 // FramesList pages the archive newest-first: frames with taken_at strictly BEFORE the cursor (pass 0
@@ -137,7 +138,7 @@ func (s *NotifStore) FramesList(slot int, beforeTs int64, limit int) ([]FrameRow
 		limit = 60
 	}
 	rows, err := c.Query(
-		"SELECT hash, taken_at, kind, bytes, display_name, place FROM frames WHERE taken_at < $1 ORDER BY taken_at DESC LIMIT "+strconv.Itoa(limit),
+		"SELECT hash, taken_at, kind, bytes, display_name, place, description FROM frames WHERE taken_at < $1 ORDER BY taken_at DESC LIMIT "+strconv.Itoa(limit),
 		strconv.FormatInt(beforeTs, 10))
 	if err != nil {
 		return nil, err
@@ -162,6 +163,9 @@ func (s *NotifStore) FramesList(slot int, beforeTs int64, limit int) ([]FrameRow
 		}
 		if len(v) > 5 && v[5] != nil {
 			r.Place = *v[5]
+		}
+		if len(v) > 6 && v[6] != nil {
+			r.Description = *v[6]
 		}
 		out = append(out, r)
 	}
@@ -516,6 +520,27 @@ func (s *NotifStore) FramesHave(slot int, hashes []string) (map[string]bool, err
 }
 
 // FrameThumbPath returns the on-volume path of a frame's thumbnail ("" if none , e.g. videos).
+// FramePreviewPath , the big derived JPEG for the full-screen viewer (falls back to the thumb when
+// a preview was never rendered).
+func (s *NotifStore) FramePreviewPath(slot int, hash string) (string, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return "", err
+	}
+	rows, err := c.Query("SELECT preview_path, thumb_path FROM frames WHERE hash = $1", hash)
+	if err != nil || len(rows.Vals) == 0 {
+		return "", err
+	}
+	v := rows.Vals[0]
+	if len(v) > 0 && v[0] != nil && *v[0] != "" {
+		return *v[0], nil
+	}
+	if len(v) > 1 && v[1] != nil {
+		return *v[1], nil
+	}
+	return "", nil
+}
+
 func (s *NotifStore) FrameThumbPath(slot int, hash string) (string, error) {
 	c, err := s.pg(slot)
 	if err != nil {
@@ -1246,4 +1271,127 @@ func (s *NotifStore) HealthStats(slot int, n int) ([]HealthSeries, error) {
 		last.Values = append(last.Values, val)
 	}
 	return out, nil
+}
+
+// GeoCluster is one aggregated map point: a grid cell's centroid, how many frames fell in it, and
+// (when the cell holds exactly one) that frame's hash so the app can open it.
+type GeoCluster struct {
+	Lat, Lon float64 `json:"lat,omitempty"`
+	N        int     `json:"n"`
+	Hash     string  `json:"hash,omitempty"`
+	TakenAt  int64   `json:"takenAt,omitempty"`
+}
+
+// geoLevelPrecision , four LOD tiers. The map picks by zoom; POSTGRES does the aggregation, so a
+// world view ships a few hundred rows instead of 50,000 points the canvas then has to overdraw.
+// Level 3 is raw frames (already bbox-limited by the client's viewport at that zoom).
+func geoLevelPrecision(level int) float64 {
+	switch level {
+	case 0:
+		return 1.0 // continent , ~110km cells
+	case 1:
+		return 0.1 // region , ~11km
+	case 2:
+		return 0.01 // town , ~1.1km
+	default:
+		return 0 // raw
+	}
+}
+
+// FramesGeoLOD returns aggregated map points for a bbox at one of four levels. Level 3 returns
+// individual frames (hash included) so tapping opens the photo; lower levels return cell centroids
+// with counts. The 100m-clump problem solves itself at level 3 plus deep zoom , the cells vanish
+// and the individual dots spread.
+func (s *NotifStore) FramesGeoLOD(slot, level int, minLat, maxLat, minLon, maxLon float64, limit int) ([]GeoCluster, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > 6000 {
+		limit = 3000
+	}
+	prec := geoLevelPrecision(level)
+	if prec == 0 {
+		rows, qerr := c.Query(
+			"SELECT lat, lon, hash, taken_at FROM frames WHERE has_gps AND lat BETWEEN $1 AND $2 AND lon BETWEEN $3 AND $4 ORDER BY taken_at DESC LIMIT "+strconv.Itoa(limit),
+			minLat, maxLat, minLon, maxLon)
+		if qerr != nil {
+			return nil, qerr
+		}
+		out := make([]GeoCluster, 0, len(rows.Vals))
+		for _, v := range rows.Vals {
+			if len(v) < 4 || v[0] == nil || v[1] == nil {
+				continue
+			}
+			g := GeoCluster{N: 1}
+			g.Lat, _ = strconv.ParseFloat(*v[0], 64)
+			g.Lon, _ = strconv.ParseFloat(*v[1], 64)
+			if v[2] != nil {
+				g.Hash = *v[2]
+			}
+			if v[3] != nil {
+				g.TakenAt, _ = strconv.ParseInt(*v[3], 10, 64)
+			}
+			out = append(out, g)
+		}
+		return out, nil
+	}
+	rows, err := c.Query(`
+		SELECT avg(lat), avg(lon), count(*), min(hash), max(taken_at)
+		FROM frames
+		WHERE has_gps AND lat BETWEEN $1 AND $2 AND lon BETWEEN $3 AND $4
+		GROUP BY floor(lat/$5), floor(lon/$5)
+		ORDER BY count(*) DESC LIMIT `+strconv.Itoa(limit),
+		minLat, maxLat, minLon, maxLon, prec)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]GeoCluster, 0, len(rows.Vals))
+	for _, v := range rows.Vals {
+		if len(v) < 5 || v[0] == nil || v[1] == nil || v[2] == nil {
+			continue
+		}
+		var g GeoCluster
+		g.Lat, _ = strconv.ParseFloat(*v[0], 64)
+		g.Lon, _ = strconv.ParseFloat(*v[1], 64)
+		nn, _ := strconv.Atoi(*v[2])
+		g.N = nn
+		if nn == 1 && v[3] != nil {
+			g.Hash = *v[3]
+		}
+		if v[4] != nil {
+			g.TakenAt, _ = strconv.ParseInt(*v[4], 10, 64)
+		}
+		out = append(out, g)
+	}
+	return out, nil
+}
+
+// NewestGeoFrame returns the most recent geotagged frame , the map's opening view centres here.
+func (s *NotifStore) NewestGeoFrame(slot int) (GeoCluster, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return GeoCluster{}, err
+	}
+	rows, err := c.Query("SELECT lat, lon, hash, taken_at FROM frames WHERE has_gps ORDER BY taken_at DESC LIMIT 1")
+	if err != nil || len(rows.Vals) == 0 {
+		return GeoCluster{}, err
+	}
+	v := rows.Vals[0]
+	g := GeoCluster{N: 1}
+	if len(v) >= 4 {
+		if v[0] != nil {
+			g.Lat, _ = strconv.ParseFloat(*v[0], 64)
+		}
+		if v[1] != nil {
+			g.Lon, _ = strconv.ParseFloat(*v[1], 64)
+		}
+		if v[2] != nil {
+			g.Hash = *v[2]
+		}
+		if v[3] != nil {
+			g.TakenAt, _ = strconv.ParseInt(*v[3], 10, 64)
+		}
+	}
+	return g, nil
 }

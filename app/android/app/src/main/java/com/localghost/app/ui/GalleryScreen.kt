@@ -189,13 +189,22 @@ private fun FrameDetailDialog(
             Modifier.background(Void).border(1.dp, TerminalDim).padding(16.dp)
                 .verticalScroll(rememberScrollState())
         ) {
-            Box(Modifier.fillMaxWidth().aspectRatio(1f).background(VoidLighter),
+            var full by remember(frame.hash) { mutableStateOf(false) }
+            if (full) ImageViewer(frame.hash,
+                caption = if (frame.description.isNotBlank()) frame.description else frame.name,
+                onDismiss = { full = false })
+            // Tap the thumb for the real thing: box's preview JPEG, pinch to zoom, double-tap 3x.
+            Box(Modifier.fillMaxWidth().aspectRatio(1f).background(VoidLighter)
+                    .clickable { full = true },
                 contentAlignment = Alignment.Center) {
                 val b = bmp
                 if (b != null) Image(bitmap = b.asImageBitmap(), contentDescription = null,
                     contentScale = ContentScale.Fit, modifier = Modifier.fillMaxSize())
                 else Text(if (frame.kind == "video") "▶" else "·", color = TerminalGreen)
             }
+            Text("tap the photo to open it full screen · pinch to zoom", color = TerminalDim,
+                style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.padding(top = 4.dp))
             Spacer(Modifier.height(12.dp))
             Text(
                 if (frame.name.isNotBlank()) frame.name else "(unnamed , tags pending)",
@@ -204,6 +213,11 @@ private fun FrameDetailDialog(
                 java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US)
                     .format(java.util.Date(frame.takenAt * 1000)) + " · ${frame.kind}",
                 color = GhostTextDim, style = MaterialTheme.typography.bodySmall)
+            if (frame.description.isNotBlank()) {
+                Spacer(Modifier.height(6.dp))
+                Text(frame.description, color = GhostText,
+                    style = MaterialTheme.typography.bodySmall)
+            }
             if (frame.place.isNotBlank()) {
                 Spacer(Modifier.height(4.dp))
                 Text("⌖ ${frame.place}", color = TerminalDim,

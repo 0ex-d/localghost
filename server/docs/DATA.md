@@ -92,6 +92,18 @@ INGESTION (each daemon writes its own tables, nobody else's)
 - Geocoder candidate sets ride the lat/lon btrees, ordered by approximate squared-degree
   distance so LIMIT keeps the closest candidates even in dense areas; exact haversine picks in Go.
 
+## Schema evolution (how a box upgrades)
+
+The registry in internal/hw/schemadef.go is the single source of truth. At every unlock, after the
+bootstrap blob, ConvergeSchema introspects information_schema, DIFFS reality against the registry,
+and applies the difference: missing tables and columns are created, changed types are migrated with
+an explicit cast where postgres allows it, missing indexes are built by name, and columns the
+registry does not know are logged as DRIFT and never touched , dropping is a human decision,
+always. One-shot rebuilds live in dataMigrations (versioned, run once per box, recorded in
+schema_migrations). The operator story: run the latest build, unlock, read the "schema convergence"
+log line. Changing the schema: edit the registry (+ a data migration if data must move). The blob
+in datastore.go is frozen bootstrap; new work goes in the registry.
+
 ## The geo lifecycle (how it gets there, how it gets updated)
 
 1. **Arrival.** New boxes: setup runs fetch_geo.sh onto the volume and imports while the

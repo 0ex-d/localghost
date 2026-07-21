@@ -194,6 +194,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/frames/latest", s.handleFramesLatest) // where-was-I for the app's sync cursor
 	mux.HandleFunc("/v1/frames/list", s.handleFramesList)     // gallery paging, newest first
 	mux.HandleFunc("/v1/frames/thumb", s.handleFrameThumb)    // one thumbnail's bytes
+	mux.HandleFunc("/v1/frames/preview", s.handleFramePreview) // full-size for the pinch-zoom viewer
 	mux.HandleFunc("/v1/frames/exists", s.handleFramesExists) // pre-upload dedup by content hash
 	mux.HandleFunc("/v1/sync/cursor", s.handleSyncCursor)     // device sync position, survives reinstall
 	mux.HandleFunc("/v1/frames/tag", s.handleFrameTag)        // user tag corrections (tombstoned removes)
@@ -206,6 +207,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/frames/geo", s.handleFramesGeo)        // GPS frames as dots, for the map
 	mux.HandleFunc("/v1/frames/search", s.handleFramesSearch)  // place + name + tags, AND per term
 	mux.HandleFunc("/v1/geo/world", s.handleGeoWorld)
+	mux.HandleFunc("/v1/frames/geo/lod", s.handleFramesGeoLOD) // 4-level map aggregation
+	mux.HandleFunc("/v1/frames/newest", s.handleFramesNewest)  // map's opening view
 	mux.HandleFunc("/v1/geo/days", s.handleGeoDays)            // which day tracks exist
 	mux.HandleFunc("/v1/geo/day", s.handleGeoDay)              // one day's track, as framed wrote it          // operator-provided base-map GeoJSON
 	mux.HandleFunc("/v1/memories", s.handleMemories)           // the distilled corpus, live rows
