@@ -174,13 +174,16 @@ fun MapScreen() {
             vLonMin >= fetchedLonMin && vLonMax <= fetchedLonMax
         val zoomStable = fetchedSpan > 0 && vSpan > fetchedSpan / 3.2 && vSpan < fetchedSpan * 1.6
         if (inside && zoomStable && cells.isNotEmpty()) return@LaunchedEffect
-        // Fetch 2x the viewport , the margin that makes panning free.
+        // Fetch 2x the viewport , the margin that makes panning free , CLAMPED to the world:
+        // at world zoom the margin walks inverse-Mercator past its domain and produces NaN,
+        // which poisoned the whole request chain ("no photos anywhere").
         val mLat = (vLatMax - vLatMin) / 2.0
         val mLon = (vLonMax - vLonMin) / 2.0
+        fun cl(v: Double, lo: Double, hi: Double) = if (v.isNaN()) lo else v.coerceIn(lo, hi)
         level = lvl
         val lod = BoxClient.framesGeoLod(ctx, lvl,
-            vLatMin - mLat, vLatMax + mLat,
-            vLonMin - mLon, vLonMax + mLon)
+            cl(vLatMin - mLat, -90.0, 90.0), cl(vLatMax + mLat, -90.0, 90.0).coerceAtLeast(cl(vLatMin - mLat, -90.0, 90.0) + 0.001),
+            cl(vLonMin - mLon, -180.0, 180.0), cl(vLonMax + mLon, -180.0, 180.0).coerceAtLeast(cl(vLonMin - mLon, -180.0, 180.0) + 0.001))
         if (lod != null) {
             fetchedLatMin = vLatMin - mLat; fetchedLatMax = vLatMax + mLat
             fetchedLonMin = vLonMin - mLon; fetchedLonMax = vLonMax + mLon

@@ -1326,6 +1326,29 @@ func (s *NotifStore) FramesGeoLOD(slot, level int, minLat, maxLat, minLon, maxLo
 	// across, snapped to a precision ladder , so every zoom step splits clusters naturally and
 	// continuously. The client's level parameter survives as a hint only; the viewport knows
 	// better than the client's four fixed tiers ever did.
+	// BBOX SANITISER , the world-view margin fetch pushes the app's inverse-Mercator past its
+	// domain and NaN/Inf arrive here; NaN in a BETWEEN kills the query and an appears-down
+	// answer reads as "no photos anywhere". Comparisons with NaN are false, so the clamp
+	// pattern below catches NaN AND out-of-range in one move: anything not provably inside
+	// becomes the world edge.
+	if !(minLat >= -90) {
+		minLat = -90
+	}
+	if !(maxLat <= 90) {
+		maxLat = 90
+	}
+	if !(minLon >= -180) {
+		minLon = -180
+	}
+	if !(maxLon <= 180) {
+		maxLon = 180
+	}
+	if !(minLat < maxLat) {
+		minLat, maxLat = -90, 90
+	}
+	if !(minLon < maxLon) {
+		minLon, maxLon = -180, 180
+	}
 	span := maxLat - minLat
 	if lonSpan := maxLon - minLon; lonSpan > span {
 		span = lonSpan

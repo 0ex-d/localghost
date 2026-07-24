@@ -87,6 +87,16 @@ of DONE (reverse chronological); open items live in TO DO until they move.
 
 ## DONE
 
+- [x] **90. NaN killed the world** (2026-07-25): the map's empty-everywhere message decoded ,
+      the 2x margin fetch at world zoom pushes inverse-Mercator past its domain, NaN/Inf reach
+      the LOD bbox, NaN in a BETWEEN kills the query, appears-down reads as "no photos anywhere".
+      BBOX SANITISER in FramesGeoLOD (NaN comparisons are false, so !(x >= edge) clamps NaN and
+      out-of-range in one move) + app-side clamp after the margin. Server fix works with the
+      already-installed APK. HEALTH readout note: Samsung Health deposits only a ~30-day rolling
+      window INTO Health Connect regardless of the history permission , the wall is Samsung's
+      export policy, not our permission handling; older history needs Samsung Health's own
+      export (future import item).
+
 - [x] **89. The 23:01 health readout** (2026-07-24): four verdicts , (1) cued's reflections
       starved ALL DAY on a doubled path: LoadServicesConfig takes the STATE dir and appends
       mnt/slotN itself; I fed it the mount (…/slot0/mnt/slot0/…). Fixed in cued AND the same
