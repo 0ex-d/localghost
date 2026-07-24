@@ -122,6 +122,7 @@ fun MapScreen() {
     var cx by remember { mutableStateOf(WORLD / 2f) }
     var cy by remember { mutableStateOf(WORLD / 2f) }
     var zoom by remember { mutableStateOf(1f) }
+    var worldFallback by remember { mutableStateOf(false) }
     // OPENS ON THE NEWEST PHOTO, close in , the map answers "where was I last" before it answers
     // "where have I ever been". Pan/pinch out from there; the whole archive is one gesture away.
     LaunchedEffect(newest, cells) {
@@ -142,8 +143,19 @@ fun MapScreen() {
     // Debounced so a pinch does not fire twenty queries on its way to a resting zoom.
     var viewW by remember { mutableStateOf(1000f) }
     var viewH by remember { mutableStateOf(1000f) }
+    // THE GOOGLE MAPS TRICKS , the feel is 90% fetch policy, 10% drawing: (1) MARGIN FETCH ,
+    // ask for 2x the viewport, so small pans move across already-loaded ground and cost zero
+    // requests; (2) STALE-WHILE-REVALIDATE , old points keep drawing (projected live by the
+    // canvas) until new ones ARRIVE, so refinement is a cross-over, never a blink; (3) REFETCH
+    // ON ESCAPE ONLY , a new request happens when the view leaves the fetched margin or zoom
+    // changes by ~1.6x (the split threshold), not on every twitch of a finger.
+    var fetchedLatMin by remember { mutableStateOf(999.0) }
+    var fetchedLatMax by remember { mutableStateOf(-999.0) }
+    var fetchedLonMin by remember { mutableStateOf(999.0) }
+    var fetchedLonMax by remember { mutableStateOf(-999.0) }
+    var fetchedSpan by remember { mutableStateOf(0.0) }
     LaunchedEffect(cx, cy, zoom, viewW, viewH) {
-        kotlinx.coroutines.delay(220)
+        kotlinx.coroutines.delay(160)
         val lvl = when {
             zoom < 20f -> 0
             zoom < 200f -> 1
@@ -155,10 +167,25 @@ fun MapScreen() {
         val halfH = (viewH / 2f) / pxz
         val latTop = invMercY(cy - halfH); val latBot = invMercY(cy + halfH)
         val lonL = invMercX(cx - halfW); val lonR = invMercX(cx + halfW)
+        val vLatMin = minOf(latTop, latBot); val vLatMax = maxOf(latTop, latBot)
+        val vLonMin = minOf(lonL, lonR); val vLonMax = maxOf(lonL, lonR)
+        val vSpan = maxOf(vLatMax - vLatMin, vLonMax - vLonMin)
+        val inside = vLatMin >= fetchedLatMin && vLatMax <= fetchedLatMax &&
+            vLonMin >= fetchedLonMin && vLonMax <= fetchedLonMax
+        val zoomStable = fetchedSpan > 0 && vSpan > fetchedSpan / 3.2 && vSpan < fetchedSpan * 1.6
+        if (inside && zoomStable && cells.isNotEmpty()) return@LaunchedEffect
+        // Fetch 2x the viewport , the margin that makes panning free.
+        val mLat = (vLatMax - vLatMin) / 2.0
+        val mLon = (vLonMax - vLonMin) / 2.0
         level = lvl
         val lod = BoxClient.framesGeoLod(ctx, lvl,
-            minOf(latTop, latBot), maxOf(latTop, latBot),
-            minOf(lonL, lonR), maxOf(lonL, lonR))
+            vLatMin - mLat, vLatMax + mLat,
+            vLonMin - mLon, vLonMax + mLon)
+        if (lod != null) {
+            fetchedLatMin = vLatMin - mLat; fetchedLatMax = vLatMax + mLat
+            fetchedLonMin = vLonMin - mLon; fetchedLonMax = vLonMax + mLon
+            fetchedSpan = vSpan
+        }
         cells = when {
             lod != null && lod.isNotEmpty() -> lod
             lod != null && lvl > 0 -> lod // a genuinely empty local view is a real answer
@@ -172,8 +199,18 @@ fun MapScreen() {
                 }
             }
         }
+        // NEVER-BLANK RULE , an empty LOCAL view zoomed-in falls back to the whole world once,
+        // instead of greeting the person with darkness. Covers: newest photos lacking GPS (the
+        // opener centres on the newest GEOTAGGED frame, but a re-instal or a fresh box may have
+        // stale coords), a deleted area, a first run racing view measurements. The world always
+        // has your dots; showing it beats explaining an empty rectangle.
+        if (cells.isEmpty() && zoom > 4f && !worldFallback) {
+            worldFallback = true
+            cx = WORLD / 2f; cy = WORLD / 2f; zoom = 1f
+            return@LaunchedEffect // the state change re-runs this effect against the world bbox
+        }
         loadNote = when {
-            cells.isEmpty() -> "no geotagged photos in view"
+            cells.isEmpty() -> "no geotagged photos anywhere yet , they appear as photos with GPS sync"
             else -> cells.sumOf { it.n }.toString() + " photos · detail " + (lvl + 1) + "/4"
         }
     }

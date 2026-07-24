@@ -87,6 +87,20 @@ of DONE (reverse chronological); open items live in TO DO until they move.
 
 ## DONE
 
+- [x] **87c. The Google feel, app half** (2026-07-22): the feel is 90% fetch policy , (1) MARGIN
+      FETCH: request 2x the viewport so small pans cross already-loaded ground for zero requests;
+      (2) STALE-WHILE-REVALIDATE: old points keep drawing (the canvas projects live) until new
+      arrive , refinement is a cross-over, never a blink; (3) REFETCH ON ESCAPE ONLY: leave the
+      margin or change zoom ~1.6x (the split threshold). Cap re-reasoned 500 -> 800: with the 2x
+      margin, ~a quarter of delivered points are visible at cluster tiers, while a dense hike
+      still gets up to 800 raw in-view points , any trail's shape, smooth at 60fps mid-range.
+- [x] **87b. Adaptive map LOD** (2026-07-22): the Google-maps feel in two rules , (1) a viewport
+      holding <=500 real points returns them ALL, raw (the rule that preserves a hike's SHAPE:
+      truncating a trail turns a line into confetti); (2) otherwise the cluster grid derives
+      from the VIEWPORT , span/24 cells snapped to a precision ladder (5 deg down to 0.001) ,
+      so every zoom step splits clusters continuously: country blobs -> regions -> cities ->
+      places -> raw, with no fixed tiers and no client changes (level survives as an ignored
+      hint). One count query decides raw-vs-cluster; frames_gps partial index carries both.
 - [x] **87. Field triage three** (2026-07-22): (a) MAP , 43k points froze the phone; FramesGeoLOD
       hard-ceilings every tier at 500 (clusters biggest-first, raw newest-first): the app needs
       no guard because the API cannot flood it. (b) VIDEOS were flowing into the IMAGE ingest

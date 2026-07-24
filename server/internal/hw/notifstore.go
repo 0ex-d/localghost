@@ -1312,10 +1312,42 @@ func (s *NotifStore) FramesGeoLOD(slot, level int, minLat, maxLat, minLon, maxLo
 	// canvas is not a map, it is a hang. Clusters are ordered biggest-first so the 500 you get
 	// are the 500 that matter; raw tier keeps newest-first. The app never needs its own guard
 	// because the API is incapable of flooding it.
-	if limit <= 0 || limit > 500 {
-		limit = 500
+	// 800, reasoned rather than random: the app fetches a 2x-viewport margin, so ~a quarter of
+	// delivered points are on screen at once at cluster tiers, while a dense in-view hike can
+	// still show up to 800 raw points , enough for any trail's shape, comfortably under what
+	// Compose redraws smoothly at 60fps on mid-range hardware.
+	if limit <= 0 || limit > 800 {
+		limit = 800
 	}
-	prec := geoLevelPrecision(level)
+	// ADAPTIVE LOD , the Google-maps feel in two rules. Rule one: if the viewport holds few
+	// enough real points, return them ALL, raw , this is what preserves the SHAPE of a hike
+	// (a trail's photos are dozens of points, and truncating them makes a line into confetti).
+	// Rule two: otherwise pick the cluster grid FROM THE VIEWPORT , span divided into ~24 cells
+	// across, snapped to a precision ladder , so every zoom step splits clusters naturally and
+	// continuously. The client's level parameter survives as a hint only; the viewport knows
+	// better than the client's four fixed tiers ever did.
+	span := maxLat - minLat
+	if lonSpan := maxLon - minLon; lonSpan > span {
+		span = lonSpan
+	}
+	var rawCount int64
+	if rows, qerr := c.Query(
+		"SELECT count(*) FROM frames WHERE has_gps AND lat BETWEEN $1 AND $2 AND lon BETWEEN $3 AND $4",
+		minLat, maxLat, minLon, maxLon); qerr == nil && len(rows.Vals) == 1 && rows.Vals[0][0] != nil {
+		rawCount, _ = strconv.ParseInt(*rows.Vals[0][0], 10, 64)
+	}
+	prec := 0.0
+	if rawCount > int64(limit) {
+		want := span / 24.0
+		prec = 5.0
+		for _, p := range []float64{5, 2, 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001} {
+			prec = p
+			if p <= want {
+				break
+			}
+		}
+	}
+	_ = geoLevelPrecision(level) // the old fixed ladder, kept for reference; viewport wins
 	if prec == 0 {
 		rows, qerr := c.Query(
 			"SELECT lat, lon, hash, taken_at FROM frames WHERE has_gps AND lat BETWEEN $1 AND $2 AND lon BETWEEN $3 AND $4 ORDER BY taken_at DESC LIMIT "+strconv.Itoa(limit),
