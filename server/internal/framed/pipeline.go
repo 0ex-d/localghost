@@ -207,6 +207,17 @@ func (p *Pipeline) processOne(path string) (string, error) {
 		return "", nil
 	}
 
+	// ZERO-BYTE GUARD , cloud-placeholder media (Samsung "optimize storage", OneDrive stubs)
+	// arrive as empty files: MediaStore serves a 0-byte stream for content that lives only in
+	// someone else's datacenter. An empty file is not a memory; archiving it mints a frame with
+	// no pixels, no preview, no caption , a ghost in the wrong sense. Skip, delete the spool
+	// file, and let the phone-side SIZE filter (queued app work) stop them at the source.
+	if st, serr := os.Stat(path); serr == nil && st.Size() == 0 {
+		p.log.Info("empty upload skipped (cloud placeholder?)", "fn", "processOne", "path", filepath.Base(path))
+		_ = os.Remove(path)
+		return "", nil
+	}
+
 	// Sniff from the head, then load FULL bytes only for photos (preview decode needs pixels).
 	sniff := Sniff(head)
 	var raw []byte

@@ -107,7 +107,8 @@ func main() {
 		// No streaks, no nudges to talk MORE , the only thing this daemon will ever sell you is
 		// your own reflection.
 		mount := filepath.Dir(runDir)
-		if sc, err := hw.LoadServicesConfig(mount); err == nil {
+		// State dir, not mount , LoadServicesConfig appends mnt/slotN itself (the cued lesson).
+		if sc, err := hw.LoadServicesConfig(filepath.Dir(filepath.Dir(mount))); err == nil {
 			db := poltergres.NewReadWrite(hw.SocketForMount(mount), sc.Postgres.Port, sc.Postgres.RWUser, sc.Postgres.RWPass, sc.Postgres.Name)
 			go detectorLoop(ctx, db, lg)
 		} else {

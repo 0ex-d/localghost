@@ -87,6 +87,17 @@ of DONE (reverse chronological); open items live in TO DO until they move.
 
 ## DONE
 
+- [x] **89. The 23:01 health readout** (2026-07-24): four verdicts , (1) cued's reflections
+      starved ALL DAY on a doubled path: LoadServicesConfig takes the STATE dir and appends
+      mnt/slotN itself; I fed it the mount (…/slot0/mnt/slot0/…). Fixed in cued AND the same
+      latent bug in shadowd's detector. (2) The 70-minute caption hang pre-restart: VIDEO caption
+      jobs from before the item-87 lane fix still queued , each wedges the vision model to
+      timeout. Purge: DELETE FROM search.jobs WHERE kind='caption' AND (payload->>'path' ~*
+      '\\.(mp4|mov|3gp|mkv|webm)$'). (3) bytes=0 frames archiving , cloud-placeholder media
+      (optimize-storage stubs) serve 0-byte streams; framed now refuses to archive emptiness
+      (skip + spool delete); phone-side SIZE filter queued. (4) The failed map test PREDATED the
+      redeploy , retest against tonight's binaries before any further map surgery.
+
 - [x] **88. Memories are not journal entries** (2026-07-22): the line, drawn in distillPass ,
       mechanical entries (tallyd health days, ALL framed lines, noted daily check-ins) flip
       distilled SILENTLY: they are raw material episodes already carry, and 1:1 model passes over

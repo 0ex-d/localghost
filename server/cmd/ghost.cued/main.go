@@ -267,7 +267,10 @@ func reflectionLoop(ctx context.Context, mount string, store *hw.NotifStore, slo
 			continue
 		}
 		if db == nil {
-			sc, err := hw.LoadServicesConfig(mount)
+			// LoadServicesConfig takes the STATE dir and appends mnt/slotN itself , feeding it
+			// the mount doubled the path (…/slot0/mnt/slot0/…) and starved every reflection.
+			state := filepath.Dir(filepath.Dir(mount))
+			sc, err := hw.LoadServicesConfig(state)
 			if err != nil {
 				continue
 			}
