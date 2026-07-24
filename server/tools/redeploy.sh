@@ -120,7 +120,7 @@ if [ -n "${GHOST_PIN:-}" ] && systemctl is-active --quiet ghost.secd; then
         sleep 1
     done
     if pgrep -f '/var/lib/ghost/mnt/.*/bin/' >/dev/null 2>&1; then
-        echo "WARNING: volume services still up after halt , wrong PIN? Falling back to restart."
+        echo "still stopping after 30s (wedged daemon getting SIGKILLed) , hard restart; interrupted work heals on next reprocess"
     else
         echo "halted cleanly , cohort down, redis saved, postgres checkpointed."
     fi

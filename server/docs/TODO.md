@@ -87,6 +87,13 @@ of DONE (reverse chronological); open items live in TO DO until they move.
 
 ## DONE
 
+- [x] **91. The slow goodbye** (2026-07-25): planned halts crawled , 15s SIGTERM courtesy PER
+      daemon, eleven daemons, sequential; wedged ones (searchd in a socket read) ate full
+      windows and redeploy's 30s patience expired into a "wrong PIN?" slander. Operator ruling:
+      a lock command is an order , grace cut to 5s (SIGKILL floor unchanged; everything it
+      interrupts heals via reprocess/reingest by design) and the warning now names the wedge,
+      not the PIN.
+
 - [x] **90. NaN killed the world** (2026-07-25): the map's empty-everywhere message decoded ,
       the 2x margin fetch at world zoom pushes inverse-Mercator past its domain, NaN/Inf reach
       the LOD bbox, NaN in a BETWEEN kills the query, appears-down reads as "no photos anywhere".
