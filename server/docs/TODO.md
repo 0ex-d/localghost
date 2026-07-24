@@ -87,6 +87,13 @@ of DONE (reverse chronological); open items live in TO DO until they move.
 
 ## DONE
 
+- [x] **92. Waiting for things that do not exist** (2026-07-25): the operator named it , redeploy
+      against a LOCKED volume still prompted for a PIN, sent a halt at absent services, and
+      politely watched pgrep for processes that were never going to die because they were never
+      alive. Locked-volume short-circuit: no mnt/slot*/run means no cohort, no halt, no prompt ,
+      one line says so and the script goes straight to the binary swap. First deliverable of the
+      DIFF era.
+
 - [x] **91. The slow goodbye** (2026-07-25): planned halts crawled , 15s SIGTERM courtesy PER
       daemon, eleven daemons, sequential; wedged ones (searchd in a socket read) ate full
       windows and redeploy's 30s patience expired into a "wrong PIN?" slander. Operator ruling:
