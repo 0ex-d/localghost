@@ -87,6 +87,15 @@ of DONE (reverse chronological); open items live in TO DO until they move.
 
 ## DONE
 
+- [x] **88. Memories are not journal entries** (2026-07-22): the line, drawn in distillPass ,
+      mechanical entries (tallyd health days, ALL framed lines, noted daily check-ins) flip
+      distilled SILENTLY: they are raw material episodes already carry, and 1:1 model passes over
+      them manufacture memory spam that reads like a diary photocopied. Only substantive writing
+      reaches the model (real notes, chat journals , things a memory could plausibly be MADE
+      from), extracted as durable facts or NONE. Cleanup for any spam already minted:
+      DELETE FROM memories WHERE kind='distilled' AND (source_ref LIKE 'tallyd%' OR title LIKE
+      'Daily check-in%'); episodes and user memories untouched, tombstones honoured as ever.
+
 - [x] **87c. The Google feel, app half** (2026-07-22): the feel is 90% fetch policy , (1) MARGIN
       FETCH: request 2x the viewport so small pans cross already-loaded ground for zero requests;
       (2) STALE-WHILE-REVALIDATE: old points keep drawing (the canvas projects live) until new

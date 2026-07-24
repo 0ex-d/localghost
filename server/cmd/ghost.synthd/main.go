@@ -716,6 +716,16 @@ func distillPass(db *poltergres.ReadWrite, oc *oracle.Client, lg *slog.Logger) (
 		"UPDATE journal_entries SET distilled = TRUE WHERE NOT distilled AND source = 'ghost.tallyd' AND ts < (extract(epoch from now())::bigint - 60*86400)"); err != nil {
 		return 0, err
 	}
+	// MEMORIES ARE NOT JOURNAL ENTRIES , the line, drawn: mechanical entries (health day
+	// summaries, daily check-ins, timeline lines) are RAW MATERIAL that episodes already carry;
+	// running them through the model 1:1 manufactures memory spam that reads like a diary
+	// photocopied. They flip distilled SILENTLY. Only substantive writing reaches the model:
+	// real notes, chat journals, anything a person actually authored , the things a memory
+	// could plausibly be MADE from.
+	if err := db.Exec(
+		"UPDATE journal_entries SET distilled = TRUE WHERE NOT distilled AND (source = 'ghost.tallyd' OR (source = 'ghost.framed') OR (source = 'ghost.noted' AND title LIKE 'Daily check-in %'))"); err != nil {
+		return 0, err
+	}
 	rows, err := db.Query(
 		"SELECT id, source, ref, title, body FROM journal_entries WHERE NOT distilled ORDER BY ts DESC LIMIT 8")
 	if err != nil {
