@@ -87,6 +87,15 @@ of DONE (reverse chronological); open items live in TO DO until they move.
 
 ## DONE
 
+- [x] **93. Ask the filesystem** (2026-07-25): the runDir-to-mount relationship was guessed twice
+      and wrong twice in opposite directions (doubled path, then /var/lib/ghost/services.conf).
+      The loader contract, finally READ: LoadServicesConfig(arg) = arg/services.conf, no append.
+      Fix immune to history: findMount walks UP from runDir until the directory actually
+      containing services.conf appears , the filesystem knows, so ask it. cued reflections and
+      shadowd detectors both wired through it. Open threads: map awaits the journalctl paste
+      (command queued); steps=36 identical two days smells like another constant-not-measurement;
+      calOnly-instrumented walk not yet run.
+
 - [x] **92. Waiting for things that do not exist** (2026-07-25): the operator named it , redeploy
       against a LOCKED volume still prompted for a PIN, sent a halt at absent services, and
       politely watched pgrep for processes that were never going to die because they were never

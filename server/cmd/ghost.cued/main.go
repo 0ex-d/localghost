@@ -267,14 +267,15 @@ func reflectionLoop(ctx context.Context, mount string, store *hw.NotifStore, slo
 			continue
 		}
 		if db == nil {
-			// LoadServicesConfig takes the STATE dir and appends mnt/slotN itself , feeding it
-			// the mount doubled the path (…/slot0/mnt/slot0/…) and starved every reflection.
-			state := filepath.Dir(filepath.Dir(mount))
-			sc, err := hw.LoadServicesConfig(state)
+			m := findMount(mount)
+			if m == "" {
+				continue // no mounted volume in sight; try again next tick
+			}
+			sc, err := hw.LoadServicesConfig(m)
 			if err != nil {
 				continue
 			}
-			db = poltergres.NewReadWrite(hw.SocketForMount(mount), sc.Postgres.Port, sc.Postgres.RWUser, sc.Postgres.RWPass, sc.Postgres.Name)
+			db = poltergres.NewReadWrite(hw.SocketForMount(m), sc.Postgres.Port, sc.Postgres.RWUser, sc.Postgres.RWPass, sc.Postgres.Name)
 		}
 		pick := func(q string, args ...any) (string, string, bool) {
 			rows, err := db.Query(q, args...)
@@ -311,4 +312,23 @@ func reflectionLoop(ctx context.Context, mount string, store *hw.NotifStore, slo
 		lg.Info("reflection offered", "fn", "reflectionLoop", "day", title)
 		_ = store.SetSetting(slot, "cued_reflected", today)
 	}
+}
+
+// findMount walks UP from a run dir until it finds the directory that actually contains
+// services.conf , the volume mount. Twice this codebase guessed the relationship between runDir
+// and the mount and twice the guess was wrong in a different direction; the filesystem knows,
+// so ask it. Five levels is generous; empty means no mounted volume in sight.
+func findMount(start string) string {
+	d := start
+	for i := 0; i < 5; i++ {
+		if _, err := os.Stat(filepath.Join(d, "services.conf")); err == nil {
+			return d
+		}
+		nd := filepath.Dir(d)
+		if nd == d {
+			break
+		}
+		d = nd
+	}
+	return ""
 }

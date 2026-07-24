@@ -106,13 +106,17 @@ func main() {
 		// here) and, when a week doubles the prior week past a floor, says so ONCE, factually.
 		// No streaks, no nudges to talk MORE , the only thing this daemon will ever sell you is
 		// your own reflection.
-		mount := filepath.Dir(runDir)
-		// State dir, not mount , LoadServicesConfig appends mnt/slotN itself (the cued lesson).
-		if sc, err := hw.LoadServicesConfig(filepath.Dir(filepath.Dir(mount))); err == nil {
+		mount := findMount(filepath.Dir(runDir))
+		if mount != "" {
+			sc, err := hw.LoadServicesConfig(mount)
+			if err == nil {
 			db := poltergres.NewReadWrite(hw.SocketForMount(mount), sc.Postgres.Port, sc.Postgres.RWUser, sc.Postgres.RWPass, sc.Postgres.Name)
 			go detectorLoop(ctx, db, lg)
+			} else {
+				lg.Warn("no services config , detectors idle", "fn", "main", "err", err)
+			}
 		} else {
-			lg.Warn("no services config , detectors idle", "fn", "main", "err", err)
+			lg.Warn("no mounted volume found from run dir , detectors idle", "fn", "main")
 		}
 	}
 
@@ -178,4 +182,23 @@ func interactionTrend(db *poltergres.ReadWrite, lg *slog.Logger) error {
 	lg.Info("interaction observation posted", "fn", "interactionTrend", "this7", this7, "prior7", prior7)
 	return db.Exec(
 		"INSERT INTO settings (key, value) VALUES ('shadow_interaction_note',$1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", wk)
+}
+
+// findMount walks UP from a run dir until it finds the directory that actually contains
+// services.conf , the volume mount. Twice this codebase guessed the relationship between runDir
+// and the mount and twice the guess was wrong in a different direction; the filesystem knows,
+// so ask it. Five levels is generous; empty means no mounted volume in sight.
+func findMount(start string) string {
+	d := start
+	for i := 0; i < 5; i++ {
+		if _, err := os.Stat(filepath.Join(d, "services.conf")); err == nil {
+			return d
+		}
+		nd := filepath.Dir(d)
+		if nd == d {
+			break
+		}
+		d = nd
+	}
+	return ""
 }
