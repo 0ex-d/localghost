@@ -117,8 +117,8 @@ object HealthSync {
             return days.getOrPut(d) { HashMap() }
         }
         val skipped = ArrayList<String>()
-        suspend fun <T : Any> tryRead(name: String, cls: kotlin.reflect.KClass<T>, use: suspend (List<T>) -> Unit)
-            where T : androidx.health.connect.client.records.Record {
+        suspend fun <T> tryRead(name: String, cls: kotlin.reflect.KClass<T>, use: suspend (List<T>) -> Unit)
+            where T : Any, T : androidx.health.connect.client.records.Record {
             try {
                 // PAGINATED , Health Connect returns ~1000 records a page; taking only page one
                 // silently dropped everything past it. Loop the token until the store runs dry.
@@ -290,8 +290,8 @@ object HealthSync {
         val start = end.minus(90, ChronoUnit.DAYS)
         val range = TimeRangeFilter.between(start, end)
         val out = ArrayList<String>()
-        suspend fun <T : Any> one(label: String, cls: kotlin.reflect.KClass<T>, stamp: (T) -> Instant)
-            where T : androidx.health.connect.client.records.Record {
+        suspend fun <T> one(label: String, cls: kotlin.reflect.KClass<T>, stamp: (T) -> Instant)
+            where T : Any, T : androidx.health.connect.client.records.Record {
             try {
                 var token: String? = null
                 var n = 0

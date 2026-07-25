@@ -17,12 +17,7 @@
 #   sudo ./tools/redeploy.sh --nginx-only # just re-render + reload nginx, no secd restart
 #   sudo ./tools/redeploy.sh --no-build   # skip make box (binaries already built)
 
-set -eu
-
-# STAGE TIMING , "it takes minutes and I have no idea why" is a measurement problem. Every stage
-# now prints its own duration, and the halt loop reports how long the cohort actually took to die.
-_t0=$(date +%s)
-_stage() { printf '=== %s  (+%ss)\n' "$1" "$(( $(date +%s) - _t0 ))"; }o pipefail
+set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 SVC_USER="${GHOST_USER:-coder}"
@@ -38,7 +33,10 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-say() { printf '\n=== %s ===\n' "$1"; }
+# STAGE TIMING , "it takes minutes and I have no idea why" is a measurement problem, so every
+# banner carries seconds-since-start. One helper, every stage, no new call sites.
+_t0=$(date +%s)
+say() { printf '\n=== %s ===  (+%ss)\n' "$1" "$(( $(date +%s) - _t0 ))"; }
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "run as root (sudo): it restarts a system service and writes $SYSTEM_BIN"

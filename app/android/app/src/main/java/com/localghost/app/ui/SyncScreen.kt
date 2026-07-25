@@ -275,9 +275,10 @@ private fun etaStr(seconds: Long): String = when {
 @Composable
 private fun grantLine(label: String, value: String, ok: Boolean, warn: Boolean,
                       rationale: String = "", onFix: (() -> Unit)? = null) {
-    val fixable = !ok && onFix != null
+    // Smart-cast the callback once instead of asserting it at the call site.
+    val fix = onFix
     Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)
-        .let { if (fixable) it.clickable { onFix!!() } else it }) {
+        .let { if (!ok && fix != null) it.clickable { fix() } else it }) {
         Row {
             Text(if (ok) "[+] " else if (warn) "[~] " else "[ ] ",
                 color = if (ok) TerminalGreen else if (warn) Warning else GhostTextDim,
@@ -286,7 +287,7 @@ private fun grantLine(label: String, value: String, ok: Boolean, warn: Boolean,
                 modifier = Modifier.weight(1f))
             Text(value, color = if (ok) TerminalGreen else if (warn) Warning else GhostTextDim,
                 style = MaterialTheme.typography.bodyMedium)
-            if (fixable) Text("  [ fix ]", color = TerminalGreen,
+            if (!ok && fix != null) Text("  [ fix ]", color = TerminalGreen,
                 style = MaterialTheme.typography.labelMedium)
         }
         if (rationale.isNotEmpty() && !ok) {

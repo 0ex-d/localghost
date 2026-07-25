@@ -997,8 +997,9 @@ object BoxClient {
      *  two invented devices with invented counts, which is exactly the kind of confident fiction
      *  the rest of the system refuses to print. */
     suspend fun devices(ctx: Context): List<DeviceInfo> {
-        val r = BoxHttp.getJson(ctx, "/v1/devices") ?: return emptyList()
-        val a = r.optJSONArray("devices") ?: return emptyList()
+        // getJson answers an EMPTY object when the box is unreachable (the appears-down shield),
+        // so there is nothing to elvis , an absent "devices" array is the same "nothing to show".
+        val a = BoxHttp.getJson(ctx, "/v1/devices").optJSONArray("devices") ?: return emptyList()
         return (0 until a.length()).mapNotNull { i ->
             val o = a.optJSONObject(i) ?: return@mapNotNull null
             val key = o.optString("device", "")
@@ -1050,7 +1051,9 @@ object BoxClient {
                             name = o.optString("name"),
                             detail = o.optString("detail"),
                             sizeBytes = o.optLong("sizeBytes"),
-                            sha256 = o.optString("sha256", null),
+                            // optString's fallback is typed String , "" IS the absent value here,
+                            // and the field is only ever compared, never parsed.
+                            sha256 = o.optString("sha256", ""),
                         )
                     )
                 }

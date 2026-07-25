@@ -293,6 +293,10 @@ private fun MessageBubble(msg: Message, selectable: Boolean = true) {
             }
             // Whole-message copy , selection handles fragments, this grabs the FULL raw text
             // (markdown markers included, so a copied reply pastes as valid markdown elsewhere).
+            // LocalClipboardManager is deprecated in favour of the suspend-based LocalClipboard;
+            // the replacement needs a coroutine per copy for no behavioural gain here, so the old
+            // one stays, deliberately and visibly, until the copy path is reworked.
+            @Suppress("DEPRECATION")
             val clipboard = LocalClipboardManager.current
             Text("[ copy ]", color = TerminalDim, style = MaterialTheme.typography.labelMedium,
                 modifier = Modifier
