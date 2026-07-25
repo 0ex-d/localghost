@@ -17,7 +17,12 @@
 #   sudo ./tools/redeploy.sh --nginx-only # just re-render + reload nginx, no secd restart
 #   sudo ./tools/redeploy.sh --no-build   # skip make box (binaries already built)
 
-set -euo pipefail
+set -eu
+
+# STAGE TIMING , "it takes minutes and I have no idea why" is a measurement problem. Every stage
+# now prints its own duration, and the halt loop reports how long the cohort actually took to die.
+_t0=$(date +%s)
+_stage() { printf '=== %s  (+%ss)\n' "$1" "$(( $(date +%s) - _t0 ))"; }o pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 SVC_USER="${GHOST_USER:-coder}"
@@ -128,10 +133,12 @@ if [ -n "${GHOST_PIN:-}" ] && systemctl is-active --quiet ghost.secd; then
     echo "graceful halt before the binary swap"
     "$REPO/bin/ghost-cli" --run-dir=/var/lib/ghost/run ghost.secd halt "pin=$GHOST_PIN" || true
     # halt replies ok unconditionally (PIN-opaque); confirm by watching the volume's services die.
+    _halt0=$(date +%s)
     for i in $(seq 1 30); do
         pgrep -f '/var/lib/ghost/mnt/.*/bin/' >/dev/null 2>&1 || break
         sleep 1
     done
+    echo "cohort down after $(( $(date +%s) - _halt0 ))s"
     if pgrep -f '/var/lib/ghost/mnt/.*/bin/' >/dev/null 2>&1; then
         echo "still stopping after 30s (wedged daemon getting SIGKILLed) , hard restart; interrupted work heals on next reprocess"
     else

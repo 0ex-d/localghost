@@ -135,6 +135,22 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
             // TWO STREAMS , photos and videos concurrently. Their cursors are separate by design,
             // the progress UI is per-kind already, and a second TCP stream is the cheap half of
             // "use the whole link" without touching the contiguity-safe per-kind pipeline.
+            // Volunteer the model once per install , Build.MODEL is a model string ("SM-S926B"),
+            // not a serial: the box identifies phones by CERTIFICATE, this is only so the devices
+            // screen can say something human.
+            runCatching {
+                val p = applicationContext.getSharedPreferences("lg_device", android.content.Context.MODE_PRIVATE)
+                if (!p.getBoolean("model_sent", false)) {
+                    // Model + STABLE ID: the box uses the stable id to recognise a reinstalled
+                    // phone, inherit its name and MIGRATE ITS CURSORS , which is why a debug
+                    // rebuild no longer re-offers the entire camera roll.
+                    val sid = com.localghost.app.net.BoxClient.stableId(applicationContext)
+                    if (com.localghost.app.net.BoxClient.setDeviceName(
+                            applicationContext, "", android.os.Build.MODEL ?: "", sid)) {
+                        p.edit().putBoolean("model_sent", true).apply()
+                    }
+                }
+            }
             if (!NetGuard.uploadsAllowed(applicationContext)) {
                 // Belt to the constraint's braces: WorkManager should not have started us on
                 // metered without the setting, but expedited paths and OEM quirks exist. A run

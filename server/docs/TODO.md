@@ -87,6 +87,77 @@ of DONE (reverse chronological); open items live in TO DO until they move.
 
 ## DONE
 
+- [x] **102. What can the box see** (2026-07-25): the operator has a Samsung WATCH and a Withings
+      scale syncing weight into Samsung Health , so the two-metric trickle is not a thin life,
+      and our reader is not the gap (weight, sleep, heart rate and exercise are all read, all
+      paginated). The remaining suspect is Samsung Health -> Health Connect sharing. Same
+      instrument that cracked the map: HealthSync.probe reports what HEALTH CONNECT itself holds
+      per type , record counts, date span, and the source package , surfaced by a [ what can the
+      box see? ] control on SYNC. "Samsung is not sharing sleep" stops being a theory and
+      becomes a line of text.
+
+- [x] **101. Provenance on every frame** (2026-07-25): the archive now records WHICH PHONE each
+      photo came from , secd folds the device key into the spool name as -d<hex> (same proven
+      path as the taken-time hint; secd still never parses content), framed reads it and stores
+      frames.device, added through the registry. Empty means unknown (pre-provenance rows, local
+      imports) , never guessed. This is the column that matters when photos eventually live ONLY
+      on the box: an archive that cannot say where a memory came from has lost half of it.
+      Devices screen gains a real per-device frame count.
+      SIGNING-KEY CAVEAT (operator asked, and the answer changes the design): every APK IS signed
+      , debug builds with the local debug keystore, store builds with the upload/app-signing key
+      , so ANDROID_ID is stable across debug rebuilds on one machine but CHANGES at debug ->
+      release, on key rotation, on a new dev machine, and on factory reset. The stable id is
+      therefore a best-effort convenience, not an identity: when it breaks, the box sees a new
+      phone. TO DO: manual MERGE on the devices screen (pick two rows, "same phone" , migrate
+      cursors, names and frames.device), which is the honest fallback for every case a signal
+      cannot cover.
+
+- [x] **100. Identity that survives a reinstall** (2026-07-25): the certificate proves POSSESSION
+      but dies with every debug rebuild , so device_names gains a stable_id: a hash of the
+      app-scoped Android ID (per signing key since Android 8, so it identifies the phone to THIS
+      APP ONLY and correlates nowhere else; hashed before it leaves the phone, the box stores a
+      digest). THE ADOPTION: a known stable id arriving on a new certificate means a reinstalled
+      phone , the box inherits its name, MIGRATES ITS SYNC CURSORS (furthest position per kind)
+      and retires the old row, so a rebuild resumes instead of re-offering 40k photos, and the
+      devices screen shows one phone rather than a graveyard of certificates. Stable-id claims
+      are only ever made for the CALLER; naming a sibling phone is allowed (same archive, so a
+      label is bookkeeping) but cannot carry an identity claim. Rename field on the devices
+      screen.
+
+- [x] **99. How a phone is named** (2026-07-25): identity is the CLIENT CERTIFICATE , nginx
+      verifies it in the mTLS handshake and passes it as X-Client-Cert; deviceKey is sha256 of
+      that, first 8 bytes. Never a serial/IMEI/Android ID: those are permission-gated, survive
+      factory resets, and correlate across apps , the tracking primitive this project refuses.
+      Tradeoff stated: reinstall = new keypair = new device (library re-offered, dedup absorbs
+      it). Added the human half , device_names table via the registry, POST /v1/devices/name
+      (a device can only name ITSELF, identity comes from its cert), the app volunteers
+      Build.MODEL once per install, and the devices screen shows name/model plus "id abc12345 ,
+      from its certificate, not a serial number".
+
+- [x] **98. Camera sanity + REAL devices** (2026-07-25): (a) the black map could not be zoomed
+      OUT of because a NaN centre poisons every draw AND every gesture , pinching changes zoom,
+      NaN plus anything is NaN. The camera itself is now checked each composition and on every
+      gesture; garbage snaps back to the world, and a [ reset view ] hatch sits by the status
+      line. (b) OVERCLAIMING FOUND AND KILLED: the connected-devices screen displayed two
+      INVENTED phones with invented counts ("this phone, just now, 8421 photos"). Now real ,
+      sync_cursors gains updated_at through the REGISTRY (convergence engine adds it at unlock),
+      CursorSet stamps it, GET /v1/devices reports per-device last-sync plus the photo and video
+      cursor positions (a cursor ts IS the taken_at of the newest item that device offered), and
+      the screen prints last sync, newest photo offered, newest video offered , per phone, with
+      this device marked.
+
+- [x] **97. Antarctica** (2026-07-25): the instrumented handler solved it in three log lines ,
+      world bbox returned points=12 (THE SERVER WAS ALWAYS FINE), then the app requested
+      minlat=-90 maxlat=-89.999 minlon=-180 maxlon=-179.999: a 0.001-degree box in the empty
+      South Atlantic. Cause: item 90's clamp mapped a NaN viewport to the LOW EDGE instead of
+      the world. Three fixes , (a) any non-finite or out-of-range bbox corner now means WHOLE
+      WORLD, not a corner; (b) the newest-photo opener fires ONCE and only on finite, in-range
+      coordinates , it was re-running on every cells change and stomping the world fallback
+      flat, which is why the screen went black and STAYED black; (c) the fallback resets the
+      fetched-margin bookkeeping so the escape check cannot suppress its own refetch. Plus
+      redeploy stage timing, as asked: every stage prints (+Ns) and the halt loop reports how
+      long the cohort took to die.
+
 - [x] **96. The orphan that ate an hour of captions** (2026-07-25): systemd's own words ,
       "left-over process llama-server in control group while starting unit" , decoded the
       21:42-22:52 context-deadline storm: an orphaned llama-server survived the restart holding

@@ -392,9 +392,10 @@ func (s *NotifStore) CursorSet(slot int, device, kind string, ts, id int64) erro
 	if err != nil {
 		return err
 	}
-	err = c.Exec(`INSERT INTO sync_cursors (device, kind, ts, id) VALUES ($1,$2,$3,$4)
+	err = c.Exec(`INSERT INTO sync_cursors (device, kind, ts, id, updated_at) VALUES ($1,$2,$3,$4,extract(epoch from now())::bigint)
 		ON CONFLICT (device, kind) DO UPDATE SET ts = GREATEST(sync_cursors.ts, EXCLUDED.ts),
-		id = CASE WHEN EXCLUDED.ts >= sync_cursors.ts THEN EXCLUDED.id ELSE sync_cursors.id END`,
+		id = CASE WHEN EXCLUDED.ts >= sync_cursors.ts THEN EXCLUDED.id ELSE sync_cursors.id END,
+		updated_at = EXCLUDED.updated_at`,
 		device, kind, strconv.FormatInt(ts, 10), strconv.FormatInt(id, 10))
 	if err != nil {
 		return err
@@ -1678,4 +1679,119 @@ func (s *NotifStore) ResetSyncCursors(slot int, device string) error {
 		return err
 	}
 	return c.Exec("DELETE FROM sync_cursors WHERE device = $1", device)
+}
+
+// DeviceRow , what the box honestly knows about one enrolled phone: which device key, when it
+// last reported sync progress, and how far its photo and video cursors have walked (the cursor
+// ts IS the taken_at of the newest item that device has offered, so it answers "last picture"
+// and "last video" exactly).
+type DeviceRow struct {
+	Device    string `json:"device"`
+	Frames    int64  `json:"frames"`
+	Name      string `json:"name"`
+	Model     string `json:"model"`
+	FirstSeen int64  `json:"firstSeen"`
+	UpdatedAt int64  `json:"updatedAt"`
+	PhotoTS   int64  `json:"photoTs"`
+	VideoTS   int64  `json:"videoTs"`
+	This      bool   `json:"thisDevice"`
+}
+
+// DevicesInfo returns one row per device that has ever reported a cursor.
+func (s *NotifStore) DevicesInfo(slot int) ([]DeviceRow, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := c.Query(`
+		SELECT c.device,
+		       max(c.updated_at),
+		       coalesce(max(c.ts) FILTER (WHERE c.kind = 'photo'), 0),
+		       coalesce(max(c.ts) FILTER (WHERE c.kind = 'video'), 0),
+		       coalesce(min(n.name), ''), coalesce(min(n.model), ''), coalesce(min(n.first_seen), 0),
+		       coalesce((SELECT count(*) FROM frames f WHERE f.device = c.device), 0)
+		FROM sync_cursors c LEFT JOIN device_names n ON n.device = c.device
+		GROUP BY c.device ORDER BY max(c.updated_at) DESC`)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]DeviceRow, 0, len(rows.Vals))
+	for _, v := range rows.Vals {
+		if len(v) < 4 || v[0] == nil {
+			continue
+		}
+		var d DeviceRow
+		d.Device = *v[0]
+		if v[1] != nil {
+			d.UpdatedAt, _ = strconv.ParseInt(*v[1], 10, 64)
+		}
+		if v[2] != nil {
+			d.PhotoTS, _ = strconv.ParseInt(*v[2], 10, 64)
+		}
+		if v[3] != nil {
+			d.VideoTS, _ = strconv.ParseInt(*v[3], 10, 64)
+		}
+		if len(v) > 4 && v[4] != nil {
+			d.Name = *v[4]
+		}
+		if len(v) > 5 && v[5] != nil {
+			d.Model = *v[5]
+		}
+		if len(v) > 6 && v[6] != nil {
+			d.FirstSeen, _ = strconv.ParseInt(*v[6], 10, 64)
+		}
+		if len(v) > 7 && v[7] != nil {
+			d.Frames, _ = strconv.ParseInt(*v[7], 10, 64)
+		}
+		out = append(out, d)
+	}
+	return out, nil
+}
+
+// DeviceNameSet records what a phone calls itself (model), what the person calls it (name), and
+// its stable id. THE ADOPTION: when a stable id arrives on a NEW certificate, the phone has been
+// reinstalled , the box recognises it, inherits the old name, MIGRATES ITS SYNC CURSORS (taking
+// the furthest position of each kind) and retires the old row. A reinstall therefore resumes
+// where it left off instead of re-offering the whole library, and the devices screen shows one
+// phone rather than a graveyard of certificates.
+//
+// Trust note: a stable-id claim can only be made by an already-enrolled device (valid client
+// cert, issued through the paired-QR + PIN flow), and every enrolled device already sees the
+// same archive , so the claim moves cursor bookkeeping, never access.
+func (s *NotifStore) DeviceNameSet(slot int, device, name, model, stableID string) error {
+	c, err := s.pg(slot)
+	if err != nil {
+		return err
+	}
+	if stableID != "" {
+		rows, qerr := c.Query(
+			"SELECT device, name FROM device_names WHERE stable_id = $1 AND device <> $2 LIMIT 1", stableID, device)
+		if qerr == nil && len(rows.Vals) == 1 && rows.Vals[0][0] != nil {
+			old := *rows.Vals[0][0]
+			if name == "" && rows.Vals[0][1] != nil {
+				name = *rows.Vals[0][1]
+			}
+			if err := c.Exec(`INSERT INTO sync_cursors (device, kind, ts, id, updated_at)
+				SELECT $1, kind, ts, id, updated_at FROM sync_cursors WHERE device = $2
+				ON CONFLICT (device, kind) DO UPDATE SET
+					ts = GREATEST(sync_cursors.ts, EXCLUDED.ts),
+					id = CASE WHEN EXCLUDED.ts >= sync_cursors.ts THEN EXCLUDED.id ELSE sync_cursors.id END`,
+				device, old); err != nil {
+				return err
+			}
+			if err := c.Exec("DELETE FROM sync_cursors WHERE device = $1", old); err != nil {
+				return err
+			}
+			if err := c.Exec("DELETE FROM device_names WHERE device = $1", old); err != nil {
+				return err
+			}
+		}
+	}
+	return c.Exec(`INSERT INTO device_names (device, name, model, first_seen, stable_id)
+		VALUES ($1,$2,$3,extract(epoch from now())::bigint,$4)
+		ON CONFLICT (device) DO UPDATE SET
+			name = CASE WHEN EXCLUDED.name <> '' THEN EXCLUDED.name ELSE device_names.name END,
+			model = CASE WHEN EXCLUDED.model <> '' THEN EXCLUDED.model ELSE device_names.model END,
+			stable_id = CASE WHEN EXCLUDED.stable_id <> '' THEN EXCLUDED.stable_id ELSE device_names.stable_id END`,
+		device, name, model, stableID)
 }

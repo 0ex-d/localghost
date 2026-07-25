@@ -312,7 +312,8 @@ func (p *Pipeline) processOne(path string) (string, error) {
 		place = p.resolvePlace(meta.Lat, meta.Lon).String()
 	}
 	f := Frame{
-		Hash: hash, TakenAt: taken.UTC().Unix(), Place: place,
+		Device: deviceFromName(path),
+		Hash:   hash, TakenAt: taken.UTC().Unix(), Place: place,
 		Lat: meta.Lat, Lon: meta.Lon, HasGPS: meta.HasGPS,
 		ArchivePath: archPath, PreviewPath: prevPath, ThumbPath: thumbPath,
 		Bytes: fileBytes, Source: "phone", ReceivedAt: time.Now().UTC().Unix(),
@@ -533,6 +534,26 @@ func extFor(format, orig string) string {
 		}
 		return ".bin"
 	}
+}
+
+// deviceFromName extracts the -d<hex> suffix secd appends: which phone uploaded this. Empty when
+// absent (older spools, local imports) , unknown provenance is recorded as unknown, never guessed.
+func deviceFromName(path string) string {
+	base := filepath.Base(path)
+	i := strings.LastIndex(base, "-d")
+	if i < 0 || i+2 >= len(base) {
+		return ""
+	}
+	d := base[i+2:]
+	if j := strings.Index(d, "-"); j >= 0 {
+		d = d[:j]
+	}
+	for _, ch := range d {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+			return ""
+		}
+	}
+	return d
 }
 
 // takenHintFromName extracts the -t<epochMillis> suffix secd appends to spool names when the phone

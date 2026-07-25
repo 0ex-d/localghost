@@ -125,9 +125,18 @@ fun MapScreen() {
     var worldFallback by remember { mutableStateOf(false) }
     // OPENS ON THE NEWEST PHOTO, close in , the map answers "where was I last" before it answers
     // "where have I ever been". Pan/pinch out from there; the whole archive is one gesture away.
+    var openerDone by remember { mutableStateOf(false) }
     LaunchedEffect(newest, cells) {
         val nw = newest
-        if (nw != null) {
+        // ONCE, and only on real coordinates. Keyed on cells too (the skew fallback needs them),
+        // but the newest-photo zoom fires a single time , it was re-running on every cells
+        // change and stomping the world fallback flat, which is why the screen went black and
+        // STAYED black. A non-finite or out-of-range coordinate is not a place: ignore it and
+        // let the world view stand.
+        if (nw != null && !openerDone &&
+            nw.lat.isFinite() && nw.lon.isFinite() &&
+            nw.lat > -90.0 && nw.lat < 90.0 && nw.lon >= -180.0 && nw.lon <= 180.0) {
+            openerDone = true
             cx = mercX(nw.lon); cy = mercY(nw.lat)
             zoom = 6000f
         } else if (cells.isNotEmpty() && zoom <= 1f) {
@@ -179,11 +188,19 @@ fun MapScreen() {
         // which poisoned the whole request chain ("no photos anywhere").
         val mLat = (vLatMax - vLatMin) / 2.0
         val mLon = (vLonMax - vLonMin) / 2.0
-        fun cl(v: Double, lo: Double, hi: Double) = if (v.isNaN()) lo else v.coerceIn(lo, hi)
+        // GARBAGE IN -> THE WORLD, NOT ANTARCTICA. The box's own log caught this: a NaN viewport
+        // came out of my clamp as minlat=-90 maxlat=-89.999 minlon=-180 maxlon=-179.999 , a
+        // 0.001-degree box in the empty South Atlantic, which of course held no photos. When any
+        // corner of the computed bbox is not a finite, in-range number, the honest request is
+        // the WHOLE WORLD: the server answers it in one query and the person sees their life
+        // instead of a black rectangle.
+        var q0 = vLatMin - mLat; var q1 = vLatMax + mLat
+        var q2 = vLonMin - mLon; var q3 = vLonMax + mLon
+        val sane = q0.isFinite() && q1.isFinite() && q2.isFinite() && q3.isFinite() &&
+            q0 >= -90.0 && q1 <= 90.0 && q2 >= -180.0 && q3 <= 180.0 && q0 < q1 && q2 < q3
+        if (!sane) { q0 = -90.0; q1 = 90.0; q2 = -180.0; q3 = 180.0 }
         level = lvl
-        val lod = BoxClient.framesGeoLod(ctx, lvl,
-            cl(vLatMin - mLat, -90.0, 90.0), cl(vLatMax + mLat, -90.0, 90.0).coerceAtLeast(cl(vLatMin - mLat, -90.0, 90.0) + 0.001),
-            cl(vLonMin - mLon, -180.0, 180.0), cl(vLonMax + mLon, -180.0, 180.0).coerceAtLeast(cl(vLonMin - mLon, -180.0, 180.0) + 0.001))
+        val lod = BoxClient.framesGeoLod(ctx, lvl, q0, q1, q2, q3)
         if (lod != null) {
             fetchedLatMin = vLatMin - mLat; fetchedLatMax = vLatMax + mLat
             fetchedLonMin = vLonMin - mLon; fetchedLonMax = vLonMax + mLon
@@ -209,6 +226,7 @@ fun MapScreen() {
         // has your dots; showing it beats explaining an empty rectangle.
         if (cells.isEmpty() && zoom > 4f && !worldFallback) {
             worldFallback = true
+            fetchedSpan = 0.0 // force the next pass to actually fetch
             cx = WORLD / 2f; cy = WORLD / 2f; zoom = 1f
             return@LaunchedEffect // the state change re-runs this effect against the world bbox
         }
@@ -220,12 +238,27 @@ fun MapScreen() {
     Column(Modifier.fillMaxSize()) {
         Text("> MAP", color = TerminalGreen, style = MaterialTheme.typography.titleMedium,
             modifier = Modifier.padding(16.dp))
+        Text("[ reset view ]", color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier.clickable {
+                // The hatch , whatever the camera got into, one tap is the whole world again.
+                cx = WORLD / 2f; cy = WORLD / 2f; zoom = 1f; worldFallback = false
+            }.padding(vertical = 4.dp))
         Text(loadNote, color = GhostTextDim, style = MaterialTheme.typography.labelMedium,
             modifier = Modifier.padding(horizontal = 16.dp))
         Box(Modifier.weight(1f).fillMaxWidth().padding(12.dp).background(Void)) {
+            // CAMERA SANITY , a NaN centre poisons every draw AND every gesture: pinching changes
+            // zoom, but NaN plus anything is NaN, so the screen stays black forever with no way
+            // out. Checked on each composition; garbage snaps back to the world.
+            if (!cx.isFinite() || !cy.isFinite() || !zoom.isFinite() || zoom <= 0f) {
+                cx = WORLD / 2f; cy = WORLD / 2f; zoom = 1f; worldFallback = false
+            }
             Canvas(Modifier.fillMaxSize()
                 .pointerInput(Unit) {
                     detectTransformGestures { centroid, pan, gz, _ ->
+                        // Never let a gesture write a non-finite camera.
+                        if (!cx.isFinite() || !cy.isFinite() || !zoom.isFinite()) {
+                            cx = WORLD / 2f; cy = WORLD / 2f; zoom = 1f
+                        }
                         // zoom about the finger centroid, then pan , standard camera algebra
                         val newZoom = (zoom * gz).coerceIn(0.8f, 250000f)
                         val sw = size.width.toFloat(); val sh = size.height.toFloat()

@@ -56,7 +56,8 @@ object HealthSync {
         granted.containsAll(PERMISSIONS)
     } catch (_: Exception) { false }
 
-    data class SyncResult(val days: Int, val skipped: List<String>, val error: String? = null)
+    data class SyncResult(val days: Int, val skipped: List<String>, val error: String? = null,
+                          val calOnlyDays: Int = 0)
 
     /** FULL HISTORY , walks back month by month from now, syncing each window, until `emptyStop`
      *  consecutive empty months say the record ends (capped 20 years , if your watch predates
@@ -77,14 +78,23 @@ object HealthSync {
             val r = sync(ctx, Instant.ofEpochMilli(start), Instant.ofEpochMilli(end))
             allSkipped.addAll(r.skipped)
             if (r.error != null && shipped == 0 && months == 0) return SyncResult(0, r.skipped, r.error)
+            calOnlyTotal += r.calOnlyDays
             if (r.days == 0) empties++ else { empties = 0; shipped += r.days }
             months++
             onProgress("$shipped day(s) shipped · ${months} month(s) walked")
         }
-        if (months >= 7 && shipped in 1..35) {
-            // The signature of the history gate: one month of data, then six empty months. Say so
-            // instead of letting it look like the record simply ends.
-            allSkipped.add("older history locked , tap CONNECT HEALTH again and allow access to past data")
+        if (months >= 7 && shipped in 0..35) {
+            // TWO different walls, now told apart by evidence. If the filter ate calories-only
+            // days, the permission is fine , Health Connect's past holds ONLY Samsung's
+            // synthesized BMR line, meaning the real measurements never left Samsung Health.
+            // Only when nothing at all came back is the permission the suspect.
+            if (calOnlyTotal > 30) {
+                allSkipped.add("$calOnlyTotal past day(s) held only synthesized calories , " +
+                    "check Samsung Health > Settings > Health Connect: enable sharing for steps/" +
+                    "sleep/heart; real history may live only inside Samsung Health")
+            } else {
+                allSkipped.add("older history locked , tap CONNECT HEALTH again and allow access to past data")
+            }
         }
         return SyncResult(shipped, allSkipped.toList())
     }
@@ -250,11 +260,12 @@ object HealthSync {
         // marched the full-history walk to its 20-year cap. Rule: calories only count on days
         // where something was actually MEASURED (any other metric present); a day whose only
         // content is the provider's guess about your resting metabolism is an empty day.
+        val calOnly = days.entries.count { (_, m) -> m.keys.all { it == "calories" } }
         days.entries.removeAll { (_, m) -> m.keys.all { it == "calories" } }
         when {
             days.isEmpty() && hrSamples.isEmpty() ->
                 SyncResult(0, skipped, if (skipped.size >= 8) "every record type failed , re-check permissions" else null)
-            BoxClient.healthUpload(ctx, days, hrSamples) -> SyncResult(days.size, skipped)
+            BoxClient.healthUpload(ctx, days, hrSamples) -> SyncResult(days.size, skipped, calOnlyDays = calOnly)
             else -> SyncResult(0, skipped, "box unreachable , is it unlocked?")
         }
     } catch (e: Exception) {
@@ -262,3 +273,61 @@ object HealthSync {
         SyncResult(0, emptyList(), e.message ?: "health sync failed")
     }
 }
+
+    /**
+     * THE PROBE , what Health Connect ACTUALLY holds, per type, and which app put it there.
+     * Written after a watch-and-smart-scale owner saw two metrics land: when the reader is known
+     * good, the next honest question is whether the data is even THERE, and the only witness is
+     * Health Connect itself. Reports records seen in the last 90 days, the date span, and the
+     * source packages , so "Samsung is not sharing sleep" stops being a theory and becomes a
+     * line of text. Bounded: 3 pages per type, enough to prove presence without a long walk.
+     */
+    suspend fun probe(ctx: Context): List<String> {
+        val client = try { HealthConnectClient.getOrCreate(ctx) }
+                     catch (e: Exception) { return listOf("Health Connect unavailable (${e.message?.take(40)})") }
+        val end = Instant.now()
+        val start = end.minus(90, ChronoUnit.DAYS)
+        val range = TimeRangeFilter.between(start, end)
+        val out = ArrayList<String>()
+        suspend fun <T : Any> one(label: String, cls: kotlin.reflect.KClass<T>, stamp: (T) -> Instant)
+            where T : androidx.health.connect.client.records.Record {
+            try {
+                var token: String? = null
+                var n = 0
+                var pages = 0
+                var oldest: Instant? = null
+                var newest: Instant? = null
+                val apps = LinkedHashSet<String>()
+                do {
+                    val resp = client.readRecords(
+                        if (token == null) ReadRecordsRequest(cls, range)
+                        else ReadRecordsRequest(cls, range, pageToken = token))
+                    resp.records.forEach { r ->
+                        n++
+                        val t = stamp(r)
+                        if (oldest == null || t.isBefore(oldest)) oldest = t
+                        if (newest == null || t.isAfter(newest)) newest = t
+                        val pkg = r.metadata.dataOrigin.packageName
+                        if (pkg.isNotEmpty()) apps.add(pkg.substringAfterLast('.'))
+                    }
+                    token = resp.pageToken
+                    pages++
+                } while (!token.isNullOrEmpty() && pages < 3)
+                val span = if (oldest != null && newest != null)
+                    " " + oldest.toString().take(10) + ".." + newest.toString().take(10) else ""
+                val who = if (apps.isEmpty()) "" else " from " + apps.joinToString("/")
+                out.add(if (n == 0) "$label: nothing in Health Connect"
+                        else "$label: $n${if (pages >= 3) "+" else ""} record(s)$span$who")
+            } catch (e: Exception) {
+                out.add("$label: not readable (${e.message?.take(40)})")
+            }
+        }
+        one("steps", StepsRecord::class) { it.startTime }
+        one("heart rate", HeartRateRecord::class) { it.startTime }
+        one("sleep", SleepSessionRecord::class) { it.startTime }
+        one("weight", WeightRecord::class) { it.time }
+        one("exercise", ExerciseSessionRecord::class) { it.startTime }
+        one("calories", TotalCaloriesBurnedRecord::class) { it.startTime }
+        one("distance", DistanceRecord::class) { it.startTime }
+        return out
+    }

@@ -558,6 +558,13 @@ func spoolBody(dir string, r *http.Request, maxBytes int64, uid, gid int) (int64
 			name += "-t" + taken
 		}
 	}
+	// PROVENANCE , which phone sent this. Folded in as -d<hex> the same way the taken hint is:
+	// secd still never parses content, framed reads the suffix and stores it on the frame. This
+	// matters more every month: the plan is for photos to leave the phones entirely, and an
+	// archive that cannot say WHERE a memory came from has already lost half of it.
+	if dev := deviceKeyFromRequest(r); dev != "" {
+		name += "-d" + dev
+	}
 	part := filepath.Join(dir, name+".part")
 	f, err := os.OpenFile(part, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o640)
 	if err != nil {
@@ -1006,4 +1013,95 @@ func (s *Server) handleSyncReset(w http.ResponseWriter, r *http.Request) {
 	secdLog.Info("sync cursors reset", "fn", "handleSyncReset", "device", device)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"reset": true})
+}
+
+// handleDevices , GET /v1/devices , the enrolled phones and what each has actually done. Replaces
+// a screen that displayed INVENTED devices with counts nobody measured: the cursor rows are the
+// only honest source, and they answer last-sync, last-photo and last-video exactly.
+func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	rows, err := s.notif.DevicesInfo(mounted)
+	if err != nil {
+		secdLog.Warn("devices failed", "fn", "handleDevices", "err", err)
+		s.appearsDown(w)
+		return
+	}
+	me := deviceKey(r)
+	for i := range rows {
+		rows[i].This = rows[i].Device == me
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"devices": rows})
+}
+
+// handleDeviceName , POST /v1/devices/name {"name":"...","model":"..."} , the calling device
+// names ITSELF (identity comes from its certificate, so no device can rename another).
+func (s *Server) handleDeviceName(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodPost {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	var req struct {
+		Name     string `json:"name"`
+		Model    string `json:"model"`
+		StableID string `json:"stableId"`
+		Device   string `json:"device"` // optional: name ANOTHER enrolled phone (same archive)
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
+		s.appearsDown(w)
+		return
+	}
+	if len(req.Name) > 40 {
+		req.Name = req.Name[:40]
+	}
+	if len(req.Model) > 40 {
+		req.Model = req.Model[:40]
+	}
+	target := deviceKey(r)
+	if req.Device != "" {
+		// Naming a sibling phone is allowed , every enrolled device already shares this archive,
+		// so a friendly label is bookkeeping, not privilege. The STABLE ID, though, is only ever
+		// claimed for the caller: identity adoption stays tied to the certificate presenting it.
+		target = req.Device
+		req.StableID = ""
+	}
+	if err := s.notif.DeviceNameSet(mounted, target, req.Name, req.Model, req.StableID); err != nil {
+		secdLog.Warn("device name failed", "fn", "handleDeviceName", "err", err)
+		s.appearsDown(w)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+}
+
+// deviceKeyFromRequest , the calling phone's stable key, hex only (a spool name must never be
+// able to carry a path separator or anything else surprising).
+func deviceKeyFromRequest(r *http.Request) string {
+	k := deviceKey(r)
+	for _, ch := range k {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+			return ""
+		}
+	}
+	if len(k) > 32 {
+		return ""
+	}
+	return k
 }

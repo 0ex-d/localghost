@@ -130,7 +130,32 @@ fun SyncScreen(
                 if (granted) {
                     Spacer(Modifier.height(8.dp))
                     GhostButton("SYNC FULL HISTORY (EVERYTHING)", onClick = {
-                        scope.launch {
+
+        Spacer(Modifier.height(8.dp))
+        run {
+            // WHAT CAN THE BOX SEE , the probe. When the reader is known good and only two
+            // metrics arrive, the next honest question is whether Health Connect holds anything
+            // at all, and only Health Connect can answer. Lists each type with counts, date span and
+            // the app that supplied it.
+            val pctx = androidx.compose.ui.platform.LocalContext.current
+            val pscope = rememberCoroutineScope()
+            var lines by remember { mutableStateOf<List<String>>(emptyList()) }
+            var busy by remember { mutableStateOf(false) }
+            Text(if (busy) "[ reading Health Connect… ]" else "[ what can the box see? ]",
+                color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.clickable {
+                    if (!busy) {
+                        busy = true
+                        pscope.launch {
+                            lines = com.localghost.app.sync.HealthSync.probe(pctx)
+                            busy = false
+                        }
+                    }
+                }.padding(vertical = 6.dp))
+            lines.forEach { l ->
+                Text("  $l", color = TerminalDim, style = MaterialTheme.typography.labelMedium)
+            }
+        }                        scope.launch {
                             healthMsg = "walking your history month by month…"
                             val res = com.localghost.app.sync.HealthSync.syncAll(hctx) { p -> healthMsg = p }
                             val skip = if (res.skipped.isEmpty()) "" else

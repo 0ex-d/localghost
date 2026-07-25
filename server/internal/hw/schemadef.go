@@ -72,6 +72,11 @@ var schemaRegistry = []SchemaTable{
 		"CREATE INDEX IF NOT EXISTS notifications_id_desc ON notifications (id DESC)",
 	}},
 	{Name: "frames", PK: "hash", Cols: []SchemaCol{
+		// PROVENANCE , which phone this arrived from (device key = sha256 of its client cert).
+		// Empty means unknown: pre-provenance rows and local imports, never a guess. When photos
+		// eventually live ONLY on the box, this column is how an archive still knows whose life
+		// each frame came from.
+		{"device", "TEXT", true, "''"},
 		{"hash", "TEXT", true, ""},
 		{"taken_at", "BIGINT", true, "0"},
 		{"lat", "DOUBLE PRECISION", true, "0"},
@@ -114,11 +119,30 @@ var schemaRegistry = []SchemaTable{
 		{"code", "TEXT", true, ""},
 		{"name", "TEXT", true, ""},
 	}},
+	// A phone is identified by its CLIENT CERTIFICATE (deviceKey = sha256 of the cert nginx
+	// verified, first 8 bytes), never by a serial or IMEI: hardware IDs are permission-gated,
+	// survive factory resets, and correlate across apps , the tracking primitive this project
+	// refuses. This table adds the human half: a name the person chose and the model string the
+	// phone volunteered, so the devices screen says "wife's S24" instead of "phone a3f9c2".
+	{Name: "device_names", PK: "device", Cols: []SchemaCol{
+		{"device", "TEXT", true, ""},
+		{"name", "TEXT", true, "''"},
+		{"model", "TEXT", true, "''"},
+		{"first_seen", "BIGINT", true, "0"},
+		// The CONTINUITY key: a hash of the phone's app-scoped Android ID, which survives an
+		// uninstall/reinstall (and every debug rebuild) while a certificate does not. Not a
+		// serial: since Android 8 this value is per app-signing-key, so it cannot correlate the
+		// person across apps , it only answers "is this the same phone that was here before".
+		{"stable_id", "TEXT", true, "''"},
+	}},
 	{Name: "sync_cursors", PK: "device, kind", Cols: []SchemaCol{
 		{"device", "TEXT", true, ""},
 		{"kind", "TEXT", true, ""},
 		{"ts", "BIGINT", true, "0"},
 		{"id", "BIGINT", true, "0"},
+		// When this device last reported progress , the honest "last sync" for the devices
+		// screen, which until now displayed invented numbers.
+		{"updated_at", "BIGINT", true, "0"},
 	}},
 	{Name: "chats", PK: "id", Cols: []SchemaCol{
 		{"id", "BIGSERIAL", true, ""},

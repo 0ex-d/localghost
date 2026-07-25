@@ -966,12 +966,55 @@ object BoxClient {
      */
     // --- devices (per-device sync state, deduped index) ---
 
-    suspend fun devices(@Suppress("UNUSED_PARAMETER") ctx: Context): List<DeviceInfo> {
-        delay(150)
-        return listOf(
-            DeviceInfo("d1", "this phone", true, "just now", 8421, 142),
-            DeviceInfo("d2", "old pixel", false, "3 days ago", 5102, 88),
-        )
+    /** Tell the box what this phone is , model is volunteered (Build.MODEL, a model string, not
+     *  a serial or any hardware identifier), name is the person's choice. */
+    suspend fun setDeviceName(ctx: Context, name: String, model: String,
+                              stableId: String = "", device: String = ""): Boolean = try {
+        val body = org.json.JSONObject().put("name", name).put("model", model)
+        if (stableId.isNotEmpty()) body.put("stableId", stableId)
+        if (device.isNotEmpty()) body.put("device", device)
+        BoxHttp.postJson(ctx, "/v1/devices/name", body).optBoolean("ok", false)
+    } catch (_: Exception) { false }
+
+    /** The continuity key , a hash of the app-scoped Android ID. It survives uninstall,
+     *  reinstall and every debug rebuild (same signing key), where a client certificate does
+     *  not; and because Android scopes this value per signing key, it identifies the phone TO
+     *  THIS APP ONLY and cannot correlate the person anywhere else. Hashed before it leaves the
+     *  phone: the box stores a digest, never the platform value. */
+    @android.annotation.SuppressLint("HardwareIds")
+    fun stableId(ctx: Context): String = try {
+        val raw = android.provider.Settings.Secure.getString(
+            ctx.contentResolver, android.provider.Settings.Secure.ANDROID_ID) ?: ""
+        if (raw.isEmpty()) "" else java.security.MessageDigest.getInstance("SHA-256")
+            .digest(("localghost:" + raw).toByteArray())
+            .joinToString("") { "%02x".format(it) }.take(32)
+    } catch (_: Exception) { "" }
+
+    /** The enrolled phones, from the box's cursor rows , REAL now: this screen used to display
+     *  two invented devices with invented counts, which is exactly the kind of confident fiction
+     *  the rest of the system refuses to print. */
+    suspend fun devices(ctx: Context): List<DeviceInfo> {
+        val r = BoxHttp.getJson(ctx, "/v1/devices") ?: return emptyList()
+        val a = r.optJSONArray("devices") ?: return emptyList()
+        return (0 until a.length()).mapNotNull { i ->
+            val o = a.optJSONObject(i) ?: return@mapNotNull null
+            val key = o.optString("device", "")
+            DeviceInfo(
+                id = key,
+                name = o.optString("name", "").ifEmpty {
+                    o.optString("model", "").ifEmpty {
+                        if (o.optBoolean("thisDevice")) "this phone" else "phone " + key.take(6)
+                    }
+                },
+                thisDevice = o.optBoolean("thisDevice"),
+                lastSync = "",
+                photos = 0, videos = 0,
+                lastSyncTs = o.optLong("updatedAt"),
+                lastPhotoTs = o.optLong("photoTs"),
+                lastVideoTs = o.optLong("videoTs"),
+                model = o.optString("model", ""),
+            )
+        }
     }
 
     // --- settings (box-owned, persona-scoped; phone caches for offline) ---
