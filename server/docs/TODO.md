@@ -87,6 +87,24 @@ of DONE (reverse chronological); open items live in TO DO until they move.
 
 ## DONE
 
+- [x] **96. The orphan that ate an hour of captions** (2026-07-25): systemd's own words ,
+      "left-over process llama-server in control group while starting unit" , decoded the
+      21:42-22:52 context-deadline storm: an orphaned llama-server survived the restart holding
+      port 18080 and ~9GB VRAM, so the new oracled's child could not bind and every inference
+      timed out. Cause: a SIGKILLed parent cannot clean up after itself (and item 91's 5s grace
+      makes that path more likely). Fix: Pdeathsig SIGKILL on both llama children (oracled's
+      caption model, searchd's embedder) , the kernel reaps them the instant their parent dies.
+      Operator note: a stuck child in D-state (CUDA call) can still outlive a SIGKILL briefly;
+      if a caption storm recurs, check `pgrep -af llama-server` for a process older than oracled.
+
+- [x] **95. The namespace blind spot** (2026-07-25): item 92's locked-volume check tested a PATH
+      , but the volume lives in a MOUNT NAMESPACE, so root's default view never sees it and the
+      check said "locked" on a live box, skipping the graceful halt every time. Processes cross
+      the namespace boundary where mounts do not: the cohort-running pgrep (already trusted
+      later in the same script) is the honest signal. Ledger entry: asking the wrong filesystem
+      view is its own bug class , tools/ns.sh exists precisely because /var/lib/ghost/mnt is a
+      different place depending on who looks.
+
 - [x] **94. Instrument the silence** (2026-07-25): four rounds of map debugging died because a
       SUCCESSFUL handler logs nothing , "request never arrived" and "request answered empty"
       look identical from outside. handleFramesGeoLOD now logs bbox + point count at INFO every

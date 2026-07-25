@@ -109,7 +109,12 @@ say "4/4  restart ghost.secd"
 # LOCKED-VOLUME SHORT-CIRCUIT , when no mount exists there is nothing to halt: no cohort, no
 # postgres, no PIN worth typing, and every wait below would be a wait for things that do not
 # exist. Detect once, skip the whole ceremony, say so.
-if ! ls -d /var/lib/ghost/mnt/slot*/run >/dev/null 2>&1; then
+# NAMESPACE LESSON , the volume is mounted inside a MOUNT NAMESPACE, so from root's default
+# view /var/lib/ghost/mnt/slot0 is empty whether the box is locked or not (this is why every
+# psql call in this repo goes through tools/ns.sh). A path test therefore always said "locked"
+# and skipped the graceful halt on a live box. Processes DO cross the boundary , the cohort
+# running is the honest signal, and the script already trusts it below.
+if ! pgrep -f '/var/lib/ghost/mnt/.*/bin/' >/dev/null 2>&1; then
     GHOST_PIN=""
     VOLUME_LOCKED=1
     echo "volume locked , nothing to halt, skipping straight to the binary swap"
