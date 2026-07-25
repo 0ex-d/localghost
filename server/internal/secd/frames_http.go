@@ -891,13 +891,19 @@ func (s *Server) handleFramesGeoLOD(w http.ResponseWriter, r *http.Request) {
 	if level < 0 || level > 3 {
 		level = 0
 	}
-	pts, err := s.notif.FramesGeoLOD(mounted, level,
-		pf("minlat", -90), pf("maxlat", 90), pf("minlon", -180), pf("maxlon", 180), 0)
+	minLat, maxLat := pf("minlat", -90), pf("maxlat", 90)
+	minLon, maxLon := pf("minlon", -180), pf("maxlon", 180)
+	pts, err := s.notif.FramesGeoLOD(mounted, level, minLat, maxLat, minLon, maxLon, 0)
 	if err != nil {
 		secdLog.Warn("geo lod failed", "fn", "handleFramesGeoLOD", "err", err)
 		s.appearsDown(w)
 		return
 	}
+	// INSTRUMENTED , four rounds of map debugging died on silence: a successful handler logged
+	// nothing, so "request never arrived" and "request answered empty" looked identical from
+	// the outside. Now one map-open tells the whole story in one line.
+	secdLog.Info("geo lod", "fn", "handleFramesGeoLOD", "level", level,
+		"minlat", minLat, "maxlat", maxLat, "minlon", minLon, "maxlon", maxLon, "points", len(pts))
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"level": level, "points": pts})
 }

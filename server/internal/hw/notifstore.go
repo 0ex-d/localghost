@@ -1396,13 +1396,18 @@ func (s *NotifStore) FramesGeoLOD(slot, level int, minLat, maxLat, minLon, maxLo
 		}
 		return out, nil
 	}
+	// prec goes in as a FORMATTED LITERAL, not a bind param: it is a server-computed value from
+	// a fixed ladder (no user input, no injection surface), and a float parameter inside a
+	// GROUP BY expression is exactly the kind of thing a driver can send untyped and postgres
+	// can refuse. One less way for this query to fail silently.
+	precLit := strconv.FormatFloat(prec, 'f', -1, 64)
 	rows, err := c.Query(`
 		SELECT avg(lat), avg(lon), count(*), min(hash), max(taken_at)
 		FROM frames
 		WHERE has_gps AND lat BETWEEN $1 AND $2 AND lon BETWEEN $3 AND $4
-		GROUP BY floor(lat/$5), floor(lon/$5)
+		GROUP BY floor(lat/`+precLit+`), floor(lon/`+precLit+`)
 		ORDER BY count(*) DESC LIMIT `+strconv.Itoa(limit),
-		minLat, maxLat, minLon, maxLon, prec)
+		minLat, maxLat, minLon, maxLon)
 	if err != nil {
 		return nil, err
 	}

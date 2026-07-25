@@ -87,6 +87,14 @@ of DONE (reverse chronological); open items live in TO DO until they move.
 
 ## DONE
 
+- [x] **94. Instrument the silence** (2026-07-25): four rounds of map debugging died because a
+      SUCCESSFUL handler logs nothing , "request never arrived" and "request answered empty"
+      look identical from outside. handleFramesGeoLOD now logs bbox + point count at INFO every
+      call, so one map-open names the failure. Also de-parameterized the cluster precision: a
+      float bind param inside GROUP BY floor(lat/$5) is exactly what a driver can send untyped
+      and postgres can refuse , now a formatted literal from the fixed ladder (server-computed,
+      no injection surface), removing a whole class of silent failure.
+
 - [x] **93. Ask the filesystem** (2026-07-25): the runDir-to-mount relationship was guessed twice
       and wrong twice in opposite directions (doubled path, then /var/lib/ghost/services.conf).
       The loader contract, finally READ: LoadServicesConfig(arg) = arg/services.conf, no append.
