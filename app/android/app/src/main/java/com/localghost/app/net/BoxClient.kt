@@ -30,6 +30,9 @@ data class Conversation(val id: String, val title: String, val updatedLabel: Str
 data class DeviceInfo(
     val id: String, val name: String, val thisDevice: Boolean,
     val lastSync: String, val photos: Int, val videos: Int,
+    // Epoch seconds straight from the box's cursor rows , 0 means "never".
+    val lastSyncTs: Long = 0, val lastPhotoTs: Long = 0, val lastVideoTs: Long = 0,
+    val model: String = "", val frames: Long = 0,
 )
 
 /** Settings, owned by the box (persona-scoped), reflected on the phone. */
@@ -1013,6 +1016,7 @@ object BoxClient {
                 lastPhotoTs = o.optLong("photoTs"),
                 lastVideoTs = o.optLong("videoTs"),
                 model = o.optString("model", ""),
+                frames = o.optLong("frames"),
             )
         }
     }

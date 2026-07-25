@@ -18,6 +18,10 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.clickable
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 
 /**
  * The CODES screen. PIN management was deliberately removed from the app: a PIN can only be changed
@@ -81,8 +85,8 @@ private fun DeviceRow(d: DeviceInfo) {
         Text("id ${d.id.take(8)} , from its certificate, not a serial number",
             color = TerminalDim, style = MaterialTheme.typography.labelMedium)
         Spacer(Modifier.height(4.dp))
-        Text("last sync ${ago(d.lastSyncTs)}", color = GhostTextDim,
-            style = MaterialTheme.typography.labelMedium)
+        Text("${d.frames} frame(s) archived from this phone · last sync ${ago(d.lastSyncTs)}",
+            color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
         Spacer(Modifier.height(6.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             BasicTextField(value = draft, onValueChange = { draft = it.take(40); saved = false },

@@ -18,6 +18,7 @@ import com.localghost.app.net.BoxClient
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.time.temporal.ChronoUnit
 
 /**
  * Reads the phone's Health Connect store , where Samsung Health (and every other health app that
@@ -67,6 +68,7 @@ object HealthSync {
         var months = 0
         var shipped = 0
         var empties = 0
+        var calOnlyTotal = 0
         val allSkipped = LinkedHashSet<String>()
         val cal = java.util.Calendar.getInstance()
         while (months < 240 && empties < 6) {
@@ -272,7 +274,6 @@ object HealthSync {
         android.util.Log.w("LocalGhost", "health sync: ${e.message}")
         SyncResult(0, emptyList(), e.message ?: "health sync failed")
     }
-}
 
     /**
      * THE PROBE , what Health Connect ACTUALLY holds, per type, and which app put it there.
@@ -331,3 +332,4 @@ object HealthSync {
         one("distance", DistanceRecord::class) { it.startTime }
         return out
     }
+}
