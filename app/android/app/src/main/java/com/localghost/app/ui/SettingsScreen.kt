@@ -91,6 +91,21 @@ fun SettingsScreen(
              color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
 
         Spacer(Modifier.height(24.dp))
+        SectionLabel("DEVELOPER")
+        run {
+            val dctx = androidx.compose.ui.platform.LocalContext.current
+            var dbg by remember { mutableStateOf(com.localghost.app.settings.AppSettings.debugMode(dctx)) }
+            Text(if (dbg) "[x] app is in DEBUG MODE , tap to disable" else "[ ] set app in debug mode",
+                color = if (dbg) TerminalGreen else GhostTextDim,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.clickable {
+                    dbg = !dbg
+                    com.localghost.app.settings.AppSettings.setDebugMode(dctx, dbg)
+                }.padding(vertical = 6.dp))
+            Text("> shows the tok/s meter under chat replies; more diagnostics will attach here",
+                color = TerminalDim, style = MaterialTheme.typography.labelMedium)
+        }
+        Spacer(Modifier.height(20.dp))
         SectionLabel("SESSION")
         Spacer(Modifier.height(8.dp))
         GhostButton("LOCK BOX NOW", onLock, modifier = Modifier.fillMaxWidth())

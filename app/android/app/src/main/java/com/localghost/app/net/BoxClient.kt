@@ -19,7 +19,8 @@ import kotlinx.coroutines.flow.flow
 import java.io.InputStream
 import org.json.JSONObject
 
-data class PendingNotification(val daemonId: String, val title: String, val body: String)
+data class PendingNotification(val daemonId: String, val title: String, val body: String,
+    val id: Long = 0, val kind: String = "message")
 
 /** A saved conversation. Lives on the box (synthd); the phone lists + loads, holds the active
  *  one in memory only. */
@@ -29,6 +30,9 @@ data class Conversation(val id: String, val title: String, val updatedLabel: Str
 data class DeviceInfo(
     val id: String, val name: String, val thisDevice: Boolean,
     val lastSync: String, val photos: Int, val videos: Int,
+    // Epoch seconds straight from the box's cursor rows , 0 means "never".
+    val lastSyncTs: Long = 0, val lastPhotoTs: Long = 0, val lastVideoTs: Long = 0,
+    val model: String = "", val frames: Long = 0,
 )
 
 /** Settings, owned by the box (persona-scoped), reflected on the phone. */
@@ -497,21 +501,34 @@ object BoxClient {
     }
 
     // --- notifications ---
+    /** REAL notifications from the box , /v1/notifications is a per-device push cursor (the box
+     *  advances it, so each notification is offered to this phone exactly once). The fakes that
+     *  lived here are dead; if the list is empty, the box genuinely has nothing to say. */
     suspend fun pollPending(ctx: Context): List<PendingNotification> {
-        delay(150)
         if (NotifyState.isMuted(ctx)) return emptyList()
         val now = System.currentTimeMillis()
         if (now - NotifyState.lastPostedAt(ctx) < CADENCE_MS) return emptyList()
-        NotifyState.setLastPostedAt(ctx, now)
-        return listOf(
-            PendingNotification("ghost.watchd", "Dog check",
-                "Paul please don't get another dog, 10 is enough."),
-            PendingNotification("ghost.cued", "Reflection waiting",
-                "A question is ready when you have a moment."),
-        )
+        return try {
+            val r = BoxHttp.getJson(ctx, "/v1/notifications")
+            val a = r.optJSONArray("notifications") ?: return emptyList()
+            val out = (0 until a.length()).mapNotNull { i ->
+                val o = a.optJSONObject(i) ?: return@mapNotNull null
+                PendingNotification(o.optString("service", "ghost.secd"),
+                    o.optString("title"), o.optString("body"),
+                    o.optLong("id"), o.optString("kind", "message"))
+            }
+            if (out.isNotEmpty()) NotifyState.setLastPostedAt(ctx, now)
+            out
+        } catch (_: Exception) { emptyList() }
     }
 
     // --- sync ---
+    /** Rewind THIS device's sync cursors on the box , the next run re-offers everything from the
+     *  beginning and hash dedup archives only the gap. */
+    suspend fun resetSync(ctx: Context): Boolean = try {
+        BoxHttp.postJson(ctx, "/v1/sync/reset", org.json.JSONObject()).optBoolean("reset", false)
+    } catch (_: Exception) { false }
+
     /** The box's authoritative cursor per kind , the ONLY cursor. (0,0) on any failure: the run
      *  then re-offers from the beginning and the hash dedup absorbs it , slow but never wrong. */
     suspend fun getCursor(ctx: Context, kind: MediaKind): com.localghost.app.sync.Cursor = try {
@@ -558,6 +575,7 @@ object BoxClient {
         val name: String = "",           // derived on the box: date + first tags; empty until tagged
         val tags: List<String> = emptyList(),
         val place: String = "",          // reverse-geocoded hierarchy; "" until geo data lands
+        val description: String = "",    // the caption's SCENE section
     )
 
     /** Page the archive newest-first. before=0 for the first page; pass the last row's takenAt to
@@ -572,6 +590,7 @@ object BoxClient {
                 o.optString("hash"), o.optLong("takenAt"), o.optString("kind"), o.optLong("bytes"),
                 name = o.optString("name", ""),
                 place = o.optString("place", ""),
+                description = o.optString("description", ""),
                 tags = if (tagsArr == null) emptyList()
                        else (0 until tagsArr.length()).mapNotNull { t -> tagsArr.optString(t).takeIf { it.isNotBlank() } },
             )
@@ -639,6 +658,17 @@ object BoxClient {
             HealthSeries(o.optString("metric"),
                 (0 until ds.length()).map { ds.optString(it) },
                 (0 until vs.length()).map { vs.optDouble(it) })
+        }
+    } catch (_: Exception) { null }
+
+    data class CheckinRow(val day: String, val feelings: String, val why: String)
+
+    suspend fun checkins(ctx: Context, days: Int = 30): List<CheckinRow>? = try {
+        val r = BoxHttp.getJson(ctx, "/v1/checkins?days=$days")
+        val a = r.optJSONArray("checkins") ?: org.json.JSONArray()
+        (0 until a.length()).mapNotNull { i ->
+            val o = a.optJSONObject(i) ?: return@mapNotNull null
+            CheckinRow(o.optString("day"), o.optString("feelings"), o.optString("why"))
         }
     } catch (_: Exception) { null }
 
@@ -726,6 +756,42 @@ object BoxClient {
         }
     } catch (e: Exception) { android.util.Log.w("LocalGhost", "frames geo: ${e.message}"); null }
 
+    /** Per-daemon drill-in rows for the Box Status detail screens. */
+    suspend fun daemonSummary(ctx: Context, name: String): List<Pair<String, String>>? = try {
+        val r = BoxHttp.getJson(ctx, "/v1/daemon/summary?name=$name")
+        val a = r.optJSONArray("rows") ?: org.json.JSONArray()
+        (0 until a.length()).mapNotNull { i ->
+            val o = a.optJSONObject(i) ?: return@mapNotNull null
+            Pair(o.optString("k"), o.optString("v"))
+        }
+    } catch (_: Exception) { null }
+
+    data class GeoCell(val lat: Double, val lon: Double, val n: Int, val hash: String, val takenAt: Long)
+
+    /** Level-of-detail map feed , postgres aggregates per zoom tier (0 continent .. 3 raw). */
+    suspend fun framesGeoLod(ctx: Context, level: Int,
+                             minLat: Double, maxLat: Double, minLon: Double, maxLon: Double): List<GeoCell>? = try {
+        val r = BoxHttp.getJson(ctx,
+            "/v1/frames/geo/lod?level=$level&minlat=$minLat&maxlat=$maxLat&minlon=$minLon&maxlon=$maxLon")
+        // No "points" key at all = a box that has never heard of this endpoint (503 body parsed
+        // into an empty object) , that is NULL (unknown), not an empty answer. The distinction is
+        // what lets the version-skew shield fire.
+        if (!r.has("points")) return null
+        val a = r.optJSONArray("points") ?: org.json.JSONArray()
+        (0 until a.length()).mapNotNull { i ->
+            val o = a.optJSONObject(i) ?: return@mapNotNull null
+            GeoCell(o.optDouble("lat"), o.optDouble("lon"), o.optInt("n", 1),
+                o.optString("hash", ""), o.optLong("takenAt"))
+        }
+    } catch (_: Exception) { null }
+
+    /** The newest geotagged frame , where the map opens. */
+    suspend fun newestGeoFrame(ctx: Context): GeoCell? = try {
+        val o = BoxHttp.getJson(ctx, "/v1/frames/newest")
+        if (o.optDouble("lat", 0.0) == 0.0 && o.optDouble("lon", 0.0) == 0.0) null
+        else GeoCell(o.optDouble("lat"), o.optDouble("lon"), 1, o.optString("hash", ""), o.optLong("takenAt"))
+    } catch (_: Exception) { null }
+
     /** Which day tracks exist on the box, newest first. */
     suspend fun geoDays(ctx: Context, limit: Int = 30): List<String>? = try {
         val r = BoxHttp.getJson(ctx, "/v1/geo/days?limit=$limit")
@@ -751,7 +817,24 @@ object BoxClient {
     } catch (_: Exception) { null }
 
     /** The operator-provided Natural Earth GeoJSON, or null (map draws graticule-only, by design). */
+    /** The world map, CACHED , only the landmass (never photos, never locations): stored once in
+     *  filesDir, revalidated by ETag each open. Box unreachable = cached world still draws ,
+     *  the map works offline; a 304 costs zero bytes; a new file on the box replaces the cache. */
     suspend fun worldGeoJson(ctx: Context): org.json.JSONObject? = try {
+        val cache = java.io.File(ctx.filesDir, "world.geojson")
+        val prefs = ctx.getSharedPreferences("ghost_geo", Context.MODE_PRIVATE)
+        val (fresh, newTag) = BoxHttp.getBytesEtag(ctx, "/v1/geo/world", prefs.getString("world_etag", null))
+        if (fresh != null) {
+            cache.writeBytes(fresh)
+            prefs.edit().putString("world_etag", newTag ?: "").apply()
+        }
+        if (cache.exists()) org.json.JSONObject(cache.readText()) else null
+    } catch (e: Exception) {
+        val cache = java.io.File(ctx.filesDir, "world.geojson")
+        if (cache.exists()) runCatching { org.json.JSONObject(cache.readText()) }.getOrNull() else null
+    }
+
+    private suspend fun worldGeoJsonDirect(ctx: Context): org.json.JSONObject? = try {
         BoxHttp.getJson(ctx, "/v1/geo/world")
     } catch (_: Exception) { null }
 
@@ -820,6 +903,20 @@ object BoxClient {
     }
 
     /** One thumbnail's bytes (webp or jpeg). Null when the frame has none (videos) or on failure. */
+    /** Stream the untouched original to a FILE , the video path (any size, bounded RAM). */
+    suspend fun frameOriginalToFile(ctx: Context, hash: String, dest: java.io.File,
+                                    onBytes: ((Long) -> Unit)? = null): Boolean =
+        BoxHttp.getToFile(ctx, "/v1/frames/original?hash=$hash", dest, onBytes)
+
+    /** The UNTOUCHED archived original , full quality, mime-typed by the box. Multi-MB (images ,
+     *  videos use frameOriginalToFile; this path is RAM-capped at 64MB). */
+    suspend fun frameOriginal(ctx: Context, hash: String): ByteArray? =
+        BoxHttp.getBytes(ctx, "/v1/frames/original?hash=$hash")
+
+    /** The big derived JPEG , full-screen viewing and pinch-zoom. */
+    suspend fun framePreview(ctx: Context, hash: String): ByteArray? =
+        BoxHttp.getBytes(ctx, "/v1/frames/preview?hash=$hash")
+
     suspend fun frameThumb(ctx: Context, hash: String): ByteArray? =
         BoxHttp.getBytes(ctx, "/v1/frames/thumb?hash=$hash")
 
@@ -872,12 +969,57 @@ object BoxClient {
      */
     // --- devices (per-device sync state, deduped index) ---
 
-    suspend fun devices(@Suppress("UNUSED_PARAMETER") ctx: Context): List<DeviceInfo> {
-        delay(150)
-        return listOf(
-            DeviceInfo("d1", "this phone", true, "just now", 8421, 142),
-            DeviceInfo("d2", "old pixel", false, "3 days ago", 5102, 88),
-        )
+    /** Tell the box what this phone is , model is volunteered (Build.MODEL, a model string, not
+     *  a serial or any hardware identifier), name is the person's choice. */
+    suspend fun setDeviceName(ctx: Context, name: String, model: String,
+                              stableId: String = "", device: String = ""): Boolean = try {
+        val body = org.json.JSONObject().put("name", name).put("model", model)
+        if (stableId.isNotEmpty()) body.put("stableId", stableId)
+        if (device.isNotEmpty()) body.put("device", device)
+        BoxHttp.postJson(ctx, "/v1/devices/name", body).optBoolean("ok", false)
+    } catch (_: Exception) { false }
+
+    /** The continuity key , a hash of the app-scoped Android ID. It survives uninstall,
+     *  reinstall and every debug rebuild (same signing key), where a client certificate does
+     *  not; and because Android scopes this value per signing key, it identifies the phone TO
+     *  THIS APP ONLY and cannot correlate the person anywhere else. Hashed before it leaves the
+     *  phone: the box stores a digest, never the platform value. */
+    @android.annotation.SuppressLint("HardwareIds")
+    fun stableId(ctx: Context): String = try {
+        val raw = android.provider.Settings.Secure.getString(
+            ctx.contentResolver, android.provider.Settings.Secure.ANDROID_ID) ?: ""
+        if (raw.isEmpty()) "" else java.security.MessageDigest.getInstance("SHA-256")
+            .digest(("localghost:" + raw).toByteArray())
+            .joinToString("") { "%02x".format(it) }.take(32)
+    } catch (_: Exception) { "" }
+
+    /** The enrolled phones, from the box's cursor rows , REAL now: this screen used to display
+     *  two invented devices with invented counts, which is exactly the kind of confident fiction
+     *  the rest of the system refuses to print. */
+    suspend fun devices(ctx: Context): List<DeviceInfo> {
+        // getJson answers an EMPTY object when the box is unreachable (the appears-down shield),
+        // so there is nothing to elvis , an absent "devices" array is the same "nothing to show".
+        val a = BoxHttp.getJson(ctx, "/v1/devices").optJSONArray("devices") ?: return emptyList()
+        return (0 until a.length()).mapNotNull { i ->
+            val o = a.optJSONObject(i) ?: return@mapNotNull null
+            val key = o.optString("device", "")
+            DeviceInfo(
+                id = key,
+                name = o.optString("name", "").ifEmpty {
+                    o.optString("model", "").ifEmpty {
+                        if (o.optBoolean("thisDevice")) "this phone" else "phone " + key.take(6)
+                    }
+                },
+                thisDevice = o.optBoolean("thisDevice"),
+                lastSync = "",
+                photos = 0, videos = 0,
+                lastSyncTs = o.optLong("updatedAt"),
+                lastPhotoTs = o.optLong("photoTs"),
+                lastVideoTs = o.optLong("videoTs"),
+                model = o.optString("model", ""),
+                frames = o.optLong("frames"),
+            )
+        }
     }
 
     // --- settings (box-owned, persona-scoped; phone caches for offline) ---
@@ -909,7 +1051,9 @@ object BoxClient {
                             name = o.optString("name"),
                             detail = o.optString("detail"),
                             sizeBytes = o.optLong("sizeBytes"),
-                            sha256 = o.optString("sha256", null),
+                            // optString's fallback is typed String , "" IS the absent value here,
+                            // and the field is only ever compared, never parsed.
+                            sha256 = o.optString("sha256", ""),
                         )
                     )
                 }

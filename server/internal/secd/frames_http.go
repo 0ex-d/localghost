@@ -163,7 +163,7 @@ func (s *Server) handleSyncCursor(w http.ResponseWriter, r *http.Request) {
 		s.appearsDown(w)
 		return
 	}
-	if err := s.notif.CursorSet(mounted, "default", req.Kind, req.TS, req.ID); err != nil {
+	if err := s.notif.CursorSet(mounted, deviceKey(r), req.Kind, req.TS, req.ID); err != nil {
 		secdLog.Warn("cursor store failed", "fn", "handleSyncCursor", "err", err)
 		s.appearsDown(w)
 		return
@@ -179,7 +179,16 @@ func (s *Server) handleSyncCursor(w http.ResponseWriter, r *http.Request) {
 // side (exif/hint frames, stored in seconds) is scaled up and merged , id 0 on that side, which the
 // tuple comparison treats as "everything with this exact ts re-offers once", and the hash dedup
 // absorbs that overlap for free.
-func (s *Server) handleSyncCursorGet(w http.ResponseWriter, _ *http.Request) {
+// handleSyncCursorGet , THE cursor authority, PER DEVICE. The phone keeps no persistent cursor:
+// it asks here every run and gets ITS OWN stored position , a fresh device (a partner's phone)
+// gets (0,0) and offers its whole library; a reinstall on the same device keeps the same client
+// cert, so the same key, so it resumes. The old global merge against the ARCHIVE's newest frame
+// was the single-device era talking: it handed a second phone the FIRST phone's position, and her
+// library , older than his newest photo , offered exactly one recent video. Account-global state
+// answering a device-scoped question is the bug class; the stored per-device row is the whole
+// answer. ts stays MILLISECONDS (MediaStore's unit); (0,0) on any miss, and hash dedup makes
+// over-offering free.
+func (s *Server) handleSyncCursorGet(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	mounted := s.mounted
 	s.mu.Unlock()
@@ -187,35 +196,28 @@ func (s *Server) handleSyncCursorGet(w http.ResponseWriter, _ *http.Request) {
 		s.appearsDown(w)
 		return
 	}
-	photoTs, videoTs, err := s.notif.FramesLatest(mounted)
+	full, err := s.notif.CursorGetFull(mounted, deviceKey(r))
 	if err != nil {
-		secdLog.Warn("cursor get: latest query failed", "fn", "handleSyncCursorGet", "err", err)
+		secdLog.Warn("cursor get failed", "fn", "handleSyncCursorGet", "err", err)
 		s.appearsDown(w)
 		return
 	}
 	type kcur struct {
 		TS  int64  `json:"ts"`
 		ID  int64  `json:"id"`
-		Src string `json:"src"` // which store answered , visible proof of the redis/postgres roundtrip
+		Src string `json:"src"`
 	}
-	out := map[string]kcur{
-		"photo": {TS: photoTs * 1000, Src: "frames"},
-		"video": {TS: videoTs * 1000, Src: "frames"},
-	}
-	if cur, cerr := s.notif.CursorGetFull(mounted, "default"); cerr == nil {
-		for kind, c := range cur {
-			if c.TS > out[kind].TS {
-				out[kind] = kcur{TS: c.TS, ID: c.ID, Src: c.Src}
-			}
+	out := map[string]kcur{}
+	for _, kind := range []string{"photo", "video"} {
+		c := kcur{Src: "none"}
+		if v, ok := full[kind]; ok {
+			c.TS, c.ID, c.Src = v.TS, v.ID, v.Src
 		}
+		out[kind] = c
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
 }
-
-// handleFrameTag , user tag corrections. POST {"hash","tag","action":"add"|"remove"}. Tag text is
-// user input headed for the DB and later for prompts: lowercase, length-bounded, control chars out.
-// A remove is a TOMBSTONE server-side , the model can never re-propose what a human rejected.
 func (s *Server) handleFrameTag(w http.ResponseWriter, r *http.Request) {
 	if !s.session.Valid(bearer(r)) || r.Method != http.MethodPost {
 		s.appearsDown(w)
@@ -397,6 +399,109 @@ func (s *Server) handleFrameThumb(w http.ResponseWriter, r *http.Request) {
 
 // handleLocations accepts a JSON batch of location points ({"source":..,"points":[{ts,lat,lon}..]})
 // and spools it. secd does not parse it; framed validates and drops malformed batches.
+// handleFramePreview , GET /v1/frames/preview?hash= , the large derived JPEG for full-screen
+// viewing and pinch-zoom. Same hash validation and appears-down discipline as the thumb.
+func (s *Server) handleFramePreview(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	hash := r.URL.Query().Get("hash")
+	if len(hash) < 16 || len(hash) > 128 {
+		s.appearsDown(w)
+		return
+	}
+	for _, ch := range hash {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+			s.appearsDown(w) // not lowercase hex -> not one of our hashes; no path characters ever
+			return
+		}
+	}
+	path, err := s.notif.FramePreviewPath(mounted, hash)
+	if err != nil || path == "" {
+		s.appearsDown(w)
+		return
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		secdLog.Warn("preview open failed", "fn", "handleFramePreview", "path", path, "err", err)
+		s.appearsDown(w)
+		return
+	}
+	defer f.Close()
+	if strings.HasSuffix(path, ".webp") {
+		w.Header().Set("Content-Type", "image/webp")
+	} else {
+		w.Header().Set("Content-Type", "image/jpeg")
+	}
+	_, _ = io.Copy(w, f)
+}
+
+// handleLocations accepts a JSON batch of location points ({"source":..,"points":[{ts,lat,lon}..]})
+// and spools it. secd does not parse it; framed validates and drops malformed batches.
+// handleFrameOriginal , GET /v1/frames/original?hash= , the UNTOUCHED archived bytes, mime-typed.
+// The viewer asks for this first; preview and thumb are the fallbacks, not the ceiling.
+func (s *Server) handleFrameOriginal(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	hash := r.URL.Query().Get("hash")
+	if len(hash) < 16 || len(hash) > 128 {
+		s.appearsDown(w)
+		return
+	}
+	for _, ch := range hash {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+			s.appearsDown(w) // not lowercase hex -> not one of our hashes; no path characters ever
+			return
+		}
+	}
+	path, mime, err := s.notif.FrameOriginalPath(mounted, hash)
+	if err != nil || path == "" {
+		s.appearsDown(w)
+		return
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		secdLog.Warn("original open failed", "fn", "handleFrameOriginal", "path", path, "err", err)
+		s.appearsDown(w)
+		return
+	}
+	defer f.Close()
+	if mime != "" {
+		w.Header().Set("Content-Type", mime)
+	} else {
+		w.Header().Set("Content-Type", "application/octet-stream")
+	}
+	// ServeContent, not Copy: RANGE requests are how video players seek , probe the moov atom at
+	// the tail, jump to minute 7, resume , and ServeContent speaks 206/Content-Range/If-Range
+	// natively given a ReadSeeker. The whole streaming-with-seek feature server-side is this one
+	// call. Empty name: the mime header above already decided the type, no sniffing wanted.
+	st, serr := f.Stat()
+	if serr != nil {
+		s.appearsDown(w)
+		return
+	}
+	http.ServeContent(w, r, "", st.ModTime(), f)
+}
+
+// handleLocations accepts a JSON batch of location points ({"source":..,"points":[{ts,lat,lon}..]})
+// and spools it. secd does not parse it; framed validates and drops malformed batches.
 func (s *Server) handleLocations(w http.ResponseWriter, r *http.Request) {
 	if !s.session.Valid(bearer(r)) {
 		secdLog.Warn("location upload rejected: invalid session", "fn", "handleLocations", "bearerPresent", bearer(r) != "", "remote", r.RemoteAddr)
@@ -452,6 +557,13 @@ func spoolBody(dir string, r *http.Request, maxBytes int64, uid, gid int) (int64
 		if clean && len(taken) <= 20 {
 			name += "-t" + taken
 		}
+	}
+	// PROVENANCE , which phone sent this. Folded in as -d<hex> the same way the taken hint is:
+	// secd still never parses content, framed reads the suffix and stores it on the frame. This
+	// matters more every month: the plan is for photos to leave the phones entirely, and an
+	// archive that cannot say WHERE a memory came from has already lost half of it.
+	if dev := deviceKeyFromRequest(r); dev != "" {
+		name += "-d" + dev
 	}
 	part := filepath.Join(dir, name+".part")
 	f, err := os.OpenFile(part, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o640)
@@ -577,6 +689,19 @@ func (s *Server) handleGeoWorld(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.Close()
+	// ETag = mtime+size (cheap, changes exactly when the operator swaps the file). The app caches
+	// the multi-MB world locally and revalidates with If-None-Match; a match costs a 304 and zero
+	// bytes , the map opens instantly offline-first and updates only when the world actually does.
+	fi, _ := f.Stat()
+	etag := ""
+	if fi != nil {
+		etag = fmt.Sprintf("\"w-%d-%d\"", fi.ModTime().Unix(), fi.Size())
+		w.Header().Set("ETag", etag)
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = io.Copy(w, f)
 }
@@ -695,7 +820,7 @@ func (s *Server) handleHealthUpload(w http.ResponseWriter, r *http.Request) {
 		s.appearsDown(w)
 		return
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 256*1024))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1024*1024)) // app chunks history by month; 1MB covers the densest month
 	if err != nil || len(body) == 0 || !json.Valid(body) {
 		s.appearsDown(w)
 		return
@@ -744,4 +869,239 @@ func (s *Server) handleHealthStats(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"series": series})
+}
+
+// handleFramesGeoLOD , GET /v1/frames/geo/lod?level=0..3&minlat&maxlat&minlon&maxlon , the map's
+// level-of-detail feed. Postgres aggregates; the app ships a viewport and a level and gets back a
+// few hundred cells instead of every point on the planet.
+func (s *Server) handleFramesGeoLOD(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodGet {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	qp := r.URL.Query()
+	pf := func(k string, def float64) float64 {
+		v, err := strconv.ParseFloat(qp.Get(k), 64)
+		if err != nil {
+			return def
+		}
+		return v
+	}
+	level, _ := strconv.Atoi(qp.Get("level"))
+	if level < 0 || level > 3 {
+		level = 0
+	}
+	minLat, maxLat := pf("minlat", -90), pf("maxlat", 90)
+	minLon, maxLon := pf("minlon", -180), pf("maxlon", 180)
+	pts, err := s.notif.FramesGeoLOD(mounted, level, minLat, maxLat, minLon, maxLon, 0)
+	if err != nil {
+		secdLog.Warn("geo lod failed", "fn", "handleFramesGeoLOD", "err", err)
+		s.appearsDown(w)
+		return
+	}
+	// INSTRUMENTED , four rounds of map debugging died on silence: a successful handler logged
+	// nothing, so "request never arrived" and "request answered empty" looked identical from
+	// the outside. Now one map-open tells the whole story in one line.
+	secdLog.Info("geo lod", "fn", "handleFramesGeoLOD", "level", level,
+		"minlat", minLat, "maxlat", maxLat, "minlon", minLon, "maxlon", maxLon, "points", len(pts))
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"level": level, "points": pts})
+}
+
+// handleFramesNewest , GET /v1/frames/newest , the newest geotagged frame; the map opens here.
+func (s *Server) handleFramesNewest(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodGet {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	g, err := s.notif.NewestGeoFrame(mounted)
+	if err != nil {
+		s.appearsDown(w)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(g)
+}
+
+// handleDaemonSummary , GET /v1/daemon/summary?name=ghost.framed , the per-daemon drill-in feed.
+func (s *Server) handleDaemonSummary(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodGet {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	name := r.URL.Query().Get("name")
+	if len(name) > 40 {
+		s.appearsDown(w)
+		return
+	}
+	kv, err := s.notif.DaemonSummary(mounted, name)
+	if err != nil {
+		secdLog.Warn("daemon summary failed", "fn", "handleDaemonSummary", "name", name, "err", err)
+		s.appearsDown(w)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"name": name, "rows": kv})
+}
+
+// handleCheckins , GET /v1/checkins?days=N , past daily check-ins for the MEMORIES strip.
+func (s *Server) handleCheckins(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodGet {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	n, _ := strconv.Atoi(r.URL.Query().Get("days"))
+	rows, err := s.notif.CheckinHistory(mounted, n)
+	if err != nil {
+		secdLog.Warn("checkins failed", "fn", "handleCheckins", "err", err)
+		s.appearsDown(w)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"checkins": rows})
+}
+
+// handleSyncReset , POST /v1/sync/reset , rewind THIS device's cursors to zero. The next sync run
+// re-offers everything; dedup absorbs what the box already holds, so the cost is time, never
+// duplicates. Per-device: a second phone (a partner's, say) rewinding does not disturb the first.
+func (s *Server) handleSyncReset(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodPost {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	device := deviceKey(r)
+	if err := s.notif.ResetSyncCursors(mounted, device); err != nil {
+		secdLog.Warn("sync reset failed", "fn", "handleSyncReset", "err", err)
+		s.appearsDown(w)
+		return
+	}
+	secdLog.Info("sync cursors reset", "fn", "handleSyncReset", "device", device)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"reset": true})
+}
+
+// handleDevices , GET /v1/devices , the enrolled phones and what each has actually done. Replaces
+// a screen that displayed INVENTED devices with counts nobody measured: the cursor rows are the
+// only honest source, and they answer last-sync, last-photo and last-video exactly.
+func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	rows, err := s.notif.DevicesInfo(mounted)
+	if err != nil {
+		secdLog.Warn("devices failed", "fn", "handleDevices", "err", err)
+		s.appearsDown(w)
+		return
+	}
+	me := deviceKey(r)
+	for i := range rows {
+		rows[i].This = rows[i].Device == me
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"devices": rows})
+}
+
+// handleDeviceName , POST /v1/devices/name {"name":"...","model":"..."} , the calling device
+// names ITSELF (identity comes from its certificate, so no device can rename another).
+func (s *Server) handleDeviceName(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodPost {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	var req struct {
+		Name     string `json:"name"`
+		Model    string `json:"model"`
+		StableID string `json:"stableId"`
+		Device   string `json:"device"` // optional: name ANOTHER enrolled phone (same archive)
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
+		s.appearsDown(w)
+		return
+	}
+	if len(req.Name) > 40 {
+		req.Name = req.Name[:40]
+	}
+	if len(req.Model) > 40 {
+		req.Model = req.Model[:40]
+	}
+	target := deviceKey(r)
+	if req.Device != "" {
+		// Naming a sibling phone is allowed , every enrolled device already shares this archive,
+		// so a friendly label is bookkeeping, not privilege. The STABLE ID, though, is only ever
+		// claimed for the caller: identity adoption stays tied to the certificate presenting it.
+		target = req.Device
+		req.StableID = ""
+	}
+	if err := s.notif.DeviceNameSet(mounted, target, req.Name, req.Model, req.StableID); err != nil {
+		secdLog.Warn("device name failed", "fn", "handleDeviceName", "err", err)
+		s.appearsDown(w)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+}
+
+// deviceKeyFromRequest , the calling phone's stable key, hex only (a spool name must never be
+// able to carry a path separator or anything else surprising).
+func deviceKeyFromRequest(r *http.Request) string {
+	k := deviceKey(r)
+	for _, ch := range k {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+			return ""
+		}
+	}
+	if len(k) > 32 {
+		return ""
+	}
+	return k
 }

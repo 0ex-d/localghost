@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"github.com/LocalGhostDao/localghost/server/internal/poltergres"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -172,6 +173,13 @@ func main() {
 			"surfaceThreshold": "applied", "cooldownSeconds": "applied", "learningHalfLife": "applied",
 		}, nil
 	})
+	// AUTOMATIC DAILY REFLECTION , the loop the architecture pointed at: live a day, the box
+	// remembers it (synthd episodes), one morning it hands the day back. Priority: this day one
+	// year ago; else a random episode older than 30 days; else silence (a young archive earns
+	// quiet mornings, not filler). Once per day, morning hours only, and answering is optional ,
+	// a reflection is an offering, not homework.
+	go reflectionLoop(ctx, filepath.Dir(runDir), store, cfg.Slot, lg)
+
 	ctl.Handle("nominate", func(args json.RawMessage) (ctlsock.Response, error) {
 		var a struct {
 			Photo string `json:"photo"`
@@ -238,4 +246,89 @@ func envPort(key string) int {
 		}
 	}
 	return 0
+}
+
+func reflectionLoop(ctx context.Context, mount string, store *hw.NotifStore, slot int, lg *slog.Logger) {
+	t := time.NewTicker(30 * time.Minute)
+	defer t.Stop()
+	var db *poltergres.ReadWrite
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		h := time.Now().Hour()
+		if h < 8 || h > 11 {
+			continue
+		}
+		today := time.Now().Format("2006-01-02")
+		if v, err := store.GetSetting(slot, "cued_reflected"); err == nil && v == today {
+			continue
+		}
+		if db == nil {
+			m := findMount(mount)
+			if m == "" {
+				continue // no mounted volume in sight; try again next tick
+			}
+			sc, err := hw.LoadServicesConfig(m)
+			if err != nil {
+				continue
+			}
+			db = poltergres.NewReadWrite(hw.SocketForMount(m), sc.Postgres.Port, sc.Postgres.RWUser, sc.Postgres.RWPass, sc.Postgres.Name)
+		}
+		pick := func(q string, args ...any) (string, string, bool) {
+			rows, err := db.Query(q, args...)
+			if err != nil || len(rows.Vals) == 0 || len(rows.Vals[0]) < 2 || rows.Vals[0][0] == nil || rows.Vals[0][1] == nil {
+				return "", "", false
+			}
+			return *rows.Vals[0][0], *rows.Vals[0][1], true
+		}
+		yearAgo := time.Now().AddDate(-1, 0, 0).Format("2006-01-02")
+		title, body, ok := pick(
+			"SELECT title, body FROM memories WHERE kind = 'episode' AND NOT tombstoned AND source_ref = $1",
+			"episode:"+yearAgo)
+		head := "one year ago today"
+		if !ok {
+			title, body, ok = pick(
+				"SELECT title, body FROM memories WHERE kind = 'episode' AND NOT tombstoned AND created_at < $1 ORDER BY random() LIMIT 1",
+				time.Now().AddDate(0, 0, -30).UnixMilli())
+			head = "a day worth revisiting"
+		}
+		if !ok {
+			// A young archive earns quiet mornings. Mark the day so we do not poll until tomorrow.
+			_ = store.SetSetting(slot, "cued_reflected", today)
+			continue
+		}
+		if err := store.Produce(slot, hw.Notification{
+			Service: "ghost.cued", Kind: "reflection",
+			Title: head + " , " + title,
+			Body:  body + " It is in your MEMORIES.",
+		}); err != nil {
+			lg.Warn("reflection produce failed", "fn", "reflectionLoop", "err", err)
+			db = nil
+			continue
+		}
+		lg.Info("reflection offered", "fn", "reflectionLoop", "day", title)
+		_ = store.SetSetting(slot, "cued_reflected", today)
+	}
+}
+
+// findMount walks UP from a run dir until it finds the directory that actually contains
+// services.conf , the volume mount. Twice this codebase guessed the relationship between runDir
+// and the mount and twice the guess was wrong in a different direction; the filesystem knows,
+// so ask it. Five levels is generous; empty means no mounted volume in sight.
+func findMount(start string) string {
+	d := start
+	for i := 0; i < 5; i++ {
+		if _, err := os.Stat(filepath.Join(d, "services.conf")); err == nil {
+			return d
+		}
+		nd := filepath.Dir(d)
+		if nd == d {
+			break
+		}
+		d = nd
+	}
+	return ""
 }

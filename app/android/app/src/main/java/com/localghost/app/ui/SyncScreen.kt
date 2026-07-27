@@ -8,6 +8,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.StrokeCap
@@ -89,7 +90,13 @@ fun SyncScreen(
             }
             val permLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
                 androidx.health.connect.client.PermissionController.createRequestPermissionResultContract()) { g ->
-                granted = g.containsAll(com.localghost.app.sync.HealthSync.PERMISSIONS)
+                grantedCount = com.localghost.app.sync.HealthSync.PERMISSIONS.count { it in g }
+                granted = grantedCount == com.localghost.app.sync.HealthSync.PERMISSIONS.size
+                healthMsg = when {
+                    granted -> "all health permissions granted , tap SYNC"
+                    grantedCount > 0 -> "$grantedCount granted , partial sync will ship what it can"
+                    else -> "no permissions granted , health stays off (your call)"
+                }
             }
             val total = com.localghost.app.sync.HealthSync.PERMISSIONS.size
             grantLine("health (steps · sleep · heart · more)",
@@ -101,7 +108,14 @@ fun SyncScreen(
             if (com.localghost.app.sync.HealthSync.available(hctx)) {
                 GhostButton(if (granted) "SYNC HEALTH (7 DAYS)" else "CONNECT HEALTH",
                     onClick = {
-                        if (!granted) permLauncher.launch(com.localghost.app.sync.HealthSync.PERMISSIONS)
+                        if (!granted) {
+                            healthMsg = "opening the Health Connect permission sheet…"
+                            try {
+                                permLauncher.launch(com.localghost.app.sync.HealthSync.PERMISSIONS)
+                            } catch (e: Exception) {
+                                healthMsg = "! permission sheet refused to open: ${e.message ?: "no reason given"}"
+                            }
+                        }
                         else scope.launch {
                             healthMsg = "reading health connect…"
                             val res = com.localghost.app.sync.HealthSync.sync(hctx)
@@ -114,6 +128,43 @@ fun SyncScreen(
                             }
                         }
                     }, modifier = Modifier.fillMaxWidth())
+                if (granted) {
+                    Spacer(Modifier.height(8.dp))
+                    GhostButton("SYNC FULL HISTORY (EVERYTHING)", onClick = {
+                        scope.launch {
+                            healthMsg = "walking your history month by month…"
+                            val res = com.localghost.app.sync.HealthSync.syncAll(hctx) { p -> healthMsg = p }
+                            val skip = if (res.skipped.isEmpty()) "" else
+                                " (skipped: ${res.skipped.joinToString(", ")})"
+                            healthMsg = when {
+                                res.error != null -> "! ${res.error}$skip"
+                                res.days > 0 -> "done , ${res.days} day(s) of history on your box$skip"
+                                else -> "no health history found$skip"
+                            }
+                        }
+                    }, modifier = Modifier.fillMaxWidth())
+                }
+                Spacer(Modifier.height(8.dp))
+                // WHAT CAN THE BOX SEE , the probe. The reader is known good, so when only two
+                // metrics arrive the honest question is whether Health Connect holds anything at
+                // all , and only Health Connect can answer. Counts, date spans, and the app that
+                // supplied each type.
+                var probeLines by remember { mutableStateOf<List<String>>(emptyList()) }
+                var probing by remember { mutableStateOf(false) }
+                Text(if (probing) "[ reading Health Connect… ]" else "[ what can the box see? ]",
+                    color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.clickable {
+                        if (!probing) {
+                            probing = true
+                            scope.launch {
+                                probeLines = com.localghost.app.sync.HealthSync.probe(hctx)
+                                probing = false
+                            }
+                        }
+                    }.padding(vertical = 6.dp))
+                probeLines.forEach { l ->
+                    Text("  $l", color = TerminalDim, style = MaterialTheme.typography.labelMedium)
+                }
                 if (healthMsg.isNotEmpty()) {
                     Spacer(Modifier.height(6.dp))
                     Text(healthMsg, color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
@@ -125,6 +176,36 @@ fun SyncScreen(
         }
         Spacer(Modifier.height(20.dp))
         GhostButton("SYNC NOW", onSync, enabled = !sync.busy, modifier = Modifier.fillMaxWidth())
+        run {
+            // RE-OFFER FROM THE BEGINNING , rewinds THIS phone's cursor on the box. Two taps to
+            // arm (it is a big walk, not a dangerous one): hash dedup means photos the box holds
+            // are skipped, so the cost is time, never duplicates. A partner's phone has its own
+            // cursor and is untouched.
+            val rctx = androidx.compose.ui.platform.LocalContext.current
+            val rscope = rememberCoroutineScope()
+            var armed by remember { mutableStateOf(false) }
+            var msg by remember { mutableStateOf("") }
+            Spacer(Modifier.height(8.dp))
+            Text(if (armed) "[ !! ] tap again to RE-OFFER EVERYTHING from the beginning"
+                 else "[ re-offer everything from the beginning ]",
+                color = if (armed) TerminalGreen else GhostTextDim,
+                style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.clickable {
+                    if (!armed) {
+                        armed = true
+                        msg = "rewinds THIS phone's cursor; the box skips what it already holds"
+                    } else {
+                        armed = false
+                        rscope.launch {
+                            msg = if (com.localghost.app.net.BoxClient.resetSync(rctx))
+                                "cursor rewound , tap SYNC NOW to walk the whole library"
+                            else "! reset failed (box unreachable?)"
+                        }
+                    }
+                }.padding(vertical = 4.dp))
+            if (msg.isNotEmpty()) Text(msg, color = TerminalDim,
+                style = MaterialTheme.typography.labelMedium)
+        }
         if (sync.partial) {
             Spacer(Modifier.height(12.dp))
             GhostButton("GRANT FULL ACCESS", onRequestFullAccess, modifier = Modifier.fillMaxWidth())
@@ -195,17 +276,19 @@ private fun etaStr(seconds: Long): String = when {
 @Composable
 private fun grantLine(label: String, value: String, ok: Boolean, warn: Boolean,
                       rationale: String = "", onFix: (() -> Unit)? = null) {
-    val fixable = !ok && onFix != null
+    // Smart-cast the callback once instead of asserting it at the call site.
+    val fix = onFix
     Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)
-        .let { if (fixable) it.clickable { onFix!!() } else it }) {
+        .let { if (!ok && fix != null) it.clickable { fix() } else it }) {
         Row {
             Text(if (ok) "[+] " else if (warn) "[~] " else "[ ] ",
                 color = if (ok) TerminalGreen else if (warn) Warning else GhostTextDim,
                 style = MaterialTheme.typography.bodyMedium)
-            Text("$label  ", color = GhostText, style = MaterialTheme.typography.bodyMedium)
+            Text("$label  ", color = GhostText, style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f))
             Text(value, color = if (ok) TerminalGreen else if (warn) Warning else GhostTextDim,
                 style = MaterialTheme.typography.bodyMedium)
-            if (fixable) Text("  [ fix ]", color = TerminalGreen,
+            if (!ok && fix != null) Text("  [ fix ]", color = TerminalGreen,
                 style = MaterialTheme.typography.labelMedium)
         }
         if (rationale.isNotEmpty() && !ok) {

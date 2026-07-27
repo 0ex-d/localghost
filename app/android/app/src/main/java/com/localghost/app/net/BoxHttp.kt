@@ -24,11 +24,36 @@ object BoxHttp {
 
     class NotEnrolled : Exception("device is not enrolled")
 
+    // THE HANDSHAKE CACHE , the 40k-photo discovery. Building a fresh SSLContext per request does
+    // not just cost the build (an Android Keystore round-trip each time): a NEW factory instance
+    // defeats HTTP keep-alive entirely , the connection pool keys on the factory , so EVERY photo
+    // paid a full mTLS handshake, and a LAN that could move the file in 200ms spent seconds
+    // shaking hands. One factory, built once, invalidated only when enrolment changes: one
+    // handshake per session, keep-alive for the other 39,999.
+    @Volatile private var cachedFactory: javax.net.ssl.SSLSocketFactory? = null
+    @Volatile private var cachedKey: String = ""
+
+    private fun factoryFor(ctx: Context, cfg: BoxConfig.Config): javax.net.ssl.SSLSocketFactory {
+        val key = cfg.baseUrl + "|" + cfg.certFingerprint
+        cachedFactory?.let { if (cachedKey == key) return it }
+        synchronized(this) {
+            cachedFactory?.let { if (cachedKey == key) return it }
+            val km = DeviceCert.keyManager(ctx) ?: throw NotEnrolled()
+            val f = BoxTrust.socketFactory(cfg.certFingerprint, km)
+            cachedFactory = f
+            cachedKey = key
+            return f
+        }
+    }
+
+    /** The authed connection factory, exposed for the loopback video proxy , same pinning, same
+     *  client cert, same cached factory; the proxy is just another caller. */
+    internal fun openAuthed(ctx: Context, path: String, method: String): HttpsURLConnection = open(ctx, path, method)
+
     private fun open(ctx: Context, path: String, method: String): HttpsURLConnection {
         val cfg = BoxConfig.read(ctx) ?: throw NotEnrolled()
-        val km = DeviceCert.keyManager(ctx) ?: throw NotEnrolled()
         val conn = URL(cfg.baseUrl.trimEnd('/') + path).openConnection() as HttpsURLConnection
-        conn.sslSocketFactory = BoxTrust.socketFactory(cfg.certFingerprint, km)
+        conn.sslSocketFactory = factoryFor(ctx, cfg)
         // The fingerprint pin is the ENTIRE trust decision (BoxTrust): hostname/SAN checking against a
         // self-signed pinned cert adds nothing , no CA exists to mis-issue for a different host , and it
         // actively breaks the moment the box's LAN address changes (DHCP hands it a new IP, or the user
@@ -54,11 +79,40 @@ object BoxHttp {
         try {
             val conn = open(ctx, path, "GET")
             if (conn.responseCode != 200) { conn.disconnect(); return@withContext null }
-            conn.inputStream.use { it.readBytes() }
+            conn.inputStream.use { ins ->
+                // SANITY CAP , this path buffers in RAM and exists for images and JSON-ish blobs.
+                // A 268MB video through here was the OOM of record; anything that big streams to
+                // DISK via getToFile instead. 64MB covers any still image with room to spare.
+                val out = java.io.ByteArrayOutputStream()
+                val buf = ByteArray(256 * 1024)
+                var total = 0L
+                while (true) {
+                    val n = ins.read(buf)
+                    if (n < 0) break
+                    total += n
+                    if (total > 64L * 1024 * 1024) return@withContext null
+                    out.write(buf, 0, n)
+                }
+                out.toByteArray()
+            }
         } catch (e: Exception) {
             null
         }
     }
+
+    /** GET with ETag revalidation: 304 -> (null, sameEtag) , caller keeps its cache. */
+    suspend fun getBytesEtag(ctx: Context, path: String, etag: String?): Pair<ByteArray?, String?> =
+        withContext(Dispatchers.IO) {
+            try {
+                val conn = open(ctx, path, "GET")
+                if (!etag.isNullOrEmpty()) conn.setRequestProperty("If-None-Match", etag)
+                when (conn.responseCode) {
+                    304 -> { conn.disconnect(); Pair(null, etag) }
+                    200 -> Pair(conn.inputStream.use { it.readBytes() }, conn.getHeaderField("ETag"))
+                    else -> { conn.disconnect(); Pair(null, null) }
+                }
+            } catch (e: Exception) { Pair(null, null) }
+        }
 
     suspend fun getJson(ctx: Context, path: String): JSONObject = withContext(Dispatchers.IO) {
         val conn = open(ctx, path, "GET")
@@ -74,15 +128,50 @@ object BoxHttp {
     suspend fun postStream(ctx: Context, path: String, body: java.io.InputStream, contentType: String = "application/octet-stream", takenAtMs: Long = 0): Int = withContext(Dispatchers.IO) {
         val conn = open(ctx, path, "POST")
         conn.doOutput = true
-        conn.setChunkedStreamingMode(64 * 1024)
+        // 512KB chunks , the 64KB default-ish size was costing a TLS record + syscall dance
+        // every 64KB, which single-stream caps well under what the radio offers. Half a megabyte
+        // per write is still one bounded buffer (never the whole file in RAM), and it lets one
+        // stream actually use a Wi-Fi 6 link.
+        conn.setChunkedStreamingMode(512 * 1024)
         conn.setRequestProperty("Content-Type", contentType)
         // Taken-timestamp hint: the box uses it as the fallback taken time for media whose bytes
         // carry none (videos have no EXIF). A HINT, not trusted identity , content hash stays the id.
         if (takenAtMs > 0) conn.setRequestProperty("X-Ghost-Taken", takenAtMs.toString())
-        conn.outputStream.use { out -> body.copyTo(out, 64 * 1024) }
+        conn.outputStream.use { out -> body.copyTo(out, 512 * 1024) }
         val code = conn.responseCode
         conn.disconnect()
         code
+    }
+
+    /** GET streamed straight to DISK , the big-payload path (video originals). A bounded 512KB
+     *  buffer is the entire RAM footprint no matter how large the file; onBytes reports progress.
+     *  Returns true on a complete 200; a partial write deletes itself , half a video is not a
+     *  video. */
+    suspend fun getToFile(ctx: Context, path: String, dest: java.io.File,
+                          onBytes: ((Long) -> Unit)? = null): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val conn = open(ctx, path, "GET")
+            if (conn.responseCode != 200) { conn.disconnect(); return@withContext false }
+            var total = 0L
+            conn.inputStream.use { ins ->
+                java.io.FileOutputStream(dest).use { out ->
+                    val buf = ByteArray(512 * 1024)
+                    while (true) {
+                        val n = ins.read(buf)
+                        if (n < 0) break
+                        out.write(buf, 0, n)
+                        total += n
+                        onBytes?.invoke(total)
+                    }
+                }
+            }
+            conn.disconnect()
+            true
+        } catch (e: Exception) {
+            runCatching { dest.delete() }
+            android.util.Log.w("LocalGhost", "getToFile $path failed: ${e.message}")
+            false
+        }
     }
 
     /** POST a JSON body, returning the parsed JSON response. On Dispatchers.IO (see getJson). */

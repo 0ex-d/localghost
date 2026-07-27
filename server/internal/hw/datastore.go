@@ -3,6 +3,8 @@ package hw
 import (
 	"fmt"
 	"os"
+	"github.com/LocalGhostDao/localghost/server/internal/poltergres"
+	"log/slog"
 	"os/exec"
 	"os/user"
 	"path/filepath"
@@ -383,6 +385,10 @@ CREATE INDEX IF NOT EXISTS journal_ts ON journal_entries (ts);
 CREATE INDEX IF NOT EXISTS frame_tags_hash ON frame_tags (hash);
 CREATE INDEX IF NOT EXISTS journal_undistilled ON journal_entries (ts DESC) WHERE NOT distilled;
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS source_ref TEXT NOT NULL DEFAULT '';
+-- The long description (the caption's SCENE section, 2-4 sentences). display_name stays SHORT ,
+-- date plus two tags , because tags, description and place carry the detail; a name is a label,
+-- not a summary.
+ALTER TABLE frames ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
 -- ON THIS DAY reports , synthd-composed retrospectives ("this is what you were doing N years ago
 -- today"), cached per month-day: photos + places from frames, notes from the journal, a short
 -- model-written narrative per year. Regenerated when stale (>20h) , the day's content only changes
@@ -806,6 +812,20 @@ func (d *DataStore) EnsureSchema(slot int, c ServicesConfig) error {
 	}
 	if err := run(appConfigSchema); err != nil {
 		return fmt.Errorf("ensure app schema: %w", err)
+	}
+	// DECLARATIVE CONVERGENCE , the registry in schemadef.go is the source of truth going forward.
+	// The blob above bootstraps (belt and braces); this pass diffs the LIVE database against the
+	// registry, adds what is missing, migrates what it safely can, and NAMES drift instead of
+	// destroying it. Users run the latest build, unlock, and read what changed in the log.
+	{
+		cdb := poltergres.NewReadWrite(data, c.Postgres.Port, c.Postgres.User, c.Postgres.Password, c.Postgres.Name)
+		if summary, cerr := ConvergeSchema(cdb, slog.Default()); cerr != nil {
+			// Converge failing must not brick unlock: the blob already ran, so yesterday's schema
+			// is intact and everything that worked keeps working. Loud, not fatal.
+			slog.Error("schema convergence FAILED (running on the bootstrap schema)", "fn", "EnsureSchema", "err", cerr, "partial", summary)
+		} else {
+			slog.Info("schema convergence", "fn", "EnsureSchema", "summary", summary)
+		}
 	}
 	// Service-role GRANTS , the owner may grant on what it owns (everything, post-bootstrap), and
 	// ONLY grant: role creation and passwords are CREATEROLE work, done in ensureOwnerAndDB as the

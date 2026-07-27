@@ -98,6 +98,12 @@ func (b *llamaBackend) Start(ctx context.Context) error {
 		// chat surface is the app through secd's authenticated edge; a browser UI on the loopback
 		// would be an unauthenticated second door for anything that can reach localhost.
 		"--no-webui",
+		// GPU OFFLOAD , the htop confession: llama.cpp with a CUDA build STILL runs pure-CPU
+		// unless told to offload; -ngl is opt-in per run, not baked in at compile. Eleven
+		// CPU-hours ground through four threads while an RTX 4070 watched. All layers to the
+		// GPU; conf can override through ExtraArgs (appended last wins in llama's parser) for
+		// a box that genuinely lacks one.
+		"-ngl", "99",
 	}
 	if b.cfg.MmprojPath != "" {
 		// Optional: a configured-but-missing projector degrades to TEXT-ONLY with a loud warning
@@ -116,7 +122,12 @@ func (b *llamaBackend) Start(ctx context.Context) error {
 	cmd := exec.Command(b.cfg.BinPath, args...)
 	// own process group so oracled can signal the whole group on stop, and inherit oracled's env
 	// (GHOST_LOG_LEVEL etc.). stdout/stderr inherited so llama-server's own logs land in oracled's log.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Setpgid so oracled can signal the whole group on a graceful stop, AND Pdeathsig so the
+	// KERNEL kills llama-server the moment its parent dies , the orphan systemd caught
+	// ("left-over process llama-server in control group while starting unit") held port 18080
+	// and 9GB of VRAM, so the next oracled's child could not bind and every caption timed out
+	// for an hour. A SIGKILLed parent cannot clean up after itself; the kernel can.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
@@ -163,6 +174,11 @@ func (b *llamaBackend) Infer(ctx context.Context, req oracle.Request) (oracle.Re
 	// prefixes, minutes-long answers). /v1/chat/completions applies the template from the GGUF.
 	payload := map[string]any{
 		"messages": []map[string]any{{"role": "user", "content": prompt}},
+		// Same disease, second organ: the TEXT one-shot path (tags, distillation) was still
+		// letting this natively-thinking gemma burn its whole budget on reasoning and return
+		// empty content , the caption fix only covered the multimodal path. One-shot tasks do
+		// not want a monologue; chat (StreamChat) keeps its deliberate <think> handling.
+		"chat_template_kwargs": map[string]any{"enable_thinking": false},
 	}
 	if budget > 0 {
 		payload["max_tokens"] = budget
@@ -184,8 +200,10 @@ func (b *llamaBackend) Infer(ctx context.Context, req oracle.Request) (oracle.Re
 	defer resp.Body.Close()
 	var out struct {
 		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
+				Content   string `json:"content"`
+				Reasoning string `json:"reasoning_content"`
 			} `json:"message"`
 		} `json:"choices"`
 	}
@@ -195,7 +213,13 @@ func (b *llamaBackend) Infer(ctx context.Context, req oracle.Request) (oracle.Re
 	if len(out.Choices) == 0 {
 		return oracle.Response{}, fmt.Errorf("chat/completions: empty choices")
 	}
-	return oracle.Response{Output: out.Choices[0].Message.Content, Model: b.cfg.ModelName}, nil
+	ch := out.Choices[0]
+	if ch.Message.Content == "" && ch.Message.Reasoning != "" {
+		// The model reasoned the budget away and never answered , name it precisely so the log
+		// reads "reasoning consumed the budget", not "the model said something short".
+		return oracle.Response{}, fmt.Errorf("reasoning consumed the token budget (finish=%s, %d reasoning chars, no content) , raise MaxTokens or suppress thinking", ch.FinishReason, len(ch.Message.Reasoning))
+	}
+	return oracle.Response{Output: ch.Message.Content, Model: b.cfg.ModelName}, nil
 }
 
 // inferMultimodal builds an OpenAI-style chat completion with image content parts.
@@ -215,6 +239,12 @@ func (b *llamaBackend) inferMultimodal(ctx context.Context, req oracle.Request) 
 	}
 	payload := map[string]any{
 		"messages": []map[string]any{{"role": "user", "content": content}},
+		// This gemma THINKS NATIVELY and llama-server parses the thinking into reasoning_content ,
+		// caption jobs were burning their whole budget on an internal monologue and returning
+		// EMPTY content ("implausibly short", literally). Ask the template to skip thinking for
+		// these one-shot vision tasks; templates that ignore the kwarg are covered by the budget
+		// and the reasoning-aware parse below.
+		"chat_template_kwargs": map[string]any{"enable_thinking": false},
 	}
 	if req.MaxTokens > 0 {
 		payload["max_tokens"] = req.MaxTokens
@@ -239,8 +269,10 @@ func (b *llamaBackend) inferMultimodal(ctx context.Context, req oracle.Request) 
 	}
 	var out struct {
 		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
+				Content   string `json:"content"`
+				Reasoning string `json:"reasoning_content"`
 			} `json:"message"`
 		} `json:"choices"`
 	}
@@ -250,7 +282,13 @@ func (b *llamaBackend) inferMultimodal(ctx context.Context, req oracle.Request) 
 	if len(out.Choices) == 0 {
 		return oracle.Response{}, fmt.Errorf("chat/completions: empty choices")
 	}
-	return oracle.Response{Output: out.Choices[0].Message.Content, Model: b.cfg.ModelName}, nil
+	ch := out.Choices[0]
+	if ch.Message.Content == "" && ch.Message.Reasoning != "" {
+		// The model reasoned the budget away and never answered , name it precisely so the log
+		// reads "reasoning consumed the budget", not "the model said something short".
+		return oracle.Response{}, fmt.Errorf("reasoning consumed the token budget (finish=%s, %d reasoning chars, no content) , raise MaxTokens or suppress thinking", ch.FinishReason, len(ch.Message.Reasoning))
+	}
+	return oracle.Response{Output: ch.Message.Content, Model: b.cfg.ModelName}, nil
 }
 
 // dataURI wraps image bytes as a data URI, sniffing jpeg/png/webp by magic bytes (jpeg default).

@@ -19,6 +19,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -185,13 +186,43 @@ func ingestHealth(db *poltergres.ReadWrite, path string, lg *slog.Logger) error 
 		lg.Warn("health batch unparseable, skipped", "fn", "ingestHealth", "err", err)
 		return nil
 	}
-	for _, sm := range batch.Samples {
-		if sm.TS <= 0 || len(sm.Metric) > 40 {
-			continue
+	// Samples batch 500 to a statement , a full-history import ships hundreds of thousands of
+	// heart-rate points, and one round trip per point is how a background job becomes a career.
+	{
+		pend := make([]healthSample, 0, 500)
+		flush := func() error {
+			if len(pend) == 0 {
+				return nil
+			}
+			var sb strings.Builder
+			sb.WriteString("INSERT INTO health_samples (metric, ts, value) VALUES ")
+			args := make([]any, 0, len(pend)*3)
+			for i, sm := range pend {
+				if i > 0 {
+					sb.WriteString(",")
+				}
+				fmt.Fprintf(&sb, "($%d,$%d,$%d)", i*3+1, i*3+2, i*3+3)
+				args = append(args, sm.Metric, sm.TS, sm.Value)
+			}
+			sb.WriteString(" ON CONFLICT (metric, ts) DO UPDATE SET value = EXCLUDED.value")
+			if err := db.Exec(sb.String(), args...); err != nil {
+				return err
+			}
+			pend = pend[:0]
+			return nil
 		}
-		if err := db.Exec(
-			"INSERT INTO health_samples (metric, ts, value) VALUES ($1,$2,$3) ON CONFLICT (metric, ts) DO UPDATE SET value = EXCLUDED.value",
-			sm.Metric, sm.TS, sm.Value); err != nil {
+		for _, sm := range batch.Samples {
+			if sm.TS <= 0 || len(sm.Metric) > 40 {
+				continue
+			}
+			pend = append(pend, sm)
+			if len(pend) >= 500 {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+		}
+		if err := flush(); err != nil {
 			return err
 		}
 	}

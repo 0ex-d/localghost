@@ -223,13 +223,57 @@ func (s *Store) EnqueueJob(kind string, payload any) error {
 }
 
 // ClaimJob claims one runnable job of the kind (attempts incremented atomically).
+// UnclaimJob refunds a claim , the attempt did not reach the model (oracled warming), so it must
+// not count against the job's five lives. Warmup storms were quietly EXHAUSTING jobs: five
+// restarts and a photo would never be captioned. Deferred 20s so the lane rests while llama loads.
+func (s *Store) UnclaimJob(id int64) error {
+	return s.db.Exec(
+		"UPDATE search.jobs SET attempts = GREATEST(attempts - 1, 0), run_after = now() + interval '20 seconds' WHERE id = $1", id)
+}
+
+// ReviveJobs resets exhausted jobs (attempts >= 5) to runnable , the paved path for what was a
+// raw psql UPDATE the first time it was needed. Returns how many came back from the dead.
+func (s *Store) ReviveJobs() (int64, error) {
+	rows, err := s.db.Query(
+		"WITH u AS (UPDATE search.jobs SET attempts = 0, run_after = now() WHERE attempts >= 5 RETURNING 1) SELECT count(*) FROM u")
+	if err != nil || len(rows.Vals) == 0 || rows.Vals[0][0] == nil {
+		return 0, err
+	}
+	n, _ := strconv.ParseInt(*rows.Vals[0][0], 10, 64)
+	return n, nil
+}
+
+// ReingestImages enqueues a caption job for every image original that has NO chunks and NO
+// caption job already queued , the idempotent re-import. Safe to run any time: a healthy library
+// enqueues nothing; after a restore or a purge it enqueues exactly the gap.
+func (s *Store) ReingestImages() (int64, error) {
+	rows, err := s.db.Query(`
+		WITH ins AS (
+			INSERT INTO search.jobs (kind, payload)
+			SELECT 'caption', jsonb_build_object('origId', o.id, 'path', o.path)
+			FROM search.originals o
+			WHERE o.source = 'image'
+			  AND NOT EXISTS (SELECT 1 FROM search.chunks c WHERE c.orig_source = 'image' AND c.orig_id = o.id)
+			  AND NOT EXISTS (SELECT 1 FROM search.jobs j WHERE j.kind = 'caption' AND (j.payload->>'origId')::bigint = o.id)
+			RETURNING 1)
+		SELECT count(*) FROM ins`)
+	if err != nil || len(rows.Vals) == 0 || rows.Vals[0][0] == nil {
+		return 0, err
+	}
+	n, _ := strconv.ParseInt(*rows.Vals[0][0], 10, 64)
+	return n, nil
+}
+
 func (s *Store) ClaimJob(kind string) (*Job, error) {
 	rows, err := s.db.Query(`
 		UPDATE search.jobs SET attempts = attempts + 1
 		WHERE id = (
 			SELECT id FROM search.jobs
 			WHERE kind = $1 AND run_after <= now() AND attempts < 5
-			ORDER BY id
+			-- NEWEST FIRST: a person looking at their gallery today wants today's photos named,
+			-- not 2019's. id DESC approximates capture order closely enough (jobs are queued as
+			-- frames archive) without joining frames.
+			ORDER BY id DESC
 			FOR UPDATE SKIP LOCKED
 			LIMIT 1)
 		RETURNING id, payload`, kind)

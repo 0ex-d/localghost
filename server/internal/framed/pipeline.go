@@ -83,6 +83,10 @@ type Pipeline struct {
 	dirs  Dirs
 	store *Store
 	log   *slog.Logger
+	// Bundled ffmpeg (tools/bundle_ffmpeg.sh): binary + its private library closure ON the
+	// volume, so the OS disk carries no media software. Empty = fall back to PATH.
+	ffmpegBin string
+	ffmpegLib string
 	// mu serializes drains: the poll tick and an operator's `ghost-cli ghost.framed drain` can fire
 	// concurrently, and two goroutines processing the same spool file double-read it, collide on the
 	// archive rename, and write duplicate previews. Hash dedup makes it harmless to the DATA, but the
@@ -203,6 +207,17 @@ func (p *Pipeline) processOne(path string) (string, error) {
 		return "", nil
 	}
 
+	// ZERO-BYTE GUARD , cloud-placeholder media (Samsung "optimize storage", OneDrive stubs)
+	// arrive as empty files: MediaStore serves a 0-byte stream for content that lives only in
+	// someone else's datacenter. An empty file is not a memory; archiving it mints a frame with
+	// no pixels, no preview, no caption , a ghost in the wrong sense. Skip, delete the spool
+	// file, and let the phone-side SIZE filter (queued app work) stop them at the source.
+	if st, serr := os.Stat(path); serr == nil && st.Size() == 0 {
+		p.log.Info("empty upload skipped (cloud placeholder?)", "fn", "processOne", "path", filepath.Base(path))
+		_ = os.Remove(path)
+		return "", nil
+	}
+
 	// Sniff from the head, then load FULL bytes only for photos (preview decode needs pixels).
 	sniff := Sniff(head)
 	var raw []byte
@@ -279,7 +294,15 @@ func (p *Pipeline) processOne(path string) (string, error) {
 		}
 	case KindVideo:
 		kindStr = "video"
-		p.log.Info("video archived (no still preview)", "fn", "processOne", "hash", hash, "mime", sniff.MIME)
+		// FRAME GRAB , one second in, one frame out, through ffmpeg if the box has it. Best
+		// effort by design: no ffmpeg means videos keep their play glyph and everything else
+		// works; with it, the gallery and map treat videos as first-class citizens. The grab
+		// feeds the SAME makePreviews path as photos, so preview + thumb + upright all apply.
+		if jpg, gerr := p.grabVideoFrame(archPath); gerr != nil {
+			p.log.Info("video archived (no still preview)", "fn", "processOne", "hash", hash, "mime", sniff.MIME, "note", gerr.Error())
+		} else {
+			prevPath, thumbPath = p.makePreviews(jpg, hash, 1)
+		}
 	default:
 		p.log.Warn("archived unrecognised media type", "fn", "processOne", "hash", hash, "ext", ext)
 	}
@@ -289,7 +312,8 @@ func (p *Pipeline) processOne(path string) (string, error) {
 		place = p.resolvePlace(meta.Lat, meta.Lon).String()
 	}
 	f := Frame{
-		Hash: hash, TakenAt: taken.UTC().Unix(), Place: place,
+		Device: deviceFromName(path),
+		Hash:   hash, TakenAt: taken.UTC().Unix(), Place: place,
 		Lat: meta.Lat, Lon: meta.Lon, HasGPS: meta.HasGPS,
 		ArchivePath: archPath, PreviewPath: prevPath, ThumbPath: thumbPath,
 		Bytes: fileBytes, Source: "phone", ReceivedAt: time.Now().UTC().Unix(),
@@ -318,7 +342,10 @@ func (p *Pipeline) processOne(path string) (string, error) {
 	}
 	p.log.Info("archived", "fn", "processOne", "hash", hash, "day", day, "gps", meta.HasGPS,
 		"bytes", len(raw))
-	if p.notifySearch != nil {
+	if p.notifySearch != nil && kindStr != "video" {
+		// Videos do NOT enter the image ingest lane , they were flowing into caption jobs the
+		// vision model 400s on forever (the immortal job 10135). A video lane (ffmpeg keyframe
+		// -> caption) is future work; until then videos are archived, played, thumbed, unindexed.
 		p.notifySearch(archPath, taken.UTC().Unix())
 	}
 	if meta.HasGPS {
@@ -509,6 +536,26 @@ func extFor(format, orig string) string {
 	}
 }
 
+// deviceFromName extracts the -d<hex> suffix secd appends: which phone uploaded this. Empty when
+// absent (older spools, local imports) , unknown provenance is recorded as unknown, never guessed.
+func deviceFromName(path string) string {
+	base := filepath.Base(path)
+	i := strings.LastIndex(base, "-d")
+	if i < 0 || i+2 >= len(base) {
+		return ""
+	}
+	d := base[i+2:]
+	if j := strings.Index(d, "-"); j >= 0 {
+		d = d[:j]
+	}
+	for _, ch := range d {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+			return ""
+		}
+	}
+	return d
+}
+
 // takenHintFromName extracts the -t<epochMillis> suffix secd appends to spool names when the phone
 // supplied X-Ghost-Taken. Zero when absent or malformed.
 func takenHintFromName(path string) int64 {
@@ -625,6 +672,29 @@ func (p *Pipeline) Reprocess(forcePreviews bool) (scanned, recorded, previewed, 
 			}
 		case KindVideo:
 			kindStr = "video"
+			existingThumb := fileExists(filepath.Join(p.dirs.Thumb, hash+".jpg")) ||
+				fileExists(filepath.Join(p.dirs.Thumb, hash+".webp"))
+			if forcePreviews || !existingThumb {
+				if jpg, gerr := p.grabVideoFrame(path); gerr == nil {
+					prevPath, thumbPath = p.makePreviews(jpg, hash, 1)
+					if thumbPath != "" {
+						previewed++
+					}
+				}
+			} else {
+				tj, tw := filepath.Join(p.dirs.Thumb, hash+".jpg"), filepath.Join(p.dirs.Thumb, hash+".webp")
+				if fileExists(tw) {
+					thumbPath = tw
+				} else if fileExists(tj) {
+					thumbPath = tj
+				}
+				pj, pw := filepath.Join(p.dirs.Preview, hash+".jpg"), filepath.Join(p.dirs.Preview, hash+".webp")
+				if fileExists(pw) {
+					prevPath = pw
+				} else if fileExists(pj) {
+					prevPath = pj
+				}
+			}
 		}
 
 		place := ""
@@ -679,4 +749,33 @@ func (p *Pipeline) Reprocess(forcePreviews bool) (scanned, recorded, previewed, 
 func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
+}
+
+// SetFFmpeg points the pipeline at a bundled ffmpeg (binary + private lib dir). Set when the
+// bundle exists; the volume's copy always outranks whatever the OS happens to have.
+func (p *Pipeline) SetFFmpeg(bin, lib string) { p.ffmpegBin, p.ffmpegLib = bin, lib }
+
+// grabVideoFrame pulls one frame (t=1s, falling back to t=0 for sub-second clips) as JPEG bytes.
+// Bundled ffmpeg first (with ITS libraries via LD_LIBRARY_PATH); PATH as the fallback.
+func (p *Pipeline) grabVideoFrame(videoPath string) ([]byte, error) {
+	ff, env := p.ffmpegBin, []string(nil)
+	if ff != "" {
+		env = append(os.Environ(), "LD_LIBRARY_PATH="+p.ffmpegLib)
+	} else {
+		var err error
+		ff, err = exec.LookPath("ffmpeg")
+		if err != nil {
+			return nil, fmt.Errorf("no ffmpeg (bundle one: tools/bundle_ffmpeg.sh <mount>)")
+		}
+	}
+	for _, seek := range []string{"1", "0"} {
+		cmd := exec.Command(ff, "-hide_banner", "-loglevel", "error",
+			"-ss", seek, "-i", videoPath, "-frames:v", "1", "-f", "image2", "-c:v", "mjpeg", "pipe:1")
+		cmd.Env = env
+		out, cerr := cmd.Output()
+		if cerr == nil && len(out) > 0 {
+			return out, nil
+		}
+	}
+	return nil, fmt.Errorf("ffmpeg produced no frame")
 }

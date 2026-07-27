@@ -33,7 +33,10 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-say() { printf '\n=== %s ===\n' "$1"; }
+# STAGE TIMING , "it takes minutes and I have no idea why" is a measurement problem, so every
+# banner carries seconds-since-start. One helper, every stage, no new call sites.
+_t0=$(date +%s)
+say() { printf '\n=== %s ===  (+%ss)\n' "$1" "$(( $(date +%s) - _t0 ))"; }
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "run as root (sudo): it restarts a system service and writes $SYSTEM_BIN"
@@ -106,7 +109,20 @@ say "4/4  restart ghost.secd"
 # PROMPT for the PIN rather than taking it from the environment or command line , env vars leak
 # into shell history, ps output, and sudo logs; a silent read leaks nowhere. Enter to skip: the
 # deploy then falls back to a plain restart, and you unlock from the app afterwards either way.
-if [ -z "${GHOST_PIN:-}" ] && [ -t 0 ] && [ "$NGINX_ONLY" = "0" ]; then
+# LOCKED-VOLUME SHORT-CIRCUIT , when no mount exists there is nothing to halt: no cohort, no
+# postgres, no PIN worth typing, and every wait below would be a wait for things that do not
+# exist. Detect once, skip the whole ceremony, say so.
+# NAMESPACE LESSON , the volume is mounted inside a MOUNT NAMESPACE, so from root's default
+# view /var/lib/ghost/mnt/slot0 is empty whether the box is locked or not (this is why every
+# psql call in this repo goes through tools/ns.sh). A path test therefore always said "locked"
+# and skipped the graceful halt on a live box. Processes DO cross the boundary , the cohort
+# running is the honest signal, and the script already trusts it below.
+if ! pgrep -f '/var/lib/ghost/mnt/.*/bin/' >/dev/null 2>&1; then
+    GHOST_PIN=""
+    VOLUME_LOCKED=1
+    echo "volume locked , nothing to halt, skipping straight to the binary swap"
+fi
+if [ -z "${GHOST_PIN:-}" ] && [ -t 0 ] && [ "$NGINX_ONLY" = "0" ] && [ "${VOLUME_LOCKED:-0}" = "0" ]; then
     printf "main PIN for graceful halt (Enter to skip): "
     read -rs GHOST_PIN
     echo
@@ -115,16 +131,18 @@ if [ -n "${GHOST_PIN:-}" ] && systemctl is-active --quiet ghost.secd; then
     echo "graceful halt before the binary swap"
     "$REPO/bin/ghost-cli" --run-dir=/var/lib/ghost/run ghost.secd halt "pin=$GHOST_PIN" || true
     # halt replies ok unconditionally (PIN-opaque); confirm by watching the volume's services die.
+    _halt0=$(date +%s)
     for i in $(seq 1 30); do
         pgrep -f '/var/lib/ghost/mnt/.*/bin/' >/dev/null 2>&1 || break
         sleep 1
     done
+    echo "cohort down after $(( $(date +%s) - _halt0 ))s"
     if pgrep -f '/var/lib/ghost/mnt/.*/bin/' >/dev/null 2>&1; then
-        echo "WARNING: volume services still up after halt , wrong PIN? Falling back to restart."
+        echo "still stopping after 30s (wedged daemon getting SIGKILLed) , hard restart; interrupted work heals on next reprocess"
     else
         echo "halted cleanly , cohort down, redis saved, postgres checkpointed."
     fi
-else
+elif [ "${VOLUME_LOCKED:-0}" = "0" ]; then
     echo "NOTE: no GHOST_PIN in the environment , falling back to systemctl restart, which races"
     echo "      secd's SIGTERM lock against systemd's kill timeout. For a guaranteed-clean teardown:"
     echo "        sudo GHOST_PIN=<main pin> ./tools/redeploy.sh"

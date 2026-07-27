@@ -34,12 +34,26 @@ object Notifications {
         ctx, 0, Intent(ctx, MuteReceiver::class.java).setAction(ACTION_MUTE),
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
 
+    /** Tapping a notification opens the app; AFTER the security gate (biometric/PIN as always)
+     *  the app navigates to the notification inside , NOTIFICATIONS for most, MEMORIES for the
+     *  check-in ask. The extra rides the launch intent; unlock consumes it. */
+    private fun tapPI(ctx: Context, kind: String, reqCode: Int): PendingIntent {
+        val i = android.content.Intent(ctx, com.localghost.app.MainActivity::class.java).apply {
+            action = "com.localghost.app.OPEN_NOTIFICATION"
+            putExtra("nav", if (kind == "checkin") "memories" else "notifications")
+            flags = android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        return PendingIntent.getActivity(ctx, reqCode, i,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+    }
+
     fun postBatch(ctx: Context, items: List<PendingNotification>) {
         if (!hasPermission(ctx) || items.isEmpty()) return
         val nm = NotificationManagerCompat.from(ctx)
         items.forEach { item ->
             val d = Daemon.from(item.daemonId)
             nm.notify(d.ordinal + 100, NotificationCompat.Builder(ctx, CHANNEL_ID)
+                .setContentIntent(tapPI(ctx, item.kind, (item.id % 10000).toInt()))
                 .setSmallIcon(d.icon)
                 .setColor(d.color)
                 .setSubText(d.label)
@@ -59,6 +73,7 @@ object Notifications {
             .setContentTitle("LocalGhost")
             .setContentText("${items.size} updates from your box")
             .setStyle(inbox)
+            .setContentIntent(tapPI(ctx, "summary", 9999))
             .setGroup(GROUP_KEY)
             .setGroupSummary(true)
             .setAutoCancel(true)

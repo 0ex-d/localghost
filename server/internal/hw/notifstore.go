@@ -3,6 +3,7 @@ package hw
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"log/slog"
 	"path/filepath"
 	"strconv"
@@ -120,6 +121,7 @@ type FrameRow struct {
 	Name    string   `json:"name,omitempty"` // derived (date + tags) until a user rename exists
 	Tags    []string `json:"tags,omitempty"` // model + user tags; tombstoned removals excluded
 	Place   string   `json:"place,omitempty"` // reverse-geocoded hierarchy, "" until geo data lands
+	Description string `json:"description,omitempty"` // the caption's SCENE section
 }
 
 // FramesList pages the archive newest-first: frames with taken_at strictly BEFORE the cursor (pass 0
@@ -137,7 +139,7 @@ func (s *NotifStore) FramesList(slot int, beforeTs int64, limit int) ([]FrameRow
 		limit = 60
 	}
 	rows, err := c.Query(
-		"SELECT hash, taken_at, kind, bytes, display_name, place FROM frames WHERE taken_at < $1 ORDER BY taken_at DESC LIMIT "+strconv.Itoa(limit),
+		"SELECT hash, taken_at, kind, bytes, display_name, place, description FROM frames WHERE taken_at < $1 ORDER BY taken_at DESC LIMIT "+strconv.Itoa(limit),
 		strconv.FormatInt(beforeTs, 10))
 	if err != nil {
 		return nil, err
@@ -162,6 +164,9 @@ func (s *NotifStore) FramesList(slot int, beforeTs int64, limit int) ([]FrameRow
 		}
 		if len(v) > 5 && v[5] != nil {
 			r.Place = *v[5]
+		}
+		if len(v) > 6 && v[6] != nil {
+			r.Description = *v[6]
 		}
 		out = append(out, r)
 	}
@@ -387,9 +392,10 @@ func (s *NotifStore) CursorSet(slot int, device, kind string, ts, id int64) erro
 	if err != nil {
 		return err
 	}
-	err = c.Exec(`INSERT INTO sync_cursors (device, kind, ts, id) VALUES ($1,$2,$3,$4)
+	err = c.Exec(`INSERT INTO sync_cursors (device, kind, ts, id, updated_at) VALUES ($1,$2,$3,$4,extract(epoch from now())::bigint)
 		ON CONFLICT (device, kind) DO UPDATE SET ts = GREATEST(sync_cursors.ts, EXCLUDED.ts),
-		id = CASE WHEN EXCLUDED.ts >= sync_cursors.ts THEN EXCLUDED.id ELSE sync_cursors.id END`,
+		id = CASE WHEN EXCLUDED.ts >= sync_cursors.ts THEN EXCLUDED.id ELSE sync_cursors.id END,
+		updated_at = EXCLUDED.updated_at`,
 		device, kind, strconv.FormatInt(ts, 10), strconv.FormatInt(id, 10))
 	if err != nil {
 		return err
@@ -516,6 +522,27 @@ func (s *NotifStore) FramesHave(slot int, hashes []string) (map[string]bool, err
 }
 
 // FrameThumbPath returns the on-volume path of a frame's thumbnail ("" if none , e.g. videos).
+// FramePreviewPath , the big derived JPEG for the full-screen viewer (falls back to the thumb when
+// a preview was never rendered).
+func (s *NotifStore) FramePreviewPath(slot int, hash string) (string, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return "", err
+	}
+	rows, err := c.Query("SELECT preview_path, thumb_path FROM frames WHERE hash = $1", hash)
+	if err != nil || len(rows.Vals) == 0 {
+		return "", err
+	}
+	v := rows.Vals[0]
+	if len(v) > 0 && v[0] != nil && *v[0] != "" {
+		return *v[0], nil
+	}
+	if len(v) > 1 && v[1] != nil {
+		return *v[1], nil
+	}
+	return "", nil
+}
+
 func (s *NotifStore) FrameThumbPath(slot int, hash string) (string, error) {
 	c, err := s.pg(slot)
 	if err != nil {
@@ -1246,4 +1273,525 @@ func (s *NotifStore) HealthStats(slot int, n int) ([]HealthSeries, error) {
 		last.Values = append(last.Values, val)
 	}
 	return out, nil
+}
+
+// GeoCluster is one aggregated map point: a grid cell's centroid, how many frames fell in it, and
+// (when the cell holds exactly one) that frame's hash so the app can open it.
+type GeoCluster struct {
+	Lat, Lon float64 `json:"lat,omitempty"`
+	N        int     `json:"n"`
+	Hash     string  `json:"hash,omitempty"`
+	TakenAt  int64   `json:"takenAt,omitempty"`
+}
+
+// geoLevelPrecision , four LOD tiers. The map picks by zoom; POSTGRES does the aggregation, so a
+// world view ships a few hundred rows instead of 50,000 points the canvas then has to overdraw.
+// Level 3 is raw frames (already bbox-limited by the client's viewport at that zoom).
+func geoLevelPrecision(level int) float64 {
+	switch level {
+	case 0:
+		return 1.0 // continent , ~110km cells
+	case 1:
+		return 0.1 // region , ~11km
+	case 2:
+		return 0.01 // town , ~1.1km
+	default:
+		return 0 // raw
+	}
+}
+
+// FramesGeoLOD returns aggregated map points for a bbox at one of four levels. Level 3 returns
+// individual frames (hash included) so tapping opens the photo; lower levels return cell centroids
+// with counts. The 100m-clump problem solves itself at level 3 plus deep zoom , the cells vanish
+// and the individual dots spread.
+func (s *NotifStore) FramesGeoLOD(slot, level int, minLat, maxLat, minLon, maxLon float64, limit int) ([]GeoCluster, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return nil, err
+	}
+	// HARD CEILING 500 , the two-person archive froze the phone: 43k points into a Compose
+	// canvas is not a map, it is a hang. Clusters are ordered biggest-first so the 500 you get
+	// are the 500 that matter; raw tier keeps newest-first. The app never needs its own guard
+	// because the API is incapable of flooding it.
+	// 800, reasoned rather than random: the app fetches a 2x-viewport margin, so ~a quarter of
+	// delivered points are on screen at once at cluster tiers, while a dense in-view hike can
+	// still show up to 800 raw points , enough for any trail's shape, comfortably under what
+	// Compose redraws smoothly at 60fps on mid-range hardware.
+	if limit <= 0 || limit > 800 {
+		limit = 800
+	}
+	// ADAPTIVE LOD , the Google-maps feel in two rules. Rule one: if the viewport holds few
+	// enough real points, return them ALL, raw , this is what preserves the SHAPE of a hike
+	// (a trail's photos are dozens of points, and truncating them makes a line into confetti).
+	// Rule two: otherwise pick the cluster grid FROM THE VIEWPORT , span divided into ~24 cells
+	// across, snapped to a precision ladder , so every zoom step splits clusters naturally and
+	// continuously. The client's level parameter survives as a hint only; the viewport knows
+	// better than the client's four fixed tiers ever did.
+	// BBOX SANITISER , the world-view margin fetch pushes the app's inverse-Mercator past its
+	// domain and NaN/Inf arrive here; NaN in a BETWEEN kills the query and an appears-down
+	// answer reads as "no photos anywhere". Comparisons with NaN are false, so the clamp
+	// pattern below catches NaN AND out-of-range in one move: anything not provably inside
+	// becomes the world edge.
+	if !(minLat >= -90) {
+		minLat = -90
+	}
+	if !(maxLat <= 90) {
+		maxLat = 90
+	}
+	if !(minLon >= -180) {
+		minLon = -180
+	}
+	if !(maxLon <= 180) {
+		maxLon = 180
+	}
+	if !(minLat < maxLat) {
+		minLat, maxLat = -90, 90
+	}
+	if !(minLon < maxLon) {
+		minLon, maxLon = -180, 180
+	}
+	span := maxLat - minLat
+	if lonSpan := maxLon - minLon; lonSpan > span {
+		span = lonSpan
+	}
+	var rawCount int64
+	if rows, qerr := c.Query(
+		"SELECT count(*) FROM frames WHERE has_gps AND lat BETWEEN $1 AND $2 AND lon BETWEEN $3 AND $4",
+		minLat, maxLat, minLon, maxLon); qerr == nil && len(rows.Vals) == 1 && rows.Vals[0][0] != nil {
+		rawCount, _ = strconv.ParseInt(*rows.Vals[0][0], 10, 64)
+	}
+	prec := 0.0
+	if rawCount > int64(limit) {
+		want := span / 24.0
+		prec = 5.0
+		for _, p := range []float64{5, 2, 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01, 0.005, 0.002, 0.001} {
+			prec = p
+			if p <= want {
+				break
+			}
+		}
+	}
+	_ = geoLevelPrecision(level) // the old fixed ladder, kept for reference; viewport wins
+	if prec == 0 {
+		rows, qerr := c.Query(
+			"SELECT lat, lon, hash, taken_at FROM frames WHERE has_gps AND lat BETWEEN $1 AND $2 AND lon BETWEEN $3 AND $4 ORDER BY taken_at DESC LIMIT "+strconv.Itoa(limit),
+			minLat, maxLat, minLon, maxLon)
+		if qerr != nil {
+			return nil, qerr
+		}
+		out := make([]GeoCluster, 0, len(rows.Vals))
+		for _, v := range rows.Vals {
+			if len(v) < 4 || v[0] == nil || v[1] == nil {
+				continue
+			}
+			g := GeoCluster{N: 1}
+			g.Lat, _ = strconv.ParseFloat(*v[0], 64)
+			g.Lon, _ = strconv.ParseFloat(*v[1], 64)
+			if v[2] != nil {
+				g.Hash = *v[2]
+			}
+			if v[3] != nil {
+				g.TakenAt, _ = strconv.ParseInt(*v[3], 10, 64)
+			}
+			out = append(out, g)
+		}
+		return out, nil
+	}
+	// prec goes in as a FORMATTED LITERAL, not a bind param: it is a server-computed value from
+	// a fixed ladder (no user input, no injection surface), and a float parameter inside a
+	// GROUP BY expression is exactly the kind of thing a driver can send untyped and postgres
+	// can refuse. One less way for this query to fail silently.
+	precLit := strconv.FormatFloat(prec, 'f', -1, 64)
+	rows, err := c.Query(`
+		SELECT avg(lat), avg(lon), count(*), min(hash), max(taken_at)
+		FROM frames
+		WHERE has_gps AND lat BETWEEN $1 AND $2 AND lon BETWEEN $3 AND $4
+		GROUP BY floor(lat/`+precLit+`), floor(lon/`+precLit+`)
+		ORDER BY count(*) DESC LIMIT `+strconv.Itoa(limit),
+		minLat, maxLat, minLon, maxLon)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]GeoCluster, 0, len(rows.Vals))
+	for _, v := range rows.Vals {
+		if len(v) < 5 || v[0] == nil || v[1] == nil || v[2] == nil {
+			continue
+		}
+		var g GeoCluster
+		g.Lat, _ = strconv.ParseFloat(*v[0], 64)
+		g.Lon, _ = strconv.ParseFloat(*v[1], 64)
+		nn, _ := strconv.Atoi(*v[2])
+		g.N = nn
+		if nn == 1 && v[3] != nil {
+			g.Hash = *v[3]
+		}
+		if v[4] != nil {
+			g.TakenAt, _ = strconv.ParseInt(*v[4], 10, 64)
+		}
+		out = append(out, g)
+	}
+	return out, nil
+}
+
+// NewestGeoFrame returns the most recent geotagged frame , the map's opening view centres here.
+func (s *NotifStore) NewestGeoFrame(slot int) (GeoCluster, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return GeoCluster{}, err
+	}
+	rows, err := c.Query("SELECT lat, lon, hash, taken_at FROM frames WHERE has_gps ORDER BY taken_at DESC LIMIT 1")
+	if err != nil || len(rows.Vals) == 0 {
+		return GeoCluster{}, err
+	}
+	v := rows.Vals[0]
+	g := GeoCluster{N: 1}
+	if len(v) >= 4 {
+		if v[0] != nil {
+			g.Lat, _ = strconv.ParseFloat(*v[0], 64)
+		}
+		if v[1] != nil {
+			g.Lon, _ = strconv.ParseFloat(*v[1], 64)
+		}
+		if v[2] != nil {
+			g.Hash = *v[2]
+		}
+		if v[3] != nil {
+			g.TakenAt, _ = strconv.ParseInt(*v[3], 10, 64)
+		}
+	}
+	return g, nil
+}
+
+// DaemonKV is one row of a daemon's drill-in summary.
+type DaemonKV struct {
+	K string `json:"k"`
+	V string `json:"v"`
+}
+
+// DaemonSummary , the per-daemon screens' feed. Each daemon's domain summarized from ITS OWN
+// tables (rule 1 in DATA.md: single writer, single reader-of-record). All flat SELECTs.
+func (s *NotifStore) DaemonSummary(slot int, name string) ([]DaemonKV, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return nil, err
+	}
+	one := func(q string, args ...any) string {
+		rows, qerr := c.Query(q, args...)
+		if qerr != nil || len(rows.Vals) == 0 || len(rows.Vals[0]) == 0 || rows.Vals[0][0] == nil {
+			return "0"
+		}
+		return *rows.Vals[0][0]
+	}
+	kv := []DaemonKV{}
+	add := func(k, v string) { kv = append(kv, DaemonKV{k, v}) }
+	switch name {
+	case "ghost.framed":
+		add("frames archived", one("SELECT count(*) FROM frames"))
+		add("photos", one("SELECT count(*) FROM frames WHERE kind = 'photo'"))
+		add("videos", one("SELECT count(*) FROM frames WHERE kind = 'video'"))
+		add("geotagged", one("SELECT count(*) FROM frames WHERE has_gps"))
+		add("placed", one("SELECT count(*) FROM frames WHERE place <> ''"))
+		add("named", one("SELECT count(*) FROM frames WHERE display_name <> ''"))
+		add("described", one("SELECT count(*) FROM frames WHERE description <> ''"))
+		add("tagged", one("SELECT count(DISTINCT hash) FROM frame_tags WHERE source <> 'user_removed'"))
+		add("caption queue", one("SELECT count(*) FROM search.jobs WHERE kind = 'caption' AND attempts < 5"))
+		add("captions exhausted", one("SELECT count(*) FROM search.jobs WHERE kind = 'caption' AND attempts >= 5"))
+		add("track points", one("SELECT count(*) FROM location_points"))
+		add("geo places loaded", one("SELECT count(*) FROM geo_points"))
+		if ts := one("SELECT to_char(to_timestamp(max(taken_at)), 'YYYY-MM-DD HH24:MI') FROM frames"); ts != "0" && ts != "" {
+			add("newest capture", ts)
+		}
+		if ents, derr := os.ReadDir("/var/lib/ghost/backup"); derr == nil {
+			seals, latest := 0, ""
+			for _, e := range ents {
+				if strings.HasSuffix(e.Name(), ".tar.seal") {
+					seals++
+					if e.Name() > latest {
+						latest = e.Name()
+					}
+				}
+			}
+			if seals > 0 {
+				add("backups on disk", strconv.Itoa(seals))
+				add("latest backup", latest)
+			} else {
+				add("backups", "directory present, none written yet")
+			}
+		} else {
+			add("backups", "idle , no key (ghost.restore keygen)")
+		}
+	case "ghost.noted":
+		add("journal entries", one("SELECT count(*) FROM journal_entries"))
+		add("from noted", one("SELECT count(*) FROM journal_entries WHERE source = 'ghost.noted'"))
+		add("from framed", one("SELECT count(*) FROM journal_entries WHERE source = 'ghost.framed'"))
+		add("from tallyd", one("SELECT count(*) FROM journal_entries WHERE source = 'ghost.tallyd'"))
+		add("awaiting distillation", one("SELECT count(*) FROM journal_entries WHERE NOT distilled"))
+	case "ghost.synthd":
+		add("memories (live)", one("SELECT count(*) FROM memories WHERE NOT tombstoned"))
+		add("yours (user-made)", one("SELECT count(*) FROM memories WHERE kind = 'user' AND NOT tombstoned"))
+		add("tombstoned", one("SELECT count(*) FROM memories WHERE tombstoned"))
+		add("distill queue", one("SELECT count(*) FROM journal_entries WHERE NOT distilled"))
+		add("day episodes", one("SELECT count(*) FROM memories WHERE kind = 'episode' AND NOT tombstoned"))
+		add("cached reports", one("SELECT count(*) FROM reports"))
+	case "ghost.searchd":
+		add("caption jobs pending", one("SELECT count(*) FROM search.jobs WHERE kind = 'caption' AND attempts < 5"))
+		add("caption jobs exhausted", one("SELECT count(*) FROM search.jobs WHERE kind = 'caption' AND attempts >= 5"))
+		add("tag jobs pending", one("SELECT count(*) FROM search.jobs WHERE kind = 'tag' AND attempts < 5"))
+		add("embed jobs pending", one("SELECT count(*) FROM search.jobs WHERE kind = 'embed_text' AND attempts < 5"))
+		add("other jobs pending", one("SELECT count(*) FROM search.jobs WHERE kind NOT IN ('caption','tag','embed_text') AND attempts < 5"))
+		add("indexed chunks", one("SELECT count(*) FROM search.chunks"))
+		add("tags written", one("SELECT count(*) FROM frame_tags WHERE source <> 'user_removed'"))
+	case "ghost.tallyd":
+		add("health days", one("SELECT count(DISTINCT day) FROM health_metrics"))
+		add("metrics rows", one("SELECT count(*) FROM health_metrics"))
+		add("high-res samples", one("SELECT count(*) FROM health_samples"))
+		if d := one("SELECT min(day) FROM health_metrics"); d != "0" {
+			add("earliest day", d)
+		}
+	case "ghost.shadowd":
+		add("charter", "anti-possession: watches usage patterns FOR you, never for engagement")
+		add("your messages (7d)", one("SELECT count(*) FROM chat_messages WHERE role = 'user' AND ts >= extract(epoch from now())::bigint - 7*86400"))
+		add("prior 7d", one("SELECT count(*) FROM chat_messages WHERE role = 'user' AND ts >= extract(epoch from now())::bigint - 14*86400 AND ts < extract(epoch from now())::bigint - 7*86400"))
+		add("days you talked (14d)", one("SELECT count(DISTINCT to_char(to_timestamp(ts),'YYYY-MM-DD')) FROM chat_messages WHERE role = 'user' AND ts >= extract(epoch from now())::bigint - 14*86400"))
+		add("detector", "interaction trend LIVE; next: sunk-cost, topic narrowing")
+	case "ghost.cued":
+		add("charter", "surfaces reflections from your life , offerings, not homework")
+		add("episodes to draw from", one("SELECT count(*) FROM memories WHERE kind = 'episode' AND NOT tombstoned"))
+		add("last reflection", one("SELECT coalesce(value,'never') FROM settings WHERE key = 'cued_reflected'"))
+	case "ghost.oracled":
+		add("role", "the only daemon that talks to the model; everyone else asks it")
+		add("queue + model state", "see Box Status sparklines (stats sampler)")
+	default:
+		add("note", "no drill-in for this daemon yet")
+	}
+	return kv, nil
+}
+
+// GetSetting / SetSetting , the shared settings KV (single row per key).
+func (s *NotifStore) GetSetting(slot int, key string) (string, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return "", err
+	}
+	rows, err := c.Query("SELECT value FROM settings WHERE key = $1", key)
+	if err != nil || len(rows.Vals) == 0 || rows.Vals[0][0] == nil {
+		return "", err
+	}
+	return *rows.Vals[0][0], nil
+}
+
+func (s *NotifStore) SetSetting(slot int, key, value string) error {
+	c, err := s.pg(slot)
+	if err != nil {
+		return err
+	}
+	return c.Exec("INSERT INTO settings (key, value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", key, value)
+}
+
+// CheckinDoneToday , did a daily check-in land in the journal for this date.
+func (s *NotifStore) CheckinDoneToday(slot int, day string) (bool, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return false, err
+	}
+	rows, err := c.Query(
+		"SELECT 1 FROM journal_entries WHERE source = 'ghost.noted' AND title LIKE 'Daily check-in%' AND body LIKE '%' || $1 || '%' LIMIT 1", day)
+	if err != nil {
+		return false, err
+	}
+	return len(rows.Vals) > 0, nil
+}
+
+// CheckinRow is one past daily check-in, parsed back out of its journal entry.
+type CheckinRow struct {
+	Day      string `json:"day"`
+	Feelings string `json:"feelings"`
+	Why      string `json:"why,omitempty"`
+}
+
+// CheckinHistory , past check-ins, newest first. The check-in is a journal entry by design (one
+// write path, full sovereignty); this parses the structured text back into rows for the strip and
+// the "yesterday you felt" continuity line.
+func (s *NotifStore) CheckinHistory(slot, n int) ([]CheckinRow, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return nil, err
+	}
+	if n <= 0 || n > 90 {
+		n = 30
+	}
+	rows, err := c.Query(
+		"SELECT body FROM journal_entries WHERE source = 'ghost.noted' AND title LIKE 'Daily check-in%' ORDER BY ts DESC LIMIT "+strconv.Itoa(n))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]CheckinRow, 0, len(rows.Vals))
+	for _, v := range rows.Vals {
+		if len(v) == 0 || v[0] == nil {
+			continue
+		}
+		var r CheckinRow
+		for _, line := range strings.Split(*v[0], "\n") {
+			line = strings.TrimSpace(line)
+			switch {
+			case strings.HasPrefix(line, "Daily check-in "):
+				r.Day = strings.TrimPrefix(line, "Daily check-in ")
+			case strings.HasPrefix(line, "Feeling: "):
+				r.Feelings = strings.TrimPrefix(line, "Feeling: ")
+			case strings.HasPrefix(line, "Why: "):
+				r.Why = strings.TrimPrefix(line, "Why: ")
+			}
+		}
+		if r.Day != "" {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+
+// FrameOriginalPath , the untouched archived original and its mime, for the full-quality viewer.
+func (s *NotifStore) FrameOriginalPath(slot int, hash string) (string, string, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return "", "", err
+	}
+	rows, err := c.Query("SELECT archive_path, mime FROM frames WHERE hash = $1", hash)
+	if err != nil || len(rows.Vals) == 0 {
+		return "", "", err
+	}
+	v := rows.Vals[0]
+	p, m := "", ""
+	if len(v) > 0 && v[0] != nil {
+		p = *v[0]
+	}
+	if len(v) > 1 && v[1] != nil {
+		m = *v[1]
+	}
+	return p, m, nil
+}
+
+// ResetSyncCursors zeroes THIS device's sync cursors , the app then re-offers its entire library
+// from the beginning, and hash dedup archives only what the box lacks. Per-device by design: one
+// phone rewinding does not touch another's progress.
+func (s *NotifStore) ResetSyncCursors(slot int, device string) error {
+	c, err := s.pg(slot)
+	if err != nil {
+		return err
+	}
+	return c.Exec("DELETE FROM sync_cursors WHERE device = $1", device)
+}
+
+// DeviceRow , what the box honestly knows about one enrolled phone: which device key, when it
+// last reported sync progress, and how far its photo and video cursors have walked (the cursor
+// ts IS the taken_at of the newest item that device has offered, so it answers "last picture"
+// and "last video" exactly).
+type DeviceRow struct {
+	Device    string `json:"device"`
+	Frames    int64  `json:"frames"`
+	Name      string `json:"name"`
+	Model     string `json:"model"`
+	FirstSeen int64  `json:"firstSeen"`
+	UpdatedAt int64  `json:"updatedAt"`
+	PhotoTS   int64  `json:"photoTs"`
+	VideoTS   int64  `json:"videoTs"`
+	This      bool   `json:"thisDevice"`
+}
+
+// DevicesInfo returns one row per device that has ever reported a cursor.
+func (s *NotifStore) DevicesInfo(slot int) ([]DeviceRow, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := c.Query(`
+		SELECT c.device,
+		       max(c.updated_at),
+		       coalesce(max(c.ts) FILTER (WHERE c.kind = 'photo'), 0),
+		       coalesce(max(c.ts) FILTER (WHERE c.kind = 'video'), 0),
+		       coalesce(min(n.name), ''), coalesce(min(n.model), ''), coalesce(min(n.first_seen), 0),
+		       coalesce((SELECT count(*) FROM frames f WHERE f.device = c.device), 0)
+		FROM sync_cursors c LEFT JOIN device_names n ON n.device = c.device
+		GROUP BY c.device ORDER BY max(c.updated_at) DESC`)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]DeviceRow, 0, len(rows.Vals))
+	for _, v := range rows.Vals {
+		if len(v) < 4 || v[0] == nil {
+			continue
+		}
+		var d DeviceRow
+		d.Device = *v[0]
+		if v[1] != nil {
+			d.UpdatedAt, _ = strconv.ParseInt(*v[1], 10, 64)
+		}
+		if v[2] != nil {
+			d.PhotoTS, _ = strconv.ParseInt(*v[2], 10, 64)
+		}
+		if v[3] != nil {
+			d.VideoTS, _ = strconv.ParseInt(*v[3], 10, 64)
+		}
+		if len(v) > 4 && v[4] != nil {
+			d.Name = *v[4]
+		}
+		if len(v) > 5 && v[5] != nil {
+			d.Model = *v[5]
+		}
+		if len(v) > 6 && v[6] != nil {
+			d.FirstSeen, _ = strconv.ParseInt(*v[6], 10, 64)
+		}
+		if len(v) > 7 && v[7] != nil {
+			d.Frames, _ = strconv.ParseInt(*v[7], 10, 64)
+		}
+		out = append(out, d)
+	}
+	return out, nil
+}
+
+// DeviceNameSet records what a phone calls itself (model), what the person calls it (name), and
+// its stable id. THE ADOPTION: when a stable id arrives on a NEW certificate, the phone has been
+// reinstalled , the box recognises it, inherits the old name, MIGRATES ITS SYNC CURSORS (taking
+// the furthest position of each kind) and retires the old row. A reinstall therefore resumes
+// where it left off instead of re-offering the whole library, and the devices screen shows one
+// phone rather than a graveyard of certificates.
+//
+// Trust note: a stable-id claim can only be made by an already-enrolled device (valid client
+// cert, issued through the paired-QR + PIN flow), and every enrolled device already sees the
+// same archive , so the claim moves cursor bookkeeping, never access.
+func (s *NotifStore) DeviceNameSet(slot int, device, name, model, stableID string) error {
+	c, err := s.pg(slot)
+	if err != nil {
+		return err
+	}
+	if stableID != "" {
+		rows, qerr := c.Query(
+			"SELECT device, name FROM device_names WHERE stable_id = $1 AND device <> $2 LIMIT 1", stableID, device)
+		if qerr == nil && len(rows.Vals) == 1 && rows.Vals[0][0] != nil {
+			old := *rows.Vals[0][0]
+			if name == "" && rows.Vals[0][1] != nil {
+				name = *rows.Vals[0][1]
+			}
+			if err := c.Exec(`INSERT INTO sync_cursors (device, kind, ts, id, updated_at)
+				SELECT $1, kind, ts, id, updated_at FROM sync_cursors WHERE device = $2
+				ON CONFLICT (device, kind) DO UPDATE SET
+					ts = GREATEST(sync_cursors.ts, EXCLUDED.ts),
+					id = CASE WHEN EXCLUDED.ts >= sync_cursors.ts THEN EXCLUDED.id ELSE sync_cursors.id END`,
+				device, old); err != nil {
+				return err
+			}
+			if err := c.Exec("DELETE FROM sync_cursors WHERE device = $1", old); err != nil {
+				return err
+			}
+			if err := c.Exec("DELETE FROM device_names WHERE device = $1", old); err != nil {
+				return err
+			}
+		}
+	}
+	return c.Exec(`INSERT INTO device_names (device, name, model, first_seen, stable_id)
+		VALUES ($1,$2,$3,extract(epoch from now())::bigint,$4)
+		ON CONFLICT (device) DO UPDATE SET
+			name = CASE WHEN EXCLUDED.name <> '' THEN EXCLUDED.name ELSE device_names.name END,
+			model = CASE WHEN EXCLUDED.model <> '' THEN EXCLUDED.model ELSE device_names.model END,
+			stable_id = CASE WHEN EXCLUDED.stable_id <> '' THEN EXCLUDED.stable_id ELSE device_names.stable_id END`,
+		device, name, model, stableID)
 }

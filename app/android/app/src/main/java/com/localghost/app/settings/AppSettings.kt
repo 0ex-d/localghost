@@ -23,6 +23,11 @@ object AppSettings {
     /** The last saved (non-incognito) box chat the person was in , restored after re-unlock so the
      *  conversation survives the app process, not just the box (the box always had it; the SCREEN
      *  forgot). 0 = none. */
+    /** GLOBAL DEBUG MODE , toggled from Settings ("set app in debug mode"). Gates the tok/s
+     *  meter and whatever diagnostics attach later. Off by default; a user flag, not a build. */
+    fun debugMode(ctx: Context): Boolean = prefs(ctx).getBoolean("debug_mode", false)
+    fun setDebugMode(ctx: Context, on: Boolean) = prefs(ctx).edit().putBoolean("debug_mode", on).apply()
+
     fun lastCheckinDay(ctx: Context): String = prefs(ctx).getString("last_checkin_day", "") ?: ""
     fun setLastCheckinDay(ctx: Context, d: String) = prefs(ctx).edit().putString("last_checkin_day", d).apply()
 

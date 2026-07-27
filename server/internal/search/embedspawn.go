@@ -41,12 +41,20 @@ func (e *EmbedServer) Start(within time.Duration) error {
 		"--model", e.cfg.ModelPath,
 		"--host", "127.0.0.1", "--port", strconv.Itoa(e.cfg.Port),
 		"--embedding",
+		// nomic-style embedders 500 on /v1/embeddings without an explicit pooling mode , mean
+		// pooling is what these models were trained for. The batch/ctx sizes cover our chunk
+		// lengths with headroom.
+		"--pooling", "mean",
+		"-c", "2048",
+		"-ub", "1024",
 		"-ngl", "0",
 	}
 	if e.cfg.Threads > 0 {
 		args = append(args, "--threads", strconv.Itoa(e.cfg.Threads))
 	}
 	cmd := exec.Command(e.cfg.BinPath, args...)
+	// Same orphan lesson as oracled: the kernel reaps the embed child if searchd dies hard.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {

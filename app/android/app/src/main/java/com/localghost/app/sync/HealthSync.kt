@@ -11,12 +11,14 @@ import androidx.health.connect.client.records.SleepSessionRecord
 import androidx.health.connect.client.records.StepsRecord
 import androidx.health.connect.client.records.TotalCaloriesBurnedRecord
 import androidx.health.connect.client.records.WeightRecord
+import androidx.health.connect.client.request.AggregateGroupByPeriodRequest
 import androidx.health.connect.client.request.ReadRecordsRequest
 import androidx.health.connect.client.time.TimeRangeFilter
 import com.localghost.app.net.BoxClient
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.time.temporal.ChronoUnit
 
 /**
  * Reads the phone's Health Connect store , where Samsung Health (and every other health app that
@@ -35,6 +37,10 @@ object HealthSync {
         HealthPermission.getReadPermission(TotalCaloriesBurnedRecord::class),
         HealthPermission.getReadPermission(FloorsClimbedRecord::class),
         HealthPermission.getReadPermission(WeightRecord::class),
+        // History gate , literal string (the constant arrived in a later client than ours):
+        // without it, reads reach only 30 days before the grant, which is exactly the "one month
+        // then nothing" the first full-history walk produced.
+        "android.permission.health.READ_HEALTH_DATA_HISTORY",
     )
 
     fun available(ctx: Context): Boolean =
@@ -51,17 +57,59 @@ object HealthSync {
         granted.containsAll(PERMISSIONS)
     } catch (_: Exception) { false }
 
-    data class SyncResult(val days: Int, val skipped: List<String>, val error: String? = null)
+    data class SyncResult(val days: Int, val skipped: List<String>, val error: String? = null,
+                          val calOnlyDays: Int = 0)
 
-    /** Read the last 7 days and upload. EACH record type is isolated: a denied permission or a
+    /** FULL HISTORY , walks back month by month from now, syncing each window, until `emptyStop`
+     *  consecutive empty months say the record ends (capped 20 years , if your watch predates
+     *  that, congratulations). Each month is its own upload chunk, so memory and the box's 1MB
+     *  cap stay honoured no matter how dense a life gets. onProgress gets a short status line. */
+    suspend fun syncAll(ctx: Context, onProgress: (String) -> Unit): SyncResult {
+        var months = 0
+        var shipped = 0
+        var empties = 0
+        var calOnlyTotal = 0
+        val allSkipped = LinkedHashSet<String>()
+        val cal = java.util.Calendar.getInstance()
+        while (months < 240 && empties < 6) {
+            val end = cal.timeInMillis
+            cal.add(java.util.Calendar.MONTH, -1)
+            val start = cal.timeInMillis
+            val fmt = java.text.SimpleDateFormat("MMM yyyy", java.util.Locale.US)
+            onProgress("reading ${fmt.format(java.util.Date(start))}…")
+            val r = sync(ctx, Instant.ofEpochMilli(start), Instant.ofEpochMilli(end))
+            allSkipped.addAll(r.skipped)
+            if (r.error != null && shipped == 0 && months == 0) return SyncResult(0, r.skipped, r.error)
+            calOnlyTotal += r.calOnlyDays
+            if (r.days == 0) empties++ else { empties = 0; shipped += r.days }
+            months++
+            onProgress("$shipped day(s) shipped · ${months} month(s) walked")
+        }
+        if (months >= 7 && shipped in 0..35) {
+            // TWO different walls, now told apart by evidence. If the filter ate calories-only
+            // days, the permission is fine , Health Connect's past holds ONLY Samsung's
+            // synthesized BMR line, meaning the real measurements never left Samsung Health.
+            // Only when nothing at all came back is the permission the suspect.
+            if (calOnlyTotal > 30) {
+                allSkipped.add("$calOnlyTotal past day(s) held only synthesized calories , " +
+                    "check Samsung Health > Settings > Health Connect: enable sharing for steps/" +
+                    "sleep/heart; real history may live only inside Samsung Health")
+            } else {
+                allSkipped.add("older history locked , tap CONNECT HEALTH again and allow access to past data")
+            }
+        }
+        return SyncResult(shipped, allSkipped.toList())
+    }
+
+    /** Read one window and upload. EACH record type is isolated: a denied permission or a
      *  flaky provider skips that type (named in `skipped`) rather than failing the sync , partial
      *  data honestly labelled beats all-or-nothing. */
-    suspend fun sync(ctx: Context): SyncResult = try {
+    suspend fun sync(ctx: Context, fromT: Instant? = null, toT: Instant? = null): SyncResult = try {
         val client = HealthConnectClient.getOrCreate(ctx)
         val zone = ZoneId.systemDefault()
         val fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd")
-        val now = Instant.now()
-        val from = now.minusSeconds(7L * 86400)
+        val now = toT ?: Instant.now()
+        val from = fromT ?: now.minusSeconds(7L * 86400)
         val range = TimeRangeFilter.between(from, now)
         val days = HashMap<String, HashMap<String, Double>>()
         fun bucket(t: Instant): HashMap<String, Double> {
@@ -69,30 +117,91 @@ object HealthSync {
             return days.getOrPut(d) { HashMap() }
         }
         val skipped = ArrayList<String>()
-        suspend fun <T : Any> tryRead(name: String, cls: kotlin.reflect.KClass<T>, use: suspend (List<T>) -> Unit)
-            where T : androidx.health.connect.client.records.Record {
+        suspend fun <T> tryRead(name: String, cls: kotlin.reflect.KClass<T>, use: suspend (List<T>) -> Unit)
+            where T : Any, T : androidx.health.connect.client.records.Record {
             try {
-                use(client.readRecords(ReadRecordsRequest(cls, range)).records)
+                // PAGINATED , Health Connect returns ~1000 records a page; taking only page one
+                // silently dropped everything past it. Loop the token until the store runs dry.
+                var token: String? = null
+                do {
+                    val resp = client.readRecords(
+                        if (token == null) ReadRecordsRequest(cls, range)
+                        else ReadRecordsRequest(cls, range, pageToken = token))
+                    use(resp.records)
+                    token = resp.pageToken
+                } while (!token.isNullOrEmpty())
             } catch (e: Exception) {
                 skipped.add(name)
                 android.util.Log.w("LocalGhost", "health read $name skipped: ${e.message}")
             }
         }
-        tryRead("steps", StepsRecord::class) { recs ->
+        // DAILY TOTALS VIA THE AGGREGATE API , the double-counting fix. When the watch AND the
+        // phone both write steps, raw record-summing counts both; aggregate() dedupes across data
+        // origins with Health Connect's own source-priority rules. One call covers steps,
+        // distance, calories, floors and exercise duration, bucketed per local day. If aggregate
+        // itself fails (older provider), the raw per-record fallback below still runs , counts
+        // may inflate there, which the skipped-list names honestly.
+        var aggregated = false
+        try {
+            val zStart = from.atZone(zone).toLocalDateTime()
+            val zEnd = now.atZone(zone).toLocalDateTime()
+            val buckets = client.aggregateGroupByPeriod(
+                AggregateGroupByPeriodRequest(
+                    metrics = setOf(
+                        StepsRecord.COUNT_TOTAL,
+                        DistanceRecord.DISTANCE_TOTAL,
+                        TotalCaloriesBurnedRecord.ENERGY_TOTAL,
+                        FloorsClimbedRecord.FLOORS_CLIMBED_TOTAL,
+                        ExerciseSessionRecord.EXERCISE_DURATION_TOTAL,
+                    ),
+                    timeRangeFilter = TimeRangeFilter.between(zStart, zEnd),
+                    timeRangeSlicer = java.time.Period.ofDays(1)))
+            buckets.forEach { b ->
+                // ZERO IS NOT DATA here , empty buckets return non-null zeros for some metric
+                // types (Duration aggregates in particular), and writing them created 7,305
+                // phantom "health days" back to 2006: every day had one zero metric, so the
+                // six-empty-months stop never fired and the walk ran to its 20-year cap. A day
+                // exists only when a POSITIVE value landed.
+                val vals = HashMap<String, Double>()
+                b.result[StepsRecord.COUNT_TOTAL]?.toDouble()?.takeIf { it > 0 }?.let { vals["steps"] = it }
+                b.result[DistanceRecord.DISTANCE_TOTAL]?.inKilometers?.takeIf { it > 0 }?.let { vals["distance_km"] = it }
+                b.result[TotalCaloriesBurnedRecord.ENERGY_TOTAL]?.inKilocalories?.takeIf { it > 0 }?.let { vals["calories"] = it }
+                b.result[FloorsClimbedRecord.FLOORS_CLIMBED_TOTAL]?.takeIf { it > 0 }?.let { vals["floors"] = it }
+                b.result[ExerciseSessionRecord.EXERCISE_DURATION_TOTAL]?.seconds?.takeIf { it > 0 }
+                    ?.let { vals["exercise_minutes"] = it / 60.0 }
+                if (vals.isNotEmpty()) {
+                    days.getOrPut(b.startTime.toLocalDate().format(fmt)) { HashMap() }.putAll(vals)
+                }
+            }
+            aggregated = true
+        } catch (e: Exception) {
+            android.util.Log.w("LocalGhost", "aggregate unavailable, raw fallback: ${e.message}")
+        }
+        if (!aggregated) tryRead("steps", StepsRecord::class) { recs ->
             recs.forEach { r ->
                 val m = bucket(r.startTime)
                 m["steps"] = (m["steps"] ?: 0.0) + r.count.toDouble()
             }
         }
         tryRead("sleep", SleepSessionRecord::class) { recs ->
-            recs.forEach { r ->
-                // A night's sleep belongs to the day you WAKE , bucket by end time.
-                val m = bucket(r.endTime)
-                m["sleep_minutes"] = (m["sleep_minutes"] ?: 0.0) +
-                    (r.endTime.epochSecond - r.startTime.epochSecond) / 60.0
+            // OVERLAP MERGE , two origins (watch app + phone app) can record the SAME night as two
+            // overlapping sessions; naive summing invents extra sleep. Merge intervals first, then
+            // bucket each merged block by its END (a night belongs to the day you wake).
+            val ivs = recs.map { it.startTime.epochSecond to it.endTime.epochSecond }
+                .filter { it.second > it.first }.sortedBy { it.first }
+            val merged = ArrayList<Pair<Long, Long>>()
+            for (iv in ivs) {
+                val last = merged.lastOrNull()
+                if (last != null && iv.first <= last.second) {
+                    merged[merged.size - 1] = last.first to maxOf(last.second, iv.second)
+                } else merged.add(iv)
+            }
+            merged.forEach { (st, en) ->
+                val m = bucket(Instant.ofEpochSecond(en))
+                m["sleep_minutes"] = (m["sleep_minutes"] ?: 0.0) + (en - st) / 60.0
             }
         }
-        tryRead("exercise", ExerciseSessionRecord::class) { recs ->
+        if (!aggregated) tryRead("exercise", ExerciseSessionRecord::class) { recs ->
             recs.forEach { r ->
                 val m = bucket(r.startTime)
                 m["exercise_minutes"] = (m["exercise_minutes"] ?: 0.0) +
@@ -126,19 +235,19 @@ object HealthSync {
                 m["hr_max"] = vals.max()
             }
         }
-        tryRead("distance", DistanceRecord::class) { recs ->
+        if (!aggregated) tryRead("distance", DistanceRecord::class) { recs ->
             recs.forEach { r ->
                 val m = bucket(r.startTime)
                 m["distance_km"] = (m["distance_km"] ?: 0.0) + r.distance.inKilometers
             }
         }
-        tryRead("calories", TotalCaloriesBurnedRecord::class) { recs ->
+        if (!aggregated) tryRead("calories", TotalCaloriesBurnedRecord::class) { recs ->
             recs.forEach { r ->
                 val m = bucket(r.startTime)
                 m["calories"] = (m["calories"] ?: 0.0) + r.energy.inKilocalories
             }
         }
-        tryRead("floors", FloorsClimbedRecord::class) { recs ->
+        if (!aggregated) tryRead("floors", FloorsClimbedRecord::class) { recs ->
             recs.forEach { r ->
                 val m = bucket(r.startTime)
                 m["floors"] = (m["floors"] ?: 0.0) + r.floors
@@ -147,14 +256,80 @@ object HealthSync {
         tryRead("weight", WeightRecord::class) { recs ->
             recs.forEach { r -> bucket(r.time)["weight_kg"] = r.weight.inKilograms }
         }
+        // A CONSTANT IS NOT A MEASUREMENT. Samsung Health synthesizes a BMR-based calories total
+        // for ANY day you query , 1564.50 kcal, every day since 2006, data or no data ("you were
+        // presumably alive"). One constant made every day in history look like a health day and
+        // marched the full-history walk to its 20-year cap. Rule: calories only count on days
+        // where something was actually MEASURED (any other metric present); a day whose only
+        // content is the provider's guess about your resting metabolism is an empty day.
+        val calOnly = days.entries.count { (_, m) -> m.keys.all { it == "calories" } }
+        days.entries.removeAll { (_, m) -> m.keys.all { it == "calories" } }
         when {
             days.isEmpty() && hrSamples.isEmpty() ->
                 SyncResult(0, skipped, if (skipped.size >= 8) "every record type failed , re-check permissions" else null)
-            BoxClient.healthUpload(ctx, days, hrSamples) -> SyncResult(days.size, skipped)
+            BoxClient.healthUpload(ctx, days, hrSamples) -> SyncResult(days.size, skipped, calOnlyDays = calOnly)
             else -> SyncResult(0, skipped, "box unreachable , is it unlocked?")
         }
     } catch (e: Exception) {
         android.util.Log.w("LocalGhost", "health sync: ${e.message}")
         SyncResult(0, emptyList(), e.message ?: "health sync failed")
+    }
+
+    /**
+     * THE PROBE , what Health Connect ACTUALLY holds, per type, and which app put it there.
+     * Written after a watch-and-smart-scale owner saw two metrics land: when the reader is known
+     * good, the next honest question is whether the data is even THERE, and the only witness is
+     * Health Connect itself. Reports records seen in the last 90 days, the date span, and the
+     * source packages , so "Samsung is not sharing sleep" stops being a theory and becomes a
+     * line of text. Bounded: 3 pages per type, enough to prove presence without a long walk.
+     */
+    suspend fun probe(ctx: Context): List<String> {
+        val client = try { HealthConnectClient.getOrCreate(ctx) }
+                     catch (e: Exception) { return listOf("Health Connect unavailable (${e.message?.take(40)})") }
+        val end = Instant.now()
+        val start = end.minus(90, ChronoUnit.DAYS)
+        val range = TimeRangeFilter.between(start, end)
+        val out = ArrayList<String>()
+        suspend fun <T> one(label: String, cls: kotlin.reflect.KClass<T>, stamp: (T) -> Instant)
+            where T : Any, T : androidx.health.connect.client.records.Record {
+            try {
+                var token: String? = null
+                var n = 0
+                var pages = 0
+                var oldest: Instant? = null
+                var newest: Instant? = null
+                val apps = LinkedHashSet<String>()
+                do {
+                    val resp = client.readRecords(
+                        if (token == null) ReadRecordsRequest(cls, range)
+                        else ReadRecordsRequest(cls, range, pageToken = token))
+                    resp.records.forEach { r ->
+                        n++
+                        val t = stamp(r)
+                        if (oldest == null || t.isBefore(oldest)) oldest = t
+                        if (newest == null || t.isAfter(newest)) newest = t
+                        val pkg = r.metadata.dataOrigin.packageName
+                        if (pkg.isNotEmpty()) apps.add(pkg.substringAfterLast('.'))
+                    }
+                    token = resp.pageToken
+                    pages++
+                } while (!token.isNullOrEmpty() && pages < 3)
+                val span = if (oldest != null && newest != null)
+                    " " + oldest.toString().take(10) + ".." + newest.toString().take(10) else ""
+                val who = if (apps.isEmpty()) "" else " from " + apps.joinToString("/")
+                out.add(if (n == 0) "$label: nothing in Health Connect"
+                        else "$label: $n${if (pages >= 3) "+" else ""} record(s)$span$who")
+            } catch (e: Exception) {
+                out.add("$label: not readable (${e.message?.take(40)})")
+            }
+        }
+        one("steps", StepsRecord::class) { it.startTime }
+        one("heart rate", HeartRateRecord::class) { it.startTime }
+        one("sleep", SleepSessionRecord::class) { it.startTime }
+        one("weight", WeightRecord::class) { it.time }
+        one("exercise", ExerciseSessionRecord::class) { it.startTime }
+        one("calories", TotalCaloriesBurnedRecord::class) { it.startTime }
+        one("distance", DistanceRecord::class) { it.startTime }
+        return out
     }
 }

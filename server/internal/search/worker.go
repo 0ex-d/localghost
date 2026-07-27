@@ -14,6 +14,7 @@ import (
 )
 
 type Worker struct {
+	modelHoldUntil time.Time // caption/tag lanes rest until here while oracled warms
 	Store    *Store
 	Embed    *Embedder // nil = vector-less; embed jobs are not claimed
 	Caption  Captioner
@@ -43,6 +44,12 @@ func (w *Worker) tick(ctx context.Context) {
 		for w.one(ctx, "embed_text", w.doEmbed) {
 		}
 	}
+	// MODEL GATE , while oracled is warming (llama loading 7GB), model-dependent lanes REST
+	// instead of machine-gunning fast-fails through the queue. The first "no backend" sets the
+	// hold; nothing model-bound runs until it lapses. Embeds and reconsolidation are unaffected.
+	if time.Now().Before(w.modelHoldUntil) {
+		return
+	}
 	for w.one(ctx, "caption", w.doCaption) {
 	}
 	for w.one(ctx, "tag", w.doTags) {
@@ -60,6 +67,16 @@ func (w *Worker) one(ctx context.Context, kind string, do func(context.Context, 
 		return false
 	}
 	if err := do(ctx, job); err != nil {
+		if strings.Contains(err.Error(), "no backend") {
+			// Oracled is warming , refund the attempt (it never reached the model) and hold the
+			// model lanes. One log line per storm, not one per job.
+			_ = w.Store.UnclaimJob(job.ID)
+			if time.Now().After(w.modelHoldUntil) {
+				w.Log.Info("model warming , caption/tag lanes resting 20s", "fn", "one")
+			}
+			w.modelHoldUntil = time.Now().Add(20 * time.Second)
+			return false
+		}
 		w.Log.Warn("job failed", "fn", "one", "kind", kind, "job", job.ID, "err", err)
 		_ = w.Store.FailJob(job.ID, err)
 		return true
@@ -121,11 +138,20 @@ func (w *Worker) doCaption(ctx context.Context, job *Job) error {
 		return err
 	}
 	_, sha, meta, captured, err := w.Store.OriginalByID("image", p.OrigID)
-	_ = sha
 	if err != nil {
 		return err
 	}
 	header := ContextHeader("photo", captured.Format("2006-01-02"), metaCamera(meta))
+	// The SCENE section is the human-facing DESCRIPTION , stored on the frame so the gallery can
+	// show what the photo is without re-running the model. Never overwrites a non-empty value
+	// (a future user-edited description outranks the model, same rule as tags and memories).
+	if scene := captionSection(caption, "SCENE:"); scene != "" {
+		if err := w.Store.db.Exec(
+			`UPDATE frames SET description = $1 WHERE hash = $2 AND (description IS NULL OR description = '')`,
+			scene, sha); err != nil {
+			w.Log.Warn("description write failed", "fn", "doCaption", "hash", sha, "err", err)
+		}
+	}
 	chunks := ChunkText(header, caption)
 	ids, err := w.Store.InsertChunksT0("image", p.OrigID, captured, chunks)
 	if err != nil {
@@ -184,7 +210,7 @@ func (w *Worker) doTags(ctx context.Context, job *Job) error {
 		// Derived display name: date + the first three tags. Set only when EMPTY , a user rename
 		// (future endpoint) must never be overwritten by a background job.
 		name := time.Unix(p.Captured, 0).UTC().Format("2006-01-02")
-		n := 3
+		n := 2 // SHORT: tags, description and place carry the detail; the name is a label
 		if len(tags) < n {
 			n = len(tags)
 		}
@@ -288,3 +314,23 @@ var errNotNumber = jsonErr("not a number")
 type jsonErr string
 
 func (e jsonErr) Error() string { return string(e) }
+
+// captionSection pulls one fixed heading's body out of the structured caption , the sections are a
+// contract (spec 9.2), so this is a scan to the next ALL-CAPS heading, not a parser.
+func captionSection(caption, heading string) string {
+	i := strings.Index(caption, heading)
+	if i < 0 {
+		return ""
+	}
+	rest := caption[i+len(heading):]
+	for _, next := range []string{"OBJECTS:", "PEOPLE:", "TEXT:", "COLOURS_STYLE:", "SETTING_GUESS:"} {
+		if j := strings.Index(rest, next); j >= 0 {
+			rest = rest[:j]
+		}
+	}
+	out := strings.TrimSpace(rest)
+	if r := []rune(out); len(r) > 900 {
+		out = string(r[:900])
+	}
+	return out
+}

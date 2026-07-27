@@ -297,13 +297,13 @@ func (s *Supervisor) killProc(rt *serviceRuntime) {
 	go func() { _, _ = rt.proc.Wait(); close(done) }()
 	select {
 	case <-done:
-	case <-time.After(15 * time.Second):
-		// 15s, up from 5: SIGTERM asks a daemon to FINISH its in-flight item , framed mid-archive
-		// (rename done, previews and record pending), searchd mid-ingest , and 5s regularly was not
-		// enough for a preview derivation plus a DB write, so planned teardowns were SIGKILLing work
-		// that reprocess then had to heal. 15 matches the shutdown allowance elsewhere (stopWatchd's
-		// ping-until-dead). SIGKILL remains the floor: a wedged daemon still cannot hold the unmount
-		// hostage, it just gets three times the courtesy first.
+	case <-time.After(5 * time.Second):
+		// 5s, DOWN from 15 by operator ruling: a lock command is an order, not a negotiation
+		// with in-flight caption jobs. The 15s courtesy multiplied by eleven sequential daemons
+		// made every planned halt a slow goodbye (a searchd wedged in a socket read ate the full
+		// window), and everything a SIGKILL interrupts , a half-derived preview, an unfinished
+		// ingest , is healed by reprocess/reingest by design. Five seconds covers the common
+		// clean exit; the wedged get the floor.
 		_ = rt.proc.Kill()
 		<-done
 	}

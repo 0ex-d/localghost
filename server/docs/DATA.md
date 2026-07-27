@@ -92,6 +92,47 @@ INGESTION (each daemon writes its own tables, nobody else's)
 - Geocoder candidate sets ride the lat/lon btrees, ordered by approximate squared-degree
   distance so LIMIT keeps the closest candidates even in dense areas; exact haversine picks in Go.
 
+## Backups (the second copy)
+
+framed backs its own tree up nightly at 03:00 box time into /var/lib/ghost/backup , Sunday full,
+other nights incremental since the watermark, four fulls retained. OPT-IN BY KEY: no
+/var/lib/ghost/backup.pub, no backups. The seal is asymmetric (X25519 + HKDF-SHA256 +
+ChaCha20-Poly1305 chunked STREAM, "GHSTBK1"): the box holds only the public key and can write
+backups it can never read; `ghost.restore keygen` makes the pair (private stays OFFLINE with the
+human), `ghost.restore unseal <file> < key.hex | tar -x` is the whole restore. The app has no
+route anywhere near the backup directory. Manual trigger: ghost-cli ghost.framed backup
+(full=true forces a full).
+
+## Reimport and restore (images)
+
+Two idempotent commands cover every "get my images back into the pipeline" case:
+ghost-cli ghost.framed reprocess rebuilds frame records/previews/places from the FILES (after a
+backup restore, after a purge); ghost-cli ghost.searchd reingest enqueues captions for exactly the
+image originals that have no chunks and no queued job (after a chunk purge, after a restore, after
+doubt). A healthy library reingest-s zero. Full disaster flow: ghost.restore unseal | tar -x into
+<mount>/framed, then reprocess, then reingest, then wait for the model to re-describe the gap.
+
+## pgvector (leaving FTS-only mode)
+
+The schema self-upgrades the moment CREATE EXTENSION vector succeeds; the bundle carries vector.so
+"for free" IF Debian's pgvector package was installed when bundle_db_runtime.sh ran. Activation:
+apt-get install postgresql-<ver>-pgvector, re-run the bundle, restart. Embeddings additionally
+need an embed model: searchd spawns its own llama-server child given embedBin + embedModelPath
+(a small gguf like nomic-embed-text on the volume) in its svcconf file; without them, vector mode
+sits ready and the embed lane stays politely empty.
+
+## Schema evolution (how a box upgrades)
+
+The registry in internal/hw/schemadef.go is the single source of truth. At every unlock, after the
+bootstrap blob, ConvergeSchema introspects information_schema, DIFFS reality against the registry,
+and applies the difference: missing tables and columns are created, changed types are migrated with
+an explicit cast where postgres allows it, missing indexes are built by name, and columns the
+registry does not know are logged as DRIFT and never touched , dropping is a human decision,
+always. One-shot rebuilds live in dataMigrations (versioned, run once per box, recorded in
+schema_migrations). The operator story: run the latest build, unlock, read the "schema convergence"
+log line. Changing the schema: edit the registry (+ a data migration if data must move). The blob
+in datastore.go is frozen bootstrap; new work goes in the registry.
+
 ## The geo lifecycle (how it gets there, how it gets updated)
 
 1. **Arrival.** New boxes: setup runs fetch_geo.sh onto the volume and imports while the

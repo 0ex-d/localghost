@@ -37,6 +37,8 @@ type Frame struct {
 	Kind        string // "photo" | "video" | "unknown", from content sniffing
 	MIME        string // best-effort content type, e.g. "image/jpeg", "video/mp4"
 	TakenSrc    string // "exif" | "hint" | "mtime" , how TakenAt was determined; mtime is NOT trusted for sync resume
+	// Which phone uploaded this , empty for older rows and local imports (unknown, not guessed).
+	Device string
 }
 
 // Store wraps a ghost_rw poltergres connection for one slot's database.
@@ -58,12 +60,12 @@ func (s *Store) Ping() error { return s.db.Ping() }
 // hash is the identity, so re-uploading the same photo is a no-op.
 func (s *Store) InsertFrame(f Frame) error {
 	return s.db.Exec(
-		`INSERT INTO frames (hash, taken_at, lat, lon, has_gps, archive_path, preview_path, thumb_path, bytes, source, received_at, kind, mime, taken_src, place)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+		`INSERT INTO frames (hash, taken_at, lat, lon, has_gps, archive_path, preview_path, thumb_path, bytes, source, received_at, kind, mime, taken_src, place, device)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
 		 ON CONFLICT (hash) DO UPDATE SET place = EXCLUDED.place
 		   WHERE frames.place = '' AND EXCLUDED.place <> ''`,
 		f.Hash, f.TakenAt, f.Lat, f.Lon, f.HasGPS,
-		f.ArchivePath, f.PreviewPath, f.ThumbPath, f.Bytes, f.Source, f.ReceivedAt, f.Kind, f.MIME, f.TakenSrc, f.Place)
+		f.ArchivePath, f.PreviewPath, f.ThumbPath, f.Bytes, f.Source, f.ReceivedAt, f.Kind, f.MIME, f.TakenSrc, f.Place, f.Device)
 }
 
 // HasFrame reports whether a hash is already archived (dedupe before doing any work).
@@ -436,4 +438,44 @@ func (s *Store) InsertJournal(hash string, ts int64, title, body string) error {
 	return s.db.Exec(
 		"INSERT INTO journal_entries (source, ref, ts, title, body, created_at) VALUES ('ghost.framed', $1, $2, $3, $4, $5) ON CONFLICT (source, ref) DO NOTHING",
 		hash, ts, title, body, time.Now().UnixMilli())
+}
+
+// WeeklyHighlight picks the best day of the last 7 (most geotagged photos, place named) and, if
+// this ISO week has not been announced yet, drops a notification , framed offering the person a
+// look back, not an engagement hook: once a week, factual, and mutable like every notification.
+func (s *Store) WeeklyHighlight() error {
+	wk := time.Now().UTC().Format("2006-W02")
+	rows, err := s.db.Query("SELECT value FROM settings WHERE key = 'framed_week_highlight'")
+	if err == nil && len(rows.Vals) == 1 && rows.Vals[0][0] != nil && *rows.Vals[0][0] == wk {
+		return nil // this week already highlighted
+	}
+	since := time.Now().AddDate(0, 0, -7).Unix()
+	rows, err = s.db.Query(`
+		SELECT to_char(to_timestamp(taken_at), 'YYYY-MM-DD') AS d, count(*) AS n,
+		       min(place) FILTER (WHERE place <> '') AS p
+		FROM frames WHERE kind = 'photo' AND taken_at >= $1
+		GROUP BY d ORDER BY n DESC LIMIT 1`, since)
+	if err != nil || len(rows.Vals) == 0 || rows.Vals[0][0] == nil || rows.Vals[0][1] == nil {
+		return err // nothing this week , no notification, silence is honest
+	}
+	day := *rows.Vals[0][0]
+	n := *rows.Vals[0][1]
+	place := ""
+	if len(rows.Vals[0]) > 2 && rows.Vals[0][2] != nil && *rows.Vals[0][2] != "" {
+		parts := strings.Split(*rows.Vals[0][2], " / ")
+		place = " around " + parts[len(parts)-1]
+	}
+	t, terr := time.Parse("2006-01-02", day)
+	dayName := day
+	if terr == nil {
+		dayName = t.Weekday().String()
+	}
+	if err := s.db.Exec(
+		"INSERT INTO notifications (service, kind, title, body, seen, options, created) VALUES ('ghost.framed','highlight',$1,$2,FALSE,'',now())",
+		"your week in frames",
+		dayName+" was the big one , "+n+" photos"+place+". They are on your MAP."); err != nil {
+		return err
+	}
+	return s.db.Exec(
+		"INSERT INTO settings (key, value) VALUES ('framed_week_highlight',$1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", wk)
 }

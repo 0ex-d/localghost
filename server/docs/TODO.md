@@ -1,9 +1,546 @@
-# TODO
+# LocalGhost TODO
 
-Working list. Tick items off as they land, add new ones at the bottom of their section.
-Started 2026-07-15, the night the box learned to repair itself on unlock.
+Two sections, no mixing: what remains, then the build log. New done items go to the TOP
+of DONE (reverse chronological); open items live in TO DO until they move.
 
-## App , chat rendering and UX
+## TO DO
+
+- [ ] **77. Google Photos Takeout import** , the family-archive recovery. Her device starts
+      2020-01; Google holds 2012 onward (backup + free-up-space made the phone a cache, the cloud
+      the archive). Design requirements learned from how Google stores things DIFFERENTLY:
+      (a) SIDECARS ARE FIRST-CLASS , every Takeout photo ships a JSON with photoTakenTime and
+      geoData that often knows what the JPEG does not (estimated locations from Location History,
+      dates for mangled EXIF): prefer in-file EXIF, fall back to sidecar, record taken_src
+      accordingly ('sidecar'). (b) Pre-2021 High Quality uploads are RECOMPRESSED , different
+      bytes, so hash dedup rightly treats them as new; expected, not a bug. (c) framed
+      takeout-inbox walks the export dirs, archives through the normal pipeline. This recovers
+      HIS lost years too , shared holidays exist through her lens, and his own Google account may
+      hold photos his broken phones did not.
+- [ ] **7. Reprocess pass , RUN IT** (the command now exists, written 2026-07-15): framed walks
+      the archive, re-inserts records (idempotent), re-derives previews (force=true also fixes
+      pre-existing sideways portrait thumbs), re-notifies search, rebuilds GPS days. Run:
+        ghost-cli ghost.framed reprocess force=true        (via ns.sh)
+        ghost-cli ghost.searchd unpark                     (revive jobs dead at 5 attempts)
+      then watch nvidia-smi while the caption backlog drains and "tags pending" resolves.
+      Root cause of the idle GPU, diagnosed: the degraded window's photos were never ingested
+      (no ingest, no caption job , the queue was honestly empty), searchd's rebuild cannot
+      discover them (it regenerates derived state from originals, not from the archive), and
+      any jobs that did burn 5 attempts against the broken DB were parked forever with no
+      unpark lever. All three now have answers.
+
+## Sync
+
+- [ ] **9. Runtime bundle switchover** , bundle_db_runtime.sh --verify, then halt + unlock,
+      confirm ps shows postgres from runtime/pgroot, decide on purging the OS packages. First
+      real use of `halt`.
+- [ ] **25b. Gallery grouping** (was 25 remainder) (UX, next session's opener): tags as tappable
+      chips on tiles and in the detail dialog; place line under the date (the geocoded
+      hierarchy); group/filter by place and by day; search box wired to /v1/frames/search;
+      correct-orientation thumbs land via reprocess. The data all exists now , this is pure
+      presentation.
+- [ ] **26. PIN/key derivation review** (assessed 2026-07-15; deliberate, not urgent , needs a
+      registry re-enrol migration, wrong thing to hot-fix). Findings: (a) PinKey doubles as the
+      registry identifier AND the wrapping key, so registry.blob stores the PIN-derived half of
+      the wrapping key in the clear , fix is domain separation (id = HKDF(PinKey,"id"), wrap =
+      HKDF(PinKey,"wrap"), x/crypto/hkdf), blob then holds only a one-way derivative; (b) the
+      registry is an OFFLINE PIN oracle at Argon2 speed (6 digits ≈ a day for box root),
+      bypassing the TPM's rate limiting because Resolve is pure software , fix on the TPM tier is
+      a TPM-resident HMAC mixed into the identifier so every guess transits the TPM dwell;
+      software tier cannot have this and must say so. What is already RIGHT and must not
+      regress: Argon2id 64MiB/t4, full-registry constant-time scan with fillers (no timing/count
+      leak), wipe-PIN indistinguishability, Gate online rate limiting.
+
+- [ ] **30. Memory system, next slices** , (a) DONE (item 34); (b) DONE 2026-07-15 as
+      memoriesSource: retrieval lives in synthd's context-injection path (FIRST in source order ,
+      what the box knows about the person outranks document search), keyword term-overlap over
+      live memories, top 2 by hits then recency, source="memory" with an honest Why; the Index
+      interface upgrade folds into (c) embeddings; (c) embeddings via the search layer's
+      embedder into memories.emb, PGIndex upgrades to semantic; (d) frames as a memory source
+      (places + dates + tags -> "was in Strathcona Park mid-July"); (e) cued gating policy.
+
+- [ ] **31. ghost.shadowd, the real charter** (recorded 2026-07-15 from hard-truths/should-not-
+      possess + dictator-brain + critic-worth-listening-to): the anti-possession daemon , a fleet
+      of individually-tunable manipulation-pattern detectors (28-entry catalogue) plus the
+      COLD-READ ARBITER (separate model never shaped by the user, scheduled reset to a published
+      baseline against arbiter capture). Contract: NAMING IS THE ACTION , no blocking, no
+      refusing, mute-not-disable, enforcement only for user-written Ulysses contracts. First
+      tractable detectors read data the box already holds: interaction time + sessions past task
+      completion (addiction by design), ghost-vs-human emotional-processing share (engagement
+      loneliness), sunk-cost retrieval framing, topic-surface narrowing (filter bubble of one).
+      Vlad ships no v1 without shadowd running.
+- [ ] **32. Fleet gaps inventory** (per cmd READMEs, 2026-07-15): ghost.noted , first slice DONE
+      (see 35), pullers/upload/mentions remain; ghost.voiced (audio -> transcripts ->
+      noted; ephemeral live-capture vs kept voice-memos) , stub; ghost.tallyd (structured data ->
+      time-series + narrative summaries -> noted) , stub; framed's README says descriptions push
+      through noted's inbox , currently framed notifies searchd directly, reconcile when noted
+      is real; synthd's entities/episodes/decision-queue layers , not started (distillation loop
+      is the first slice only).
+
+## Security / longer arc (deprioritized 2026-07-15 , UX first, per the operator)
+
+- [ ] **15. Re-pair gating on FIDO2.**
+- [ ] **16. Backup system** , weekly fulls + daily incremental diffs on the always-mounted HDD,
+      asymmetric encryption (daily job never holds the key), folder unreachable by the app.
+- [ ] **17. Box security threat model blog post** (separate from the Border Agent post).
+
+## Done (this era)
+
+## DONE
+
+- [x] **102. What can the box see** (2026-07-25): the operator has a Samsung WATCH and a Withings
+      scale syncing weight into Samsung Health , so the two-metric trickle is not a thin life,
+      and our reader is not the gap (weight, sleep, heart rate and exercise are all read, all
+      paginated). The remaining suspect is Samsung Health -> Health Connect sharing. Same
+      instrument that cracked the map: HealthSync.probe reports what HEALTH CONNECT itself holds
+      per type , record counts, date span, and the source package , surfaced by a [ what can the
+      box see? ] control on SYNC. "Samsung is not sharing sleep" stops being a theory and
+      becomes a line of text.
+
+- [x] **101. Provenance on every frame** (2026-07-25): the archive now records WHICH PHONE each
+      photo came from , secd folds the device key into the spool name as -d<hex> (same proven
+      path as the taken-time hint; secd still never parses content), framed reads it and stores
+      frames.device, added through the registry. Empty means unknown (pre-provenance rows, local
+      imports) , never guessed. This is the column that matters when photos eventually live ONLY
+      on the box: an archive that cannot say where a memory came from has lost half of it.
+      Devices screen gains a real per-device frame count.
+      SIGNING-KEY CAVEAT (operator asked, and the answer changes the design): every APK IS signed
+      , debug builds with the local debug keystore, store builds with the upload/app-signing key
+      , so ANDROID_ID is stable across debug rebuilds on one machine but CHANGES at debug ->
+      release, on key rotation, on a new dev machine, and on factory reset. The stable id is
+      therefore a best-effort convenience, not an identity: when it breaks, the box sees a new
+      phone. TO DO: manual MERGE on the devices screen (pick two rows, "same phone" , migrate
+      cursors, names and frames.device), which is the honest fallback for every case a signal
+      cannot cover.
+
+- [x] **100. Identity that survives a reinstall** (2026-07-25): the certificate proves POSSESSION
+      but dies with every debug rebuild , so device_names gains a stable_id: a hash of the
+      app-scoped Android ID (per signing key since Android 8, so it identifies the phone to THIS
+      APP ONLY and correlates nowhere else; hashed before it leaves the phone, the box stores a
+      digest). THE ADOPTION: a known stable id arriving on a new certificate means a reinstalled
+      phone , the box inherits its name, MIGRATES ITS SYNC CURSORS (furthest position per kind)
+      and retires the old row, so a rebuild resumes instead of re-offering 40k photos, and the
+      devices screen shows one phone rather than a graveyard of certificates. Stable-id claims
+      are only ever made for the CALLER; naming a sibling phone is allowed (same archive, so a
+      label is bookkeeping) but cannot carry an identity claim. Rename field on the devices
+      screen.
+
+- [x] **99. How a phone is named** (2026-07-25): identity is the CLIENT CERTIFICATE , nginx
+      verifies it in the mTLS handshake and passes it as X-Client-Cert; deviceKey is sha256 of
+      that, first 8 bytes. Never a serial/IMEI/Android ID: those are permission-gated, survive
+      factory resets, and correlate across apps , the tracking primitive this project refuses.
+      Tradeoff stated: reinstall = new keypair = new device (library re-offered, dedup absorbs
+      it). Added the human half , device_names table via the registry, POST /v1/devices/name
+      (a device can only name ITSELF, identity comes from its cert), the app volunteers
+      Build.MODEL once per install, and the devices screen shows name/model plus "id abc12345 ,
+      from its certificate, not a serial number".
+
+- [x] **98. Camera sanity + REAL devices** (2026-07-25): (a) the black map could not be zoomed
+      OUT of because a NaN centre poisons every draw AND every gesture , pinching changes zoom,
+      NaN plus anything is NaN. The camera itself is now checked each composition and on every
+      gesture; garbage snaps back to the world, and a [ reset view ] hatch sits by the status
+      line. (b) OVERCLAIMING FOUND AND KILLED: the connected-devices screen displayed two
+      INVENTED phones with invented counts ("this phone, just now, 8421 photos"). Now real ,
+      sync_cursors gains updated_at through the REGISTRY (convergence engine adds it at unlock),
+      CursorSet stamps it, GET /v1/devices reports per-device last-sync plus the photo and video
+      cursor positions (a cursor ts IS the taken_at of the newest item that device offered), and
+      the screen prints last sync, newest photo offered, newest video offered , per phone, with
+      this device marked.
+
+- [x] **97. Antarctica** (2026-07-25): the instrumented handler solved it in three log lines ,
+      world bbox returned points=12 (THE SERVER WAS ALWAYS FINE), then the app requested
+      minlat=-90 maxlat=-89.999 minlon=-180 maxlon=-179.999: a 0.001-degree box in the empty
+      South Atlantic. Cause: item 90's clamp mapped a NaN viewport to the LOW EDGE instead of
+      the world. Three fixes , (a) any non-finite or out-of-range bbox corner now means WHOLE
+      WORLD, not a corner; (b) the newest-photo opener fires ONCE and only on finite, in-range
+      coordinates , it was re-running on every cells change and stomping the world fallback
+      flat, which is why the screen went black and STAYED black; (c) the fallback resets the
+      fetched-margin bookkeeping so the escape check cannot suppress its own refetch. Plus
+      redeploy stage timing, as asked: every stage prints (+Ns) and the halt loop reports how
+      long the cohort took to die.
+
+- [x] **96. The orphan that ate an hour of captions** (2026-07-25): systemd's own words ,
+      "left-over process llama-server in control group while starting unit" , decoded the
+      21:42-22:52 context-deadline storm: an orphaned llama-server survived the restart holding
+      port 18080 and ~9GB VRAM, so the new oracled's child could not bind and every inference
+      timed out. Cause: a SIGKILLed parent cannot clean up after itself (and item 91's 5s grace
+      makes that path more likely). Fix: Pdeathsig SIGKILL on both llama children (oracled's
+      caption model, searchd's embedder) , the kernel reaps them the instant their parent dies.
+      Operator note: a stuck child in D-state (CUDA call) can still outlive a SIGKILL briefly;
+      if a caption storm recurs, check `pgrep -af llama-server` for a process older than oracled.
+
+- [x] **95. The namespace blind spot** (2026-07-25): item 92's locked-volume check tested a PATH
+      , but the volume lives in a MOUNT NAMESPACE, so root's default view never sees it and the
+      check said "locked" on a live box, skipping the graceful halt every time. Processes cross
+      the namespace boundary where mounts do not: the cohort-running pgrep (already trusted
+      later in the same script) is the honest signal. Ledger entry: asking the wrong filesystem
+      view is its own bug class , tools/ns.sh exists precisely because /var/lib/ghost/mnt is a
+      different place depending on who looks.
+
+- [x] **94. Instrument the silence** (2026-07-25): four rounds of map debugging died because a
+      SUCCESSFUL handler logs nothing , "request never arrived" and "request answered empty"
+      look identical from outside. handleFramesGeoLOD now logs bbox + point count at INFO every
+      call, so one map-open names the failure. Also de-parameterized the cluster precision: a
+      float bind param inside GROUP BY floor(lat/$5) is exactly what a driver can send untyped
+      and postgres can refuse , now a formatted literal from the fixed ladder (server-computed,
+      no injection surface), removing a whole class of silent failure.
+
+- [x] **93. Ask the filesystem** (2026-07-25): the runDir-to-mount relationship was guessed twice
+      and wrong twice in opposite directions (doubled path, then /var/lib/ghost/services.conf).
+      The loader contract, finally READ: LoadServicesConfig(arg) = arg/services.conf, no append.
+      Fix immune to history: findMount walks UP from runDir until the directory actually
+      containing services.conf appears , the filesystem knows, so ask it. cued reflections and
+      shadowd detectors both wired through it. Open threads: map awaits the journalctl paste
+      (command queued); steps=36 identical two days smells like another constant-not-measurement;
+      calOnly-instrumented walk not yet run.
+
+- [x] **92. Waiting for things that do not exist** (2026-07-25): the operator named it , redeploy
+      against a LOCKED volume still prompted for a PIN, sent a halt at absent services, and
+      politely watched pgrep for processes that were never going to die because they were never
+      alive. Locked-volume short-circuit: no mnt/slot*/run means no cohort, no halt, no prompt ,
+      one line says so and the script goes straight to the binary swap. First deliverable of the
+      DIFF era.
+
+- [x] **91. The slow goodbye** (2026-07-25): planned halts crawled , 15s SIGTERM courtesy PER
+      daemon, eleven daemons, sequential; wedged ones (searchd in a socket read) ate full
+      windows and redeploy's 30s patience expired into a "wrong PIN?" slander. Operator ruling:
+      a lock command is an order , grace cut to 5s (SIGKILL floor unchanged; everything it
+      interrupts heals via reprocess/reingest by design) and the warning now names the wedge,
+      not the PIN.
+
+- [x] **90. NaN killed the world** (2026-07-25): the map's empty-everywhere message decoded ,
+      the 2x margin fetch at world zoom pushes inverse-Mercator past its domain, NaN/Inf reach
+      the LOD bbox, NaN in a BETWEEN kills the query, appears-down reads as "no photos anywhere".
+      BBOX SANITISER in FramesGeoLOD (NaN comparisons are false, so !(x >= edge) clamps NaN and
+      out-of-range in one move) + app-side clamp after the margin. Server fix works with the
+      already-installed APK. HEALTH readout note: Samsung Health deposits only a ~30-day rolling
+      window INTO Health Connect regardless of the history permission , the wall is Samsung's
+      export policy, not our permission handling; older history needs Samsung Health's own
+      export (future import item).
+
+- [x] **89. The 23:01 health readout** (2026-07-24): four verdicts , (1) cued's reflections
+      starved ALL DAY on a doubled path: LoadServicesConfig takes the STATE dir and appends
+      mnt/slotN itself; I fed it the mount (…/slot0/mnt/slot0/…). Fixed in cued AND the same
+      latent bug in shadowd's detector. (2) The 70-minute caption hang pre-restart: VIDEO caption
+      jobs from before the item-87 lane fix still queued , each wedges the vision model to
+      timeout. Purge: DELETE FROM search.jobs WHERE kind='caption' AND (payload->>'path' ~*
+      '\\.(mp4|mov|3gp|mkv|webm)$'). (3) bytes=0 frames archiving , cloud-placeholder media
+      (optimize-storage stubs) serve 0-byte streams; framed now refuses to archive emptiness
+      (skip + spool delete); phone-side SIZE filter queued. (4) The failed map test PREDATED the
+      redeploy , retest against tonight's binaries before any further map surgery.
+
+- [x] **88. Memories are not journal entries** (2026-07-22): the line, drawn in distillPass ,
+      mechanical entries (tallyd health days, ALL framed lines, noted daily check-ins) flip
+      distilled SILENTLY: they are raw material episodes already carry, and 1:1 model passes over
+      them manufacture memory spam that reads like a diary photocopied. Only substantive writing
+      reaches the model (real notes, chat journals , things a memory could plausibly be MADE
+      from), extracted as durable facts or NONE. Cleanup for any spam already minted:
+      DELETE FROM memories WHERE kind='distilled' AND (source_ref LIKE 'tallyd%' OR title LIKE
+      'Daily check-in%'); episodes and user memories untouched, tombstones honoured as ever.
+
+- [x] **87c. The Google feel, app half** (2026-07-22): the feel is 90% fetch policy , (1) MARGIN
+      FETCH: request 2x the viewport so small pans cross already-loaded ground for zero requests;
+      (2) STALE-WHILE-REVALIDATE: old points keep drawing (the canvas projects live) until new
+      arrive , refinement is a cross-over, never a blink; (3) REFETCH ON ESCAPE ONLY: leave the
+      margin or change zoom ~1.6x (the split threshold). Cap re-reasoned 500 -> 800: with the 2x
+      margin, ~a quarter of delivered points are visible at cluster tiers, while a dense hike
+      still gets up to 800 raw in-view points , any trail's shape, smooth at 60fps mid-range.
+- [x] **87b. Adaptive map LOD** (2026-07-22): the Google-maps feel in two rules , (1) a viewport
+      holding <=500 real points returns them ALL, raw (the rule that preserves a hike's SHAPE:
+      truncating a trail turns a line into confetti); (2) otherwise the cluster grid derives
+      from the VIEWPORT , span/24 cells snapped to a precision ladder (5 deg down to 0.001) ,
+      so every zoom step splits clusters continuously: country blobs -> regions -> cities ->
+      places -> raw, with no fixed tiers and no client changes (level survives as an ignored
+      hint). One count query decides raw-vs-cluster; frames_gps partial index carries both.
+- [x] **87. Field triage three** (2026-07-22): (a) MAP , 43k points froze the phone; FramesGeoLOD
+      hard-ceilings every tier at 500 (clusters biggest-first, raw newest-first): the app needs
+      no guard because the API cannot flood it. (b) VIDEOS were flowing into the IMAGE ingest
+      lane -> caption jobs the vision model 400s forever (the immortal job 10135 decoded);
+      notifySearch now skips kind=video , archived, played, thumbed, unindexed until a real
+      video lane (ffmpeg keyframe -> caption) exists. Operator cleanup: DELETE FROM search.jobs
+      WHERE kind='caption' AND id IN (stuck video jobs) , or just revive+let them exhaust.
+      (c) SYNC health row rendered one-letter-per-line (unweighted label squeeze). (d) QR: tap
+      auto-refocus already present at bind; added periodic centre refocus.
+
+- [x] **86b. Auto-torch** (2026-07-22): the remaining lever was light, not logic , subsampled
+      mean luma off the Y plane (1 pixel in 64), 15 dark frames lights the torch, 15 bright ones
+      puts it out; hysteresis, not flicker. Backlog pass = the item-70 paved paths: revive then
+      reingest (idempotent, catches exactly the unprocessed gap); undecodable formats (webp/heic
+      strays) may need an ffmpeg-transcode bridge in the caption path if their count proves
+      meaningful , queued as the small evening item it is.
+- [x] **86. QR round five: the OSS audit** (2026-07-22): compared against what the open-source
+      scanners actually do , the honest finding is how much was already covered: our
+      binariseLocal IS a HybridBinarizer sibling (per-tile min/max midpoint, 5x5 tile
+      neighbourhood, low-contrast fallback to global) PLUS a close-up refinement ZXing lacks;
+      both scan orientations exist; quirc's flood-fill and BoofCV's contour chase are different
+      paradigms, not upgrades. The one true gap, now ported: ZXing's crossCheckHorizontal , the
+      row-scan's run midpoint was a coarse X (one scanline can clip a finder's shoulder); after
+      the vertical walk confirms Y, a horizontal walk at that row refines X, then one more
+      vertical pass converges. Tighter clusters -> truer triples -> homography that survives
+      steeper angles. Failed horizontal check keeps the coarse X (decoder judges, as ever).
+
+- [x] **85. The 5G bill** (2026-07-22): uploads continued on mobile data , WorkManager's
+      UNMETERED constraint gates when a run STARTS, and a run begun on Wi-Fi keeps its blocking
+      upload I/O alive after the phone walks onto 5G (cancellation only lands at suspension
+      points; a streaming POST has none mid-file). Enforcement moved into the DATA PATH:
+      NetGuard , uploadsAllowed (Wi-Fi/ethernet always, mobile only with the explicit setting)
+      joins shouldAbort for clean between-item pauses, and GuardedInputStream re-checks the
+      network every 2MB of reads so the largest video leaks at most 2MB before dying. The
+      cursor's contiguity rule turns every such death into a clean Wi-Fi resume. Worker also
+      self-gates at start against expedited/OEM quirks.
+
+- [x] **84. The idle 4070** (2026-07-22): htop confessed , oracled's llama-server spawn had NO
+      -ngl flag, and llama.cpp with a CUDA build still runs PURE CPU unless told to offload
+      (opt-in per run, not baked at compile). Eleven CPU-hours through four threads, shared with
+      erigon, while the GPU watched; every caption/tag/distill estimate was made against a
+      machine fighting one-handed. "-ngl 99" hardcoded (ExtraArgs can override for GPU-less
+      boxes); the embed child's "-ngl 0" stays deliberate , CPU is its correct home. Expected
+      after redeploy: warmup a few seconds longer (VRAM upload), then captions in low single-digit
+      seconds and the caption backlog collapsing from days to hours.
+
+- [x] **83. Dependency census + QR round four** (2026-07-22): the census , SERVER: golang.org/x
+      (crypto, term, sys) which is the Go project's own extended stdlib, plus ONE true external:
+      github.com/google/go-tpm (the TPM has no stdlib binding; hand-rolling TPM 2.0 command
+      marshalling is how security bugs are born). APP: zero third-party , everything is androidx
+      (Compose, CameraX, WorkManager, Health Connect, Media3) + Kotlin/coroutines; networking is
+      HttpsURLConnection, JSON is the platform org.json, QR is OURS, images are BitmapFactory.
+      No OkHttp, no Retrofit, no Coil, no ZXing, no Room. QR: analyzer 1080p -> 720p (detection
+      cost scales with pixels, sampler binarises up to twice a frame , 2.25x more attempts per
+      second; small-module leniency covers the range loss). THE TICK , every successful decode
+      flashes a green check, repeats included: "I saw it" and "I did something about it" are
+      different facts and the scanner now reports both.
+
+- [x] **82. The proxy dies young** (2026-07-22): the operator's objection stood , a loopback
+      port is a third-party attack surface (local apps can probe it) and a cleartext exemption is
+      a posture wound even scoped to 127.0.0.1. Replaced by the IN-PROCESS answer: Media3
+      ExoPlayer with BoxDataSource , the player's byte requests are function calls into the
+      authenticated channel (position/length map straight onto Range), seeks are 206s from the
+      archive, and the attack surface is not small, it is ABSENT. VideoProxy.kt deleted, cleartext
+      exemption reverted, one dependency added (androidx.media3, same trust root as Compose ,
+      the exception stdlib-first was always allowed to make when the alternative is a network
+      listener). Graceful against an old secd: a 200-from-zero answer skips to position , correct
+      playback, slow seeks, until the operator redeploys. Fallback ladder intact.
+- [x] **81. True video streaming with seek** (2026-07-22): the LOOPBACK PROXY , no Android media
+      player speaks the box's mTLS + bearer, so the player talks plain HTTP to 127.0.0.1 and
+      VideoProxy forwards each request (Range header passthrough , ranged GETs ARE seeking) over
+      the authenticated channel with the same pinned cert and cached factory. Box side is ONE
+      call: http.ServeContent on the archive file (206/Content-Range/If-Range for free from a
+      ReadSeeker). Playback starts ~1s, the scrub bar jumps anywhere, nothing downloads, RAM is
+      one 512KB buffer. Hardening: loopback bind only, per-session hash allow-list (a local port
+      is same-device attack surface), Connection: close per request, dies with the dialog.
+      Cleartext permitted for 127.0.0.1 ONLY (the plaintext hop never leaves the process
+      boundary; the network hop stays mTLS). Fallback ladder: proxy stream -> disk-streamed
+      download -> honest failure.
+
+- [x] **80. The 268MB confession** (2026-07-22): VideoPlayer OOM , "download then play" was
+      download-INTO-RAM then play (readBytes doubling a ByteArrayOutputStream until the heap
+      gave out on a 268MB video). Repair: getToFile streams straight to disk (bounded 512KB
+      buffer at ANY size, live MB progress, partial writes delete themselves , half a video is
+      not a video); getBytes gains a 64MB sanity cap so the RAM path can never again be handed a
+      video by accident. True progressive playback (range requests / local proxy) noted as the
+      someday-polish; disk-streamed download-then-play at LAN speed is seconds.
+
+- [x] **79. Wire speed, part two** (2026-07-21): 8.4 MB/s post-handshake-fix was ONE stream's
+      worth of a Wi-Fi 6 link , (a) TLS write chunks 64KB -> 512KB (a record+syscall dance every
+      64KB caps a single HTTPS stream well under the radio; half-MB writes stay one bounded
+      buffer, never the whole file in RAM); (b) photos and videos run as TWO CONCURRENT streams
+      (separate cursors by design, per-kind progress UI already built , the cheap 2x without
+      touching the contiguity-safe pipeline). True N-way parallel upload deliberately deferred:
+      restructuring the streaming callback engine mid-import is surgery, and these two levers
+      should put the link, not the code, back in charge.
+
+- [x] **78. The 40,000 handshakes** (2026-07-21): sync felt slow on a LAN that could move a photo
+      in 200ms because BoxHttp built a FRESH SSLContext per request , not just the build cost (an
+      Android Keystore round-trip each time): a new factory instance defeats keep-alive entirely
+      (the connection pool keys on the factory), so every photo paid a full mTLS handshake.
+      Cached factory (invalidated only when baseUrl/fingerprint change): one handshake per
+      session, keep-alive for the other 39,999. No pacing or batch caps found in the loop , the
+      handshakes WERE the pacing.
+
+- [x] **76b. frames_gps index** (2026-07-21): partial (lat, lon) WHERE has_gps , the map's LOD
+      bbox queries stop full-scanning at two-person scale (40k+ incoming). Added to the REGISTRY
+      only; the convergence engine creates it at next unlock , the migration system's first real
+      production moment: one line, zero migration scripts, every box heals itself.
+
+- [x] **76. The cursor was account-global** (2026-07-21): the wife's-phone symptom (one recent
+      video, nothing else) diagnosed the single-device era's last artifact , CursorSet wrote to a
+      literal "default" device and handleSyncCursorGet IGNORED the request entirely, answering
+      with the ARCHIVE's newest timestamps: her phone asked where to resume and was told "after
+      his newest photo". Both per-device now (deviceKey from the client cert): a fresh device
+      gets (0,0) and offers its whole library, a reinstall keeps its cert so it resumes, and the
+      global-merge crutch is deleted , the stored per-device row IS the answer. One-time cost:
+      existing phones re-offer once (their rows lived under "default"); hash dedup absorbs it.
+      Bug class named for the ledger: account-global state answering a device-scoped question.
+
+- [x] **75. Sync rewind + second phone** (2026-07-21): POST /v1/sync/reset zeroes THIS device's
+      cursors (per-device by design , a partner's phone rewinding never disturbs yours); the app
+      gains a two-tap-armed "re-offer everything from the beginning" control on SYNC with the
+      honest fine print (hash dedup: cost is time, never duplicates). A NEW device (the wife's
+      phone) needs nothing special , fresh pairing = zero cursor = full library offered, and
+      photos both phones hold archive once.
+
+- [x] **74. The 30-day wall** (2026-07-21): Health Connect serves only the 30 days BEFORE the
+      permission grant unless the app holds READ_HEALTH_DATA_HISTORY , the full-history walk read
+      exactly one month then six empties and stopped, which is the wall's signature, not the
+      record ending. Permission declared (manifest + PERMISSIONS as a literal string, immune to
+      client-version constants), appears as its own "access to past data" toggle in the sheet;
+      the walk now NAMES the wall when it hits it instead of looking like thin data. Units
+      audited: aggregate and raw paths agree (km, kcal, counts). Re-grant + re-run; upserts make
+      the redo free.
+
+- [x] **73. Field triage two: the text lane thinks, the embedder pools** (2026-07-21): the
+      reasoning disease's second organ , tags (and all one-shot TEXT inference) never got
+      enable_thinking:false, only the multimodal caption path did; ~470 reasoning chars, no
+      content, every tag job. Suppressed now; StreamChat keeps its deliberate <think> handling.
+      Embeds: llama-server 500s on /v1/embeddings for nomic-style models without an explicit
+      pooling mode , --pooling mean (+ -c 2048 -ub 1024) added to the spawn. Post-deploy:
+      ghost.searchd revive refunds the attempts both storms burned. Meanwhile the log sang:
+      day episodes 98+83 built, video previews growing, vector=true embedder=true.
+
+- [x] **72. ffmpeg joins the volume** (2026-07-21): tools/bundle_ffmpeg.sh , same philosophy as
+      the DB bundle (binary + full ldd closure onto the encrypted volume, --verify runs the
+      bundled copy with ONLY bundled libs, then the OS package is removable). framed prefers the
+      volume's copy (SetFFmpeg, LD_LIBRARY_PATH at the bundle's lib dir), PATH only as fallback.
+      Docker considered and rejected: the setup IS the container. Map verdict from the field: DB
+      aggregation healthy (3308 points, 29 world cells) , the fix is the item-65 APK, pending
+      rebuild.
+
+- [x] **71. Videos become citizens** (2026-07-21): frame-grab thumbnails , ffmpeg (best effort:
+      absent = play glyph as before, present = grab at t=1s falling back to t=0, fed through the
+      SAME makePreviews path so preview + thumb + upright all apply) at archive AND at reprocess
+      (the 161 existing videos gain thumbs on the next pass). Playback: VideoPlayer.kt , the box
+      speaks mTLS + bearer which no stock player can, so bytes come through the authenticated
+      channel into cache and play as a local file (VideoView, zero new deps); the cache file dies
+      with the dialog , the phone stays a window, not a second archive. Gallery routes video taps
+      to the player, photo taps to the pinch viewer.
+
+- [x] **70. pgvector path + idempotent image reimport** (2026-07-21): pgvector needs no code ,
+      the bundle already carries vector.so when Debian's package is present and the schema
+      self-upgrades on CREATE EXTENSION success; documented the activation (install pkg,
+      re-bundle, restart) + the embed-model half (searchd spawns its own llama-server child from
+      embedBin/embedModelPath in svcconf; until a gguf lands, vector mode sits ready, embed lane
+      empty). ghost-cli ghost.searchd reingest: enqueues captions for exactly the image originals
+      with no chunks and no queued job , a healthy library queues zero, a restored one queues the
+      gap. Disaster flow documented: unseal | tar -x, reprocess, reingest, wait.
+
+- [x] **69. Backups + episode backfill** (2026-07-21): BACKUPS live , framed seals its own tree
+      nightly (03:00, Sunday full / else incremental via mtime watermark, four fulls kept, prune
+      follows) into /var/lib/ghost/backup with an ASYMMETRIC seal (X25519 ephemeral + HKDF-SHA256
+      + ChaCha20-Poly1305 chunked STREAM, final-chunk marker so truncation fails auth): the box
+      holds only backup.pub and can write what it can never read. OPT-IN BY KEY , no key, no
+      backups, one log line. cmd/ghost.restore: keygen (private key printed once, stays offline)
+      + unseal (key on stdin never argv, tar to stdout). Manual: ghost-cli ghost.framed backup.
+      App-unreachable by construction. EPISODE BACKFILL , "the last photo might not be from
+      today": a watermark walks 120 historical days per pass from now-90 back to the earliest
+      frame, so imported libraries and quiet seasons get their episodes too, bounded work per
+      pass, all of history eventually.
+
+- [x] **68. Day episodes + morning reflections (30d + 30e)** (2026-07-21): THE LOOP CLOSES ,
+      live a day, the box remembers it, one morning it hands it back. synthd episodePass builds
+      one memory per day (kind='episode', last 90 days, every pass) DETERMINISTICALLY from what
+      the box knows: photos + where (framed), steps + sleep (tallyd), how you said you felt
+      (check-in) , "14 photo(s) around Tofino. 12840 steps. 7h 20m sleep. You said you felt calm,
+      salty." No model call: a memory of a day should exist the day it happened, not when a GPU
+      gets around to it. User edits and tombstones permanently outrank regeneration. cued
+      reflectionLoop: mornings 8-11, once daily , this day ONE YEAR AGO if an episode exists,
+      else a random episode >30d old, else SILENCE (a young archive earns quiet mornings, not
+      filler). Notification kind='reflection', tap lands in MEMORIES. Drill-ins: synthd counts
+      episodes, cued shows episodes available + last reflection day.
+
+- [x] **67. Backlog pass: shadowd wakes + revive + operator UX** (2026-07-21): SHADOWD's first
+      real detector (31 begun) , interaction-time trend: counts the person's OWN messages (never
+      content-analysed), a week doubling the prior past a 60-message floor earns ONE factual
+      observation per ISO week ("not a problem , just a fact you own"); quiet weeks earn silence.
+      Drill-in shows live numbers (7d / prior 7d / days talked). ghost-cli gains `searchd revive`
+      (paved path for tonight's raw-psql resurrection , resets exhausted jobs, reports the count).
+      framed reprocess announces its actual start in the log (vs queued behind a sync drain).
+      Map tap-dot-to-photo satisfied by the item-54 viewer , moved out of TO DO.
+
+- [x] **66b. The 1564.50 confession** (2026-07-21): the phantom was CALORIES , Samsung Health
+      synthesizes a BMR-based TotalCaloriesBurned for ANY queried day (1564.50 kcal, identical,
+      every day since 2006, data or none). Positive, so the zero-guard was blind to it. Rule
+      shipped: a constant is not a measurement , calories only land on days where another metric
+      was actually measured; a day whose only content is the provider's guess about resting
+      metabolism is an empty day. Repair: DELETE all-calories rows, re-sync walks to the real
+      data boundary.
+- [x] **66. Field report triage** (2026-07-21): (a) HEALTH PHANTOMS , empty aggregate buckets
+      return non-null ZEROS for some metric types (Duration especially), writing one zero metric
+      per day back to 2006: 7,305 phantom health days, the six-empty-months stop never fired, the
+      walk ran to its 20-year cap, and synthd inherited 7,306 distill-queue entries. Zero is not
+      data: only positive values land, days exist only when something real did. (b) Drill-in
+      LAYOUT , long values squeezed into the row leftover wrapped one letter per line; >24 chars
+      now renders as a full-width paragraph. (c) searchd drill-in breaks jobs out BY KIND (the
+      5642 mystery); framed newest capture formatted as a date. (d) The mush legacy repair
+      (delete reasoning-era image chunks + phantom health rows + re-enqueue captions for every
+      image original) shipped as operator SQL , the box re-describes its whole library properly.
+
+- [x] **65. Map skew shield actually fires + EXIF-upright viewer** (2026-07-21): the shield never
+      triggered because getJson on a 503 returns an EMPTY OBJECT, not an exception , framesGeoLod
+      came back empty-list (an answer) instead of null (unknown), and the map trusted a box that
+      had never heard of the endpoint. Absent points key now = null; and an empty WORLD view with
+      3306 geotagged photos is treated as skew too (a genuinely empty local view stays a real
+      answer). Viewer: BitmapFactory ignores EXIF orientation, so originals arrived sideways
+      (thumbs were pre-uprighted box-side, masking it); framework ExifInterface + one Matrix now
+      uprights rotation and mirroring, with an OOM guard (a sideways photo beats a crash).
+
+- [x] **64. Model gate + attempt refunds + framed pipeline visibility** (2026-07-21): searchd's
+      model-dependent lanes (caption, tag) now REST behind a 20s hold the moment a "no backend"
+      lands , no more machine-gunning a warming oracled. The deeper find: warmup fast-fails were
+      CONSUMING job attempts (five storms = a photo permanently uncaptioned , "captions
+      exhausted"); UnclaimJob refunds the attempt since it never reached the model. One log line
+      per storm, not one per job. FRAMED's drill-in now shows the whole enrichment pipeline:
+      archived -> geotagged -> placed -> named -> described -> tagged, plus caption queue and
+      captions exhausted , the operator watches tagging happen in numbers.
+
+- [x] **63. QR detection round three** (2026-07-21): (a) STRIDE-2 scanning , a finder is >=7
+      modules tall so every-2nd-line scanning loses nothing decodable and halves the cost, which
+      is what lets sticky + probe both run every frame; a NEAR-MISS (1-2 finders seen) flips the
+      next frame to stride-1 precision , the extra rows are exactly where the missing finder
+      hides. (b) TWO-OF-THREE RESCUE , the most common near-miss: two finders fix scale and
+      orientation up to six candidate spots (right-angle completions about each + the diagonal
+      hypotheses); a tight (3-module) window at each is searched with the lenient matcher, one
+      hit completes the triple, the decoder judges. Detection now degrades gracefully instead of
+      binarily: 3 finders decode, 2 finders usually still decode, 1 finder sharpens the next
+      frame.
+
+- [x] **62. Map skew shield + original-quality viewer** (2026-07-21): the blank map was VERSION
+      SKEW , new APK calling /v1/frames/geo/lod + /newest against a secd that predates them, every
+      call 503, zero cells. The redeploy fixes it, and the app now survives it forever: LOD null
+      falls back to the old full-fetch endpoint (dots beat blankness), missing /newest falls back
+      to fit-all camera. Viewer upgraded ORIGINAL-first: /v1/frames/original streams the untouched
+      archive bytes mime-typed (phone decodes jpeg/heic/png natively); preview then thumb are
+      fallbacks for undecodable originals, and a quality tag names any downgrade , no silent webp.
+
+- [x] **61. Health correctness + check-in depth** (2026-07-21): DOUBLE-COUNTING fixed , when
+      watch AND phone both write steps, raw record-summing counted both; daily totals (steps,
+      distance, calories, floors, exercise) now come from the AGGREGATE API which dedupes across
+      data origins with Health Connect's source priority; raw summing survives only as a named
+      fallback for older providers. Sleep OVERLAP MERGE , two origins recording the same night no
+      longer invent extra sleep (intervals merged before bucketing by wake day). Check-in grew
+      memory: "yesterday you felt calm, tired" continuity line, a [ + past check-ins ] strip
+      (/v1/checkins parses the journal entries back into day/feelings rows), memory list gained
+      a filter box anda provenance line ("yours" / "distilled from your days" + date).
+
+- [x] **60. Real notifications + tap-through + QR far-scan** (2026-07-21): the two FAKES in
+      pollPending are dead , the app now reads /v1/notifications (per-device push cursor, offered
+      once). Two real producers: framed's WEEKLY HIGHLIGHT (best day of the last 7 by geotagged
+      photo count, once per ISO week, factual not engagement bait , "Thursday was the big one ,
+      34 photos around Strathcona") and secd's evening CHECK-IN ask (19-21h, once, SILENT if the
+      person already checked in , no streaks, no guilt). Tapping any notification opens the app;
+      AFTER the security gate MainShell navigates to it (NOTIFICATIONS; the check-in ask lands on
+      MEMORIES). QR: small-module leniency in matches11311 , sub-2.5px arms get 0.85 tolerance
+      and a 1.7x centre floor (integer runs make far-QR ratios inherently ragged).
+
+- [x] **59. Debug mode + tok/s + per-daemon drill-ins** (2026-07-21): global DEBUG MODE flag ,
+      Settings > DEVELOPER > "set app in debug mode" (tap toggles, more diagnostics attach here);
+      chat tok/s meter (13c done) , timed from FIRST answer token so thinking does not dilute the
+      rate, chars/4 approximation, shown under the composer only in debug. Per-daemon screens
+      (44 done) reached from Box Status rows as designed: the stats dialog now opens with a
+      DRILL-IN section fed by /v1/daemon/summary , framed (archived/photos/videos/geotagged/
+      placed/named/described/track points/geo places), noted (journal by source, awaiting
+      distillation), synthd (memories live/yours/tombstoned, queue, reports), searchd (caption
+      jobs pending/exhausted, chunks, tags), tallyd (health days/rows/samples/earliest),
+      shadowd + oracled (charter/role lines). All flat SELECTs from each daemon's own tables.
+      TODO restructured into TO DO / DONE sections , no more mixed reading.
 
 - [x] **1. Markdown rendering in chat** , stdlib only. Range-based renderer, streaming-safe by
       construction (all parsing in remember/runCatching, plain-text fallback, fuzzed over 3485
@@ -44,20 +581,6 @@ Started 2026-07-15, the night the box learned to repair itself on unlock.
       1600px beats rotating 12MP). Originals untouched. Landed 2026-07-15. Existing wrong thumbs
       need the item-7 reprocess , which it turns out DOES NOT EXIST yet (the pipeline comment
       "regenerated by the reprocess command" is aspirational); item 7 now includes writing it.
-- [ ] **7. Reprocess pass , RUN IT** (the command now exists, written 2026-07-15): framed walks
-      the archive, re-inserts records (idempotent), re-derives previews (force=true also fixes
-      pre-existing sideways portrait thumbs), re-notifies search, rebuilds GPS days. Run:
-        ghost-cli ghost.framed reprocess force=true        (via ns.sh)
-        ghost-cli ghost.searchd unpark                     (revive jobs dead at 5 attempts)
-      then watch nvidia-smi while the caption backlog drains and "tags pending" resolves.
-      Root cause of the idle GPU, diagnosed: the degraded window's photos were never ingested
-      (no ingest, no caption job , the queue was honestly empty), searchd's rebuild cannot
-      discover them (it regenerates derived state from originals, not from the archive), and
-      any jobs that did burn 5 attempts against the broken DB were parked forever with no
-      unpark lever. All three now have answers.
-
-## Sync
-
 - [x] **8. Sync screen counters** , the worker was already sequential (photos then videos); the
       three-numbers-racing screen was stale Activity state (worker only published kind+done/total,
       so last run's photo bar froze mid-fill while this run painted videos) and the byte line was
@@ -68,9 +591,6 @@ Started 2026-07-15, the night the box learned to repair itself on unlock.
 
 ## Server
 
-- [ ] **9. Runtime bundle switchover** , bundle_db_runtime.sh --verify, then halt + unlock,
-      confirm ps shows postgres from runtime/pgroot, decide on purging the OS packages. First
-      real use of `halt`.
 - [x] **10. Drawer recents box-backed + chat rename/delete** , the old drawer source was a STUB
       (delay + unused params, backed by nothing); recents now map /v1/chats, selection is chatId
       adoption, refresh on unlock/adoption/rename/delete. New endpoints: POST /v1/chats/rename
@@ -126,7 +646,6 @@ Started 2026-07-15, the night the box learned to repair itself on unlock.
       freshest sample is >35s old (the one condition the stats cannot self-report); Box Status
       shows a warning banner naming the rows below as the past, not the present. Landed
       2026-07-15.
-- [ ] **13c. Chat tok/s metric** , parked, pure gravy.
 - [x] **14. Redis persistence at lock** , folded into item 12 (shutdown save). Landed 2026-07-15.
 
 - [x] **22. Setup provisions the volume interior** , at format time (PIN in hand, fresh mount):
@@ -157,23 +676,6 @@ Started 2026-07-15, the night the box learned to repair itself on unlock.
       3-char boundary) , only the post-</think> answer is persisted. Landed 2026-07-15.
 - [x] **28. Chats history polish** , box-chat rows gained two-tap delete (reuses the /v1/chats/
       delete path) beside the inline rename. Landed 2026-07-15.
-- [ ] **25b. Gallery grouping** (was 25 remainder) (UX, next session's opener): tags as tappable
-      chips on tiles and in the detail dialog; place line under the date (the geocoded
-      hierarchy); group/filter by place and by day; search box wired to /v1/frames/search;
-      correct-orientation thumbs land via reprocess. The data all exists now , this is pure
-      presentation.
-- [ ] **26. PIN/key derivation review** (assessed 2026-07-15; deliberate, not urgent , needs a
-      registry re-enrol migration, wrong thing to hot-fix). Findings: (a) PinKey doubles as the
-      registry identifier AND the wrapping key, so registry.blob stores the PIN-derived half of
-      the wrapping key in the clear , fix is domain separation (id = HKDF(PinKey,"id"), wrap =
-      HKDF(PinKey,"wrap"), x/crypto/hkdf), blob then holds only a one-way derivative; (b) the
-      registry is an OFFLINE PIN oracle at Argon2 speed (6 digits ≈ a day for box root),
-      bypassing the TPM's rate limiting because Resolve is pure software , fix on the TPM tier is
-      a TPM-resident HMAC mixed into the identifier so every guess transits the TPM dwell;
-      software tier cannot have this and must say so. What is already RIGHT and must not
-      regress: Argon2id 64MiB/t4, full-registry constant-time scan with fillers (no timing/count
-      leak), wipe-PIN indistinguishability, Gate online rate limiting.
-
 - [x] **29. Memory system, foundation** (landed 2026-07-15; CORRECTED same night , the memory
       layer is ghost.SYNTHD per its charter, hard-truths/how-memory-gets-made; the distillation
       loop was briefly misfiled in shadowd and now lives in synthd's main). Division of labour, corrected: ghost.SYNTHD owns memory end to end (journal entries ->
@@ -189,24 +691,6 @@ Started 2026-07-15, the night the box learned to repair itself on unlock.
       /v1/memories/delete on secd. Sovereignty is structural: tombstones are never resurrected
       (chats with ANY memory rows are never re-distilled), user_edited never overwritten,
       incognito is invisible by inheritance (never reaches the chats table).
-- [ ] **30. Memory system, next slices** , (a) DONE (item 34); (b) DONE 2026-07-15 as
-      memoriesSource: retrieval lives in synthd's context-injection path (FIRST in source order ,
-      what the box knows about the person outranks document search), keyword term-overlap over
-      live memories, top 2 by hits then recency, source="memory" with an honest Why; the Index
-      interface upgrade folds into (c) embeddings; (c) embeddings via the search layer's
-      embedder into memories.emb, PGIndex upgrades to semantic; (d) frames as a memory source
-      (places + dates + tags -> "was in Strathcona Park mid-July"); (e) cued gating policy.
-
-- [ ] **31. ghost.shadowd, the real charter** (recorded 2026-07-15 from hard-truths/should-not-
-      possess + dictator-brain + critic-worth-listening-to): the anti-possession daemon , a fleet
-      of individually-tunable manipulation-pattern detectors (28-entry catalogue) plus the
-      COLD-READ ARBITER (separate model never shaped by the user, scheduled reset to a published
-      baseline against arbiter capture). Contract: NAMING IS THE ACTION , no blocking, no
-      refusing, mute-not-disable, enforcement only for user-written Ulysses contracts. First
-      tractable detectors read data the box already holds: interaction time + sessions past task
-      completion (addiction by design), ghost-vs-human emotional-processing share (engagement
-      loneliness), sunk-cost retrieval framing, topic-surface narrowing (filter bubble of one).
-      Vlad ships no v1 without shadowd running.
 - [x] **33. Journal-entry architecture** (landed 2026-07-15): each ingester writes its OWN diary
       , journal_entries table, idempotent by (source, ref), distilled flag as synthd's high-water
       mark. framed writes entries at archive AND reprocess with what it knows then (kind, when,
@@ -224,6 +708,57 @@ Started 2026-07-15, the night the box learned to repair itself on unlock.
       distance/kcal/avg-HR-with-peak; /v1/health/stats serves 30-day daily series per metric;
       HEALTH in the drawer (♥) , the FIRST per-daemon screen: per-metric bar strips scaled to
       own range, latest + min/avg/max, stats not judgements. Manifest gains the read perms.
+- [x] **58. Health from the beginning of time** (2026-07-21): (a) PAGINATION , Health Connect
+      pages at ~1000 records and the reader took only page one, silently dropping the rest even
+      for 7 days; the token loop now drains every page. (b) SYNC FULL HISTORY walks back month by
+      month (own upload chunk each , memory + the box's cap honoured at any density), stops after
+      6 empty months or 20 years, live progress line. (c) Box side: upload cap 256KB -> 1MB per
+      chunk; tallyd samples batch 500/statement (a million HR points is an import, not a career);
+      synthd bulk-flips tallyd entries older than 60 days , the model reads recent health, the
+      deep past waits for day-episodes (30d). Re-syncs upsert, so overlap is free.
+- [x] **57. Health sync button dead** (2026-07-21): Health Connect REFUSES to show its
+      permission sheet unless the manifest declares ACTION_SHOW_PERMISSIONS_RATIONALE (+ the
+      Android 14 VIEW_PERMISSION_USAGE/HEALTH_PERMISSIONS activity-alias) , launch() was a
+      silent no-op, the button did literally nothing. Both declared; every button branch now
+      reports (sheet opening, granted n/8, refused-with-reason) so silence is impossible.
+- [x] **56. QR detection regression fixed** (2026-07-21): the perf pass that rotated ONE
+      binarisation bias per frame (to stop the stalled analyser) regressed detection 5x , a code
+      resolving under only one bias got a shot every fifth frame. Repair: STICKY bias + rotating
+      probe , the bias that last produced finder candidates runs EVERY frame, a second pass keeps
+      probing for better; partial finder visibility does not count as a miss (bias right, hand
+      moved); 12 straight true misses drops the sticky. Worst case 2 passes/frame, common case 1,
+      detection back to all-biases quality.
+- [x] **55. Declarative schema convergence** (2026-07-21): the registry (schemadef.go) is the
+      single source of truth; ConvergeSchema introspects information_schema at unlock, diffs, and
+      applies , creates missing tables/columns/indexes, migrates types via ALTER USING cast where
+      postgres allows, REFUSES destructive acts (drift columns loudly logged, never dropped;
+      missing BIGSERIAL flagged for a human). Versioned one-shot data migrations in
+      schema_migrations, run once per box in order. Converge failure is loud but non-fatal ,
+      the bootstrap blob already ran, yesterday's schema keeps working. Users run the latest
+      build, unlock, read the summary line. New schema work goes in the REGISTRY; the blob is
+      frozen bootstrap.
+- [x] **54. Map LOD + image viewer + descriptions** (2026-07-21): MAP opens on the NEWEST photo
+      zoomed close (answers "where was I last" before "where have I been"); four-tier
+      level-of-detail feed /v1/frames/geo/lod , postgres GROUPs by grid cell (1deg / 0.1 / 0.01 /
+      raw), viewport+zoom drive the tier, debounced 220ms, so a continent view ships hundreds of
+      rows not the whole archive; zoom cap raised 2000 -> 250000 so 100m clumps resolve into
+      individual photos; cluster tap dives in, single-photo tap opens. FULL-SCREEN VIEWER
+      (ImageViewer.kt) , box preview JPEG, pinch 1-12x, double-tap 3x, drag to pan, caption
+      underneath; reachable from gallery detail and from map dots. DESCRIPTIONS: frames.description
+      holds the caption SCENE section (2-4 sentences), shown in gallery detail; display_name cut
+      to date + 2 tags , "a name is a label, not a summary". Captions now claim NEWEST-FIRST
+      (ORDER BY id DESC) so today gets named before 2019. Naming stays in searchd (hybrid: framed
+      does fast metadata at archive, searchd enriches async) per the operator's call.
+- [x] **53. Offline map + clusters + the mmproj hunt** (2026-07-20, live-fire): vision was dead
+      because the projector on the volume was named "mmpr" AND truncated at 175MB of ~800 , a
+      July 11 copy died mid-transfer and every caption since returned <20 chars from a model
+      that could not see; fix = clean download under the expected name + oracled respawn, the
+      retry loop becomes the recovery. World map now CACHED on the phone (filesDir + ETag
+      mtime+size; 304 = zero bytes; box unreachable = map still draws , landmass only, never
+      photos or locations). MAP clusters at low zoom: 48px grid buckets, count labels, density-
+      triggered (>250 dots on screen) so sparse archives never cluster. fetch_geo upgraded to
+      10m coastline (110m drew Vancouver Island as a twelve-vertex cartoon , the dots were
+      right, the shoreline was lying). Remaining polish: tap-dot -> gallery.
 - [x] **52. First-build fixes** (2026-07-15): a backticked command name inside a SQL comment
       TERMINATED the schema's Go raw string ("unexpected name ghost" , my own documentation
       broke the build); backticks stripped from schema comments and audited. Unused "io" dropped
@@ -286,11 +821,6 @@ Started 2026-07-15, the night the box learned to repair itself on unlock.
       rebuilt once each (progress logged every 200); one journal line per import records the
       span; rejects to gps-inbox/rejected. Polled every 5 min + ghost-cli ghost.framed
       gps-import to skip the wait. YEARS of map history from one Takeout drop.
-- [ ] **44. Per-daemon screens** , the HEALTH pattern extended: FRAMED (archive counts, recent,
-      reprocess progress), NOTED (recent journal entries, inbox/rejected counts), SYNTHD
-      (memories count, distillation queue depth, reports), SEARCHD (jobs/parked/runnable),
-      ORACLED (model, load), SHADOWD (charter + detector status when real). Each reads its own
-      daemon's tables; Box Status rows link through.
 - [x] **42. Health via tallyd + data-driven check-in** (landed 2026-07-15): app reads the
       phone's Health Connect store (where Samsung Health writes) , steps, sleep sessions
       (bucketed to the WAKE day), exercise , last 7 days, only network hop is phone->box; POST
@@ -346,23 +876,6 @@ Started 2026-07-15, the night the box learned to repair itself on unlock.
       content hash; canonical copy content-addressed in noted/archive; rejects to inbox/rejected
       with reason logged, never deleted, never looped. Remaining for noted: IMAP/upstream
       pullers, secd upload endpoint for the app share sheet, mentions extraction.
-- [ ] **32. Fleet gaps inventory** (per cmd READMEs, 2026-07-15): ghost.noted , first slice DONE
-      (see 35), pullers/upload/mentions remain; ghost.voiced (audio -> transcripts ->
-      noted; ephemeral live-capture vs kept voice-memos) , stub; ghost.tallyd (structured data ->
-      time-series + narrative summaries -> noted) , stub; framed's README says descriptions push
-      through noted's inbox , currently framed notifies searchd directly, reconcile when noted
-      is real; synthd's entities/episodes/decision-queue layers , not started (distillation loop
-      is the first slice only).
-
-## Security / longer arc (deprioritized 2026-07-15 , UX first, per the operator)
-
-- [ ] **15. Re-pair gating on FIDO2.**
-- [ ] **16. Backup system** , weekly fulls + daily incremental diffs on the always-mounted HDD,
-      asymmetric encryption (daily job never holds the key), folder unreachable by the app.
-- [ ] **17. Box security threat model blog post** (separate from the Border Agent post).
-
-## Done (this era)
-
 - [x] Convergent unlock , mounted-but-dead is repairable; Warm gates only Unseal/Mount.
 - [x] EnsureSchema bootstrap , pg_hba peer line for the run user; owner role, service roles,
       database, and ownership converged as superuser; grants (public + search) as owner.
