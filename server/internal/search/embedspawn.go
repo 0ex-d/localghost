@@ -55,7 +55,7 @@ func (e *EmbedServer) Start(within time.Duration) error {
 		args = append(args, "--threads", strconv.Itoa(e.cfg.Threads))
 	}
 	cmd := exec.Command(e.cfg.BinPath, args...)
-	// Same orphan lesson as oracled: Linux gets kernel parent-death cleanup; Darwin keeps Setpgid.
+	// Same orphan lesson as oracled: the kernel reaps the embed child if searchd dies hard.
 	cmd.SysProcAttr = ghostprocess.ChildSysProcAttr()
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

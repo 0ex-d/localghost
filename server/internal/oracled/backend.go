@@ -121,8 +121,13 @@ func (b *llamaBackend) Start(ctx context.Context) error {
 	args = append(args, b.cfg.ExtraArgs...)
 
 	cmd := exec.Command(b.cfg.BinPath, args...)
-	// Platform-specific child attrs keep the child in its own process group; Linux also uses Pdeathsig
-	// so a hard-dead parent does not leave llama-server holding the port and VRAM.
+	// own process group so oracled can signal the whole group on stop, and inherit oracled's env
+	// (GHOST_LOG_LEVEL etc.). stdout/stderr inherited so llama-server's own logs land in oracled's log.
+	// Setpgid so oracled can signal the whole group on a graceful stop, AND Pdeathsig so the
+	// KERNEL kills llama-server the moment its parent dies , the orphan systemd caught
+	// ("left-over process llama-server in control group while starting unit") held port 18080
+	// and 9GB of VRAM, so the next oracled's child could not bind and every caption timed out
+	// for an hour. A SIGKILLed parent cannot clean up after itself; the kernel can.
 	cmd.SysProcAttr = ghostprocess.ChildSysProcAttr()
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
