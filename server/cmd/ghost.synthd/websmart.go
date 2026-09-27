@@ -244,3 +244,10 @@ func termScore(text string, terms []string) float64 {
 	}
 	return float64(n) / float64(len(terms))
 }
+
+// planBox is the box's speed as the phone reads it: where the model runs and how fast it reads
+// (measured prompt tokens per second, or the class default when nothing was measured yet), so
+// the phone can weigh reading the pages itself against sending them.
+func planBox(sp engineSpeed) map[string]any {
+	return map[string]any{"known": sp.Known, "onGPU": sp.OnGPU, "promptTPS": math.Round(sp.promptTPS()), "genTPS": math.Round(sp.GenTPS)}
+}

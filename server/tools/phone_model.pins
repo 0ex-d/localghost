@@ -1,0 +1,13 @@
+# phone_model.pins , the model the PHONE runs, pinned like the box's weights (same format as
+# model.pins: name sha256 bytes upstream). Kept apart from model.pins on purpose: setup_llama.sh
+# fetches and stages every model.pins entry onto the volume for the box's own llama-server, and
+# the phone's model belongs in the unencrypted catalogue secd serves to phones instead
+# (/var/lib/ghost/models, tools/phone_model.sh).
+#
+# Gemma 4 E2B, instruction-tuned, quantisation-aware trained for 2-bit (Unsloth's QAT mobile build,
+# Apache 2.0, no account, no token): ~2.3B effective parameters, text only here (no mmproj).
+#   https://huggingface.co/unsloth/gemma-4-E2B-it-qat-mobile-GGUF
+# Hash and size from Hugging Face's LFS listing (api/models/.../tree/main, lfs.oid), 2026-09-27.
+#
+# name  sha256  bytes  upstream
+gemma-4-E2B-it-qat-UD-Q2_K_XL.gguf  0a5bbc20f91f92da96ab4870fa71b356c45b8500a7b8b9c3e0eb48359b72da28  2186186784  https://huggingface.co/unsloth/gemma-4-E2B-it-qat-mobile-GGUF/resolve/main/gemma-4-E2B-it-qat-UD-Q2_K_XL.gguf

@@ -111,6 +111,16 @@ for svc in $CHECK; do
                 sp=$(echo "$m" | sed -n 's/.*"speed":"\([^"]*\)".*/\1/p' | head -1)
                 [ -n "$v" ] && printf '  model %s\n' "$v"
                 [ -n "$sp" ] && printf '  %s\n' "$sp"
+                # The model the box offers PHONES (tools/phone_model.sh): read from the system area,
+                # which is on the host, not in the volume.
+                pm="${GHOST_STATE_DIR:-/var/lib/ghost}/models/catalog.json"
+                if [ -f "$pm" ]; then
+                    pn=$(sed -n 's/.*"name": *"\([^"]*\)".*/\1/p' "$pm" | head -1)
+                    ps=$(sed -n 's/.*"sizeBytes": *\([0-9]*\).*/\1/p' "$pm" | head -1)
+                    printf '  phone model offered: %s (%s MB)\n' "${pn:-?}" "$(( ${ps:-0} / 1000000 ))"
+                else
+                    printf '  phone model offered: none (sudo ./tools/phone_model.sh)\n'
+                fi
             fi
             if [ "$svc" = "ghost.framed" ]; then
                 # What the MAP can draw from this box: the Natural Earth cuts under geo/, and the

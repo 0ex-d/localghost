@@ -53,6 +53,8 @@ object WebSearch {
         /** The page's paragraphs as read (the ones most worth the box's time, in page order), so
          *  the box can pick the passages that answer rather than the window that matches words. */
         var paragraphs: List<String> = emptyList(),
+        /** Beside a phone model's notes (kind "note"): the page's own best paragraph, verbatim. */
+        var quote: String = "",
     ) {
         val site: String get() = runCatching { URL(url).host.removePrefix("www.") }.getOrDefault("")
 
@@ -60,23 +62,29 @@ object WebSearch {
             .put("title", title).put("url", url).put("snippet", snippet).put("excerpt", excerpt)
             .put("kind", kind).put("source", source).put("published", published).put("fetched", fetched)
             .apply { if (paragraphs.isNotEmpty()) put("paragraphs", JSONArray().also { a -> paragraphs.forEach { a.put(it) } }) }
+            .apply { if (quote.isNotEmpty()) put("quote", quote) }
 
         companion object {
             fun fromJson(o: JSONObject): Hit = Hit(o.optString("title"), o.optString("url"), o.optString("snippet"),
                 o.optString("excerpt"), o.optString("kind", "page"), o.optString("source", "duckduckgo"), o.optString("published"),
-                o.optJSONArray("paragraphs")?.let { a -> (0 until a.length()).map { a.optString(it) } } ?: emptyList())
+                o.optJSONArray("paragraphs")?.let { a -> (0 until a.length()).map { a.optString(it) } } ?: emptyList(),
+                o.optString("quote"))
         }
     }
 
     /** What the box's model said the question needs from the web (/v1/chat/plan): whether to
      *  search at all, the fact in one sentence, its shape, whether it goes stale, and the searches
      *  that would find it, most specific first. */
-    class Plan(val search: Boolean, val need: String, val shape: String, val fresh: Boolean, val queries: List<String>) {
+    class Plan(val search: Boolean, val need: String, val shape: String, val fresh: Boolean, val queries: List<String>, val box: BoxSpeed? = null) {
         /** The searches run in the first round: the first two. */
         val first: List<String> get() = queries.take(2)
         /** The rest, kept for a second round the box may ask for when the first read thin. */
         val spare: List<String> get() = queries.drop(2)
     }
+
+    /** How fast the box reads, as it said in its plan answer: where its model runs and its measured
+     *  prompt tokens per second. Null when the box said nothing (old box, no answer in time). */
+    class BoxSpeed(val known: Boolean, val onGPU: Boolean, val promptTps: Double, val genTps: Double)
 
     /** Where the phone is, for a weather question that names no place. */
     class Here(val lat: Double, val lon: Double)

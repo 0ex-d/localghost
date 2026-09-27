@@ -41,6 +41,22 @@ val catalog = extensions.getByType<VersionCatalogsExtension>().named("libs")
 val agpVersion: String = catalog.findVersion("agp").map { it.toString() }.orElse("unknown")
 val kotlinVersion: String = catalog.findVersion("kotlin").map { it.toString() }.orElse("unknown")
 
+// THE PHONE'S MODEL (llama.cpp, src/main/cpp). Built only when CMakeLists.txt pins llama.cpp to a
+// real 40-character commit: until then the APK builds without it and the app says so (Settings ›
+// PHONE MODEL), rather than a placeholder breaking every build. Pin it to the commit the box runs,
+// so the phone and the box read the same GGUF the same way:
+//     ssh box 'git -C /opt/localghost/llama.cpp rev-parse HEAD'
+// The source is fetched at configure time (git + network on the build machine), or taken from a
+// local checkout with -PllamaSrc=/path/to/llama.cpp (verified against the pin all the same).
+val llamaCmake = file("src/main/cpp/CMakeLists.txt")
+val llamaPin: String = if (llamaCmake.exists())
+    Regex("""set\(LLAMA_CPP_COMMIT\s+"([0-9a-f]*)"""").find(llamaCmake.readText())?.groupValues?.get(1).orEmpty() else ""
+val buildPhoneModel = Regex("^[0-9a-f]{40}$").matches(llamaPin)
+val llamaSrc: String = (findProperty("llamaSrc") as String?).orEmpty()
+// dotprod+fp16 runs on every arm64 phone that has Android 15; i8mm (Snapdragon 8 Gen 1 and later,
+// Tensor G3 and later) is faster for the quantised matmuls: -PllamaArch=armv8.6-a+dotprod+i8mm+fp16
+val llamaArch: String = (findProperty("llamaArch") as String?) ?: "armv8.2-a+dotprod+fp16"
+
 android {
     val localProps = Properties().apply {
         rootProject.file("local.properties").takeIf { it.exists() }
@@ -81,6 +97,27 @@ android {
         buildConfigField("String", "BUILD_GRADLE_VERSION", "\"$gradleVersion\"")
         buildConfigField("String", "BUILD_AGP_VERSION", "\"$agpVersion\"")
         buildConfigField("String", "BUILD_KOTLIN_VERSION", "\"$kotlinVersion\"")
+        // whether this APK carries the phone's model runtime, and which llama.cpp
+        buildConfigField("boolean", "HAS_PHONE_MODEL", "$buildPhoneModel")
+        buildConfigField("String", "LLAMA_CPP_COMMIT", "\"$llamaPin\"")
+        if (buildPhoneModel) {
+            ndk { abiFilters += "arm64-v8a" }
+            externalNativeBuild {
+                cmake {
+                    arguments += listOf("-DANDROID_STL=c++_static", "-DLG_CPU_ARCH=$llamaArch") +
+                        (if (llamaSrc.isNotEmpty()) listOf("-DFETCHCONTENT_SOURCE_DIR_LLAMA_CPP=$llamaSrc") else emptyList())
+                    cppFlags += "-std=c++17"
+                }
+            }
+        }
+    }
+    if (buildPhoneModel) {
+        externalNativeBuild {
+            cmake {
+                path = llamaCmake
+                version = "3.22.1"
+            }
+        }
     }
     buildTypes {
         release {

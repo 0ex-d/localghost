@@ -540,20 +540,38 @@ class MainActivity : ComponentActivity() {
         val here = fix?.let { com.localghost.app.net.WebSearch.Here(it.lat, it.lon) }
         val engine = com.localghost.app.net.WebSearch.Engine(AppSettings.searchEngine(this), AppSettings.braveKey(this))
         var wantWeb = com.localghost.app.net.WebSearch.shouldSearch(mode, text)
-        val plan: com.localghost.app.net.WebSearch.Plan? = if (wantWeb) {
+        val planAnswer: BoxClient.PlanAnswer? = if (wantWeb) {
             status("asking your box what to look for…")
             BoxClient.chatPlan(this, text, messages.toList())
         } else null
+        val plan = planAnswer?.plan
         // in auto mode the model's "this needs nothing from outside" is final; "on" searches anyway
         if (plan != null && !plan.search && mode != "on") wantWeb = false
         if (wantWeb) {
             status("searching the web on this phone" + (if (engine.brave) " (Brave)" else "") +
                 (plan?.need?.takeIf { it.isNotBlank() }?.let { " for: $it" } ?: "") + "…")
             webHits = com.localghost.app.net.WebSearch.search(text, here, engine, plan?.first, plan?.need ?: "")
+            // WHO READS THE PAGES: the box on its GPU reads them in seconds and gets the
+            // paragraphs; a box on its CPU (or one that did not answer the plan in time) gets the
+            // phone's model's notes instead, checked against the pages, with a verbatim quote each.
+            val pages = webHits.count { it.kind == "page" }
+            val pageTokens = webHits.filter { it.kind == "page" }.sumOf { h -> h.paragraphs.sumOf { it.length } / 4 }
+            val route = com.localghost.app.local.PhoneReader.Plan.route(true, planAnswer?.box, plan != null,
+                com.localghost.app.local.LocalModel.usable(this), com.localghost.app.local.LocalModel.Speed.promptTps(this),
+                com.localghost.app.local.LocalModel.Speed.genTps(this), pages, pageTokens)
+            if (route == com.localghost.app.local.PhoneReader.Route.PHONE_READS) {
+                val need = plan?.need?.takeIf { it.isNotBlank() } ?: com.localghost.app.net.WebSearch.cleanQuery(text)
+                val read = com.localghost.app.local.PhoneReader.digest(this, need, webHits) { status(it) }
+                webHits = read.hits
+                status("${read.digested} of $pages pages read into notes on this phone in ${read.seconds.toInt()} s " +
+                    "(the box is " + (if (planAnswer?.box?.known == true) "on its CPU" else "slow to answer") + ") , asking your box…")
+            }
             if (webHits.isNotEmpty()) web = com.localghost.app.net.WebSearch.toJson(webHits)
-            val read = webHits.count { it.paragraphs.isNotEmpty() || it.excerpt.isNotBlank() }
-            status(if (webHits.isEmpty()) "nothing found on the web , asking your box…"
-                else "${webHits.size} found, $read read on this phone , asking your box…")
+            if (route != com.localghost.app.local.PhoneReader.Route.PHONE_READS) {
+                val read = webHits.count { it.paragraphs.isNotEmpty() || it.excerpt.isNotBlank() }
+                status(if (webHits.isEmpty()) "nothing found on the web , asking your box…"
+                    else "${webHits.size} found, $read read on this phone , asking your box…")
+            }
         } else {
             status("asking your box…")
         }
@@ -624,20 +642,48 @@ class MainActivity : ComponentActivity() {
     }
 
     private suspend fun generateLocal(text: String) {
-        if (!LocalModel.ensureLoaded(this@MainActivity)) {
-            messages.add(Message(Message.Role.GHOST,
-                "No box, and no on-phone model installed. I can't answer right now. " +
-                "Reconnect to your box, or install a local model for offline replies."))
+        // THE LIFEBOAT: no box (or local forced). The phone's own model answers; when the web mode
+        // says so, the phone searches, its model reads the pages into notes, and answers from them.
+        fun say(body: String, status: String = "", web: List<com.localghost.app.net.WebSearch.Hit> = emptyList()) {
+            val m = Message(Message.Role.GHOST, body, status = status, web = web)
+            if (messages.lastOrNull()?.role == Message.Role.GHOST) messages[messages.size - 1] = m else messages.add(m)
+        }
+        if (!com.localghost.app.local.LocalModel.usable(this)) {
+            say(if (!com.localghost.app.local.NativeLlama.ensureLibrary())
+                "No box, and this build of the app carries no on-phone model runtime (its llama.cpp pin is not set). I can't answer right now."
+            else "No box, and no on-phone model installed. I can't answer right now. " +
+                "Reconnect to your box, or download the phone model from it (MODELS in the menu) for replies without it.")
             streaming = false
             return
         }
-        var reply = ""
-        LocalModel.generate(text, shouldContinue = { streaming }).collect { piece ->
-            reply += piece
-            if (messages.lastOrNull()?.role == Message.Role.GHOST)
-                messages[messages.size - 1] = Message(Message.Role.GHOST, reply)
-            else messages.add(Message(Message.Role.GHOST, reply))
+        say("", "loading the phone's model…")
+        if (!com.localghost.app.local.LocalModel.ensureLoaded(this)) {
+            say("The phone's model would not load (${com.localghost.app.local.LocalModel.state.name.lowercase()}). MODELS in the menu says more.")
+            streaming = false
+            return
         }
+        val mode = AppSettings.webMode(this)
+        var hits: List<com.localghost.app.net.WebSearch.Hit> = emptyList()
+        if (com.localghost.app.net.WebSearch.shouldSearch(mode, text)) {
+            say("", "no box , searching the web on this phone…")
+            val fix = com.localghost.app.sync.LocationLog.last(this)?.takeIf { System.currentTimeMillis() / 1000 - it.ts < 6 * 3600 }
+            val engine = com.localghost.app.net.WebSearch.Engine(AppSettings.searchEngine(this), AppSettings.braveKey(this))
+            val found = com.localghost.app.net.WebSearch.search(text, fix?.let { com.localghost.app.net.WebSearch.Here(it.lat, it.lon) }, engine)
+            if (found.isNotEmpty()) {
+                val read = com.localghost.app.local.PhoneReader.digest(this, com.localghost.app.net.WebSearch.cleanQuery(text), found) { say("", it) }
+                hits = read.hits
+                say("", "${read.digested} pages read on this phone , answering…", hits)
+            }
+        }
+        var reply = ""
+        val answer = com.localghost.app.local.PhoneReader.answerAlone(this, text, hits) { whole ->
+            // called on the model's thread: the transcript is changed on the main one
+            reply = whole
+            runOnUiThread { say(whole, "", hits) }
+            streaming
+        }
+        answer?.let { say(it, "", hits) }
+        if (answer == null && reply.isEmpty()) say("The phone's model gave no answer.")
         streaming = false
     }
 

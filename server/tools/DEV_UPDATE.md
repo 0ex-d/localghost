@@ -1967,3 +1967,83 @@ Tests: dayTemplate/dayTitle/sheet over a full day and a thin one, the signature 
 caption landing, a model memory over the sheet passing and an invented one refused, thousands
 separators in the model's numbers, joinAnd/thousands/topKeys. Not run: the pass against Postgres
 (no Postgres here; the SQL is read, and the shapes match the schema), the model.
+
+## The phone's model, working: it reads pages when the box is slow, and answers alone without a box
+
+Vlad: "the app does the scraping and sends it to the server … even better, make the local model
+work on the phone, the phone sends the summary from the scraping to the server: the dumber model
+on the phone summarises and the smarter model on the server pulls it together."
+
+The honest number first, and the design follows it: a 2B model on a phone CPU reads ~70–150
+tokens a second (llama.cpp measured ~72 t/s prompt, ~15 t/s generation for a 2B Q4_K_M on a
+Galaxy S23 Ultra); the 4070 reads the same pages in about two seconds. So the split is ADAPTIVE
+(Vlad's pick): the box on its GPU still gets the paragraphs; the phone's model reads the pages only
+when that is faster than the box , the box on its CPU, or a box that did not answer the plan in
+time , and it answers by itself when there is no box.
+
+THE PHONE MODEL NEVER RAN. The native pieces were written and never built: gradle had no
+externalNativeBuild, the llama.cpp pin in CMakeLists.txt was the literal
+"e9fb3b3REPLACE_WITH_FULL_40_CHAR_SHA", so System.loadLibrary failed and LocalModel said ABSENT
+forever. And the JNI would not have survived first contact: the KV cache was never cleared (the
+second question decoded after the first one's tokens), the whole prompt went to llama_decode in one
+batch (fails past n_batch , a web page is thousands of tokens), a prompt longer than the context
+was undefined, pieces went to Java through NewStringUTF (modified UTF-8: the process ABORTS on an
+emoji or on a character split across two tokens), and no chat template was applied.
+
+- BUILD: gradle reads the pin; when it is a real 40-hex commit it wires CMake (arm64-v8a, static
+  libc++, -march from -PllamaArch, default armv8.2-a+dotprod+fp16; armv8.6-a+dotprod+i8mm+fp16 is
+  faster on Snapdragon 8 Gen 1 and later), else the APK builds without the runtime and says so
+  (BuildConfig.HAS_PHONE_MODEL, LLAMA_CPP_COMMIT). CMake: static llama.cpp inside one .so, no
+  tools/server/curl/OpenMP, GGML_NATIVE off, the fetched source verified against the pin (or a
+  local checkout with -PllamaSrc=…, verified when it is a git checkout). Pin it to the box's:
+  `git -C /opt/localghost/llama.cpp rev-parse HEAD` (Gemma 4 needs a 2026 llama.cpp; the box's
+  reads Gemma 4 already).
+- JNI (llama_jni.cpp, rewritten): backend init once per process; a fresh memory per call
+  (llama_memory_clear); prefill chunked by n_batch; the prompt cut to fit n_ctx (head kept, the
+  generation cue re-appended); Gemma 4's turn format , `<|turn>system\n…<turn|>\n<|turn>user\n…
+  <turn|>\n<|turn>model\n`, thinking off , when the vocabulary has those tokens (llama.cpp's
+  built-in template list knows only the classic `<start_of_turn>`), else the model's own template
+  through llama.cpp, else Gemma classic; stop on `<turn|>`/`<end_of_turn>` as well as EOG; text
+  to Java as bytes, whole UTF-8 sequences only; greedy at temperature 0, top-k/top-p otherwise;
+  llama_perf numbers back per call; a mutex per handle; nativeFree waits for a running call.
+  Compiled on the host against a stub of the upstream API (declarations read from llama.h master),
+  and the UTF-8 splitter and stop pieces unit-tested there.
+- LocalModel: complete(system, user) with a lock, the measured speed remembered as a moving
+  average (LocalModel.Speed, a guess of 60/12 t/s until the first real call), four threads at most
+  (the big cores), n_ctx 4096, the weights dropped after four idle minutes, the thought channel and
+  turn markers stripped from what comes back.
+- PhoneReader: Plan.route decides BOX_READS / PHONE_READS / PHONE_ALONE / NOBODY from what the box
+  said on /plan (onGPU, measured prompt t/s) and the phone's own measured speed , phone reading
+  plus the box reading ~150 tokens of notes a page must beat the box reading the pages by 20%.
+  digest(): each page read into at most five note lines within a 45-second budget sized by the
+  phone's speed (a page gets up to 1400 tokens; under 250 is not worth reading), every number in a
+  note must appear in the page or the line is dropped, and each page carries its best paragraph
+  verbatim as a QUOTE; a page there was no time for goes as the quote alone. answerAlone(): the
+  lifeboat answers from its notes, citing [n].
+- synthd: /plan now reports the box's speed ({"box":{"known","onGPU","promptTPS","genTPS"}}) and,
+  with the model on the CPU, answers at once without the model (the plan itself would take a
+  minute). The web block gains kind "note": NOTES and QUOTE per page, and one line telling the big
+  model to trust the quote over the notes and treat an unsupported note with care.
+- The chat: web questions route through PhoneReader.Plan.route; the status line says who read what
+  ("2 of 3 pages read into notes on this phone in 38 s (the box is on its CPU) , asking your box…").
+  Without a box (or local forced): search on the phone, digest, answer by the phone's model,
+  streamed, findings numbered under the answer.
+- THE MODEL: Gemma 4 E2B, Unsloth's QAT mobile build, UD-Q2_K_XL, 2.19 GB, Apache 2.0, pinned in
+  tools/phone_model.pins (kept apart from model.pins, which setup_llama.sh stages for the box's own
+  llama-server). `sudo ./tools/phone_model.sh` fetches it (mirror set `phone`, else the pin's
+  upstream), checks it, installs it into /var/lib/ghost/models with the catalogue secd already
+  serves (/v1/models, /v1/models/<id> resumable); `--file <gguf>` for a copied file, `--check` to
+  see what is offered. The phone pulls it from the box (MODELS in the menu) and checks the hash.
+  health.sh: "phone model offered: …" under oracled. The MODELS screen says what the phone can do:
+  runtime in this build or not, model or not, measured speed, load time, prompt format.
+
+Tests: PhoneReaderTest (who reads in eight situations, per-page tokens, page text cutting, notes
+kept only where their numbers are in the page , thousands separators understood , "NOTHING",
+five lines, long lines cut; the quote; the prompts; the machinery stripped; the average) and
+WebSearchTest, 13 JUnit, run here against the real coroutines library; synthd (notes and quote
+in the web block, the caution only with notes, planBox on CPU and GPU); phone_model.sh (refuses a
+file that is not the pinned one, installs one that is, writes a catalogue secd's registry reads and
+verifies, --check, a rerun is a no-op); the JNI compiled against the upstream declarations with
+-Wall -Wextra. NOT RUN: anything on a phone , the native build (no NDK here), the model's notes,
+its speed on Vlad's phone, Gemma 4 E2B's real turn tokens in the vocabulary (the probe falls back
+if they are not what the Hugging Face template says).

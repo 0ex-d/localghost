@@ -13,8 +13,8 @@ func fullDay() *dayFacts {
 		Line:     "near Strada A → Corner Café → Voutoumi · 1.4 km on foot, 10 km by road",
 		Stays: []dayStayFact{{Name: "Strada A", Kind: "near", From: 1000, To: 4600}, {Name: "Corner Café", Kind: "cafe", From: 5000, To: 6800, Photos: 1},
 			{Name: "Voutoumi", Kind: "beach", From: 8000, To: 9000}},
-		Moves:  []dayMoveFact{{Mode: "walk", From: 4600, To: 5000, Meters: 1294}, {Mode: "ride", From: 6800, To: 8000, Meters: 9419}},
-		WalkM:  1294, RideM: 9419, Fixes: 46, Points: 49,
+		Moves: []dayMoveFact{{Mode: "walk", From: 4600, To: 5000, Meters: 1294}, {Mode: "ride", From: 6800, To: 8000, Meters: 9419}},
+		WalkM: 1294, RideM: 9419, Fixes: 46, Points: 49,
 		Steps: 8400, SleepMin: 430, ExerciseMin: 35, Feeling: "tired but happy",
 		Notes: []string{"Boat for Saturday"}, Chats: []string{"ferry times to Corfu"},
 		Outing: "Antipaxos · 19–23 Sep 2026", OutingDay: 3, OutingDays: 5, OutingAway: true}

@@ -958,7 +958,12 @@ object BoxClient {
      *  (/v1/chat/plan). Null when the box cannot say (old box, model busy, {"ok":false}) , the
      *  phone then plans by itself, as it always did. Bounded to a few seconds: a plan that takes
      *  longer than the search it saves is not worth waiting for. */
-    suspend fun chatPlan(ctx: Context, prompt: String, history: List<Message>, timeoutMs: Long = 9000): WebSearch.Plan? =
+    /** The box's plan and its speed. [plan] is null when the box could not plan (old box, model on
+     *  its CPU, no answer in time) , the phone then plans by itself; [box] is null when the box
+     *  said nothing about its speed, which the phone reads as "slow or far". */
+    class PlanAnswer(val plan: WebSearch.Plan?, val box: WebSearch.BoxSpeed?)
+
+    suspend fun chatPlan(ctx: Context, prompt: String, history: List<Message>, timeoutMs: Long = 9000): PlanAnswer =
         kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
             try {
                 val hist = org.json.JSONArray().apply {
@@ -967,15 +972,18 @@ object BoxClient {
                     }
                 }
                 val r = BoxHttp.postJson(ctx, "/v1/chat/plan", org.json.JSONObject().put("prompt", prompt).apply { if (hist.length() > 0) put("history", hist) })
-                if (!r.optBoolean("ok", false)) null
+                val box = r.optJSONObject("box")?.let { b ->
+                    WebSearch.BoxSpeed(b.optBoolean("known"), b.optBoolean("onGPU"), b.optDouble("promptTPS", 0.0), b.optDouble("genTPS", 0.0))
+                }
+                if (!r.optBoolean("ok", false)) PlanAnswer(null, box)
                 else {
                     val qs = r.optJSONArray("queries")?.let { a -> (0 until a.length()).map { a.optString(it) }.filter { it.isNotBlank() } } ?: emptyList()
-                    WebSearch.Plan(r.optBoolean("search", true), r.optString("need", ""), r.optString("shape", "prose"), r.optBoolean("fresh", false), qs)
+                    PlanAnswer(WebSearch.Plan(r.optBoolean("search", true), r.optString("need", ""), r.optString("shape", "prose"), r.optBoolean("fresh", false), qs, box), box)
                 }
             } catch (e: Exception) {
-                android.util.Log.w("LocalGhost", "chat plan: ${e.message}"); null
+                android.util.Log.w("LocalGhost", "chat plan: ${e.message}"); PlanAnswer(null, null)
             }
-        }
+        } ?: PlanAnswer(null, null)
 
     /** The newest N day tracks in ONE round trip, each an ordered list of lat/lon pairs. Null when
      *  the box predates /v1/geo/tracks (the caller falls back to days + one fetch per day). */

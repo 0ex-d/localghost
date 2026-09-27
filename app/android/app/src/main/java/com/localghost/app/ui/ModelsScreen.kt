@@ -10,6 +10,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.RectangleShape
@@ -42,11 +43,26 @@ fun ModelsScreen(
             Spacer(Modifier.height(12.dp))
             SectionLabel("ON-PHONE MODELS")
             Spacer(Modifier.height(8.dp))
-            Text("Models your box offers for this phone to run, for when the box is " +
-                 "unreachable. You download them from the box into this app's storage; delete " +
-                 "removes the local copy only. The box keeps it, so you can pull it again. " +
-                 "They see none of your life-index; generic answers only.",
+            Text("The phone's own model, from your box (never from the internet). It reads web pages into " +
+                 "notes when the box is slow (its model on the CPU) so the box only has to read the notes, and " +
+                 "it answers by itself, web search included, when the box cannot be reached. It sees none of " +
+                 "your life-index. Delete removes the phone's copy only; the box keeps it.",
                  color = GhostTextDim, style = MaterialTheme.typography.bodyMedium)
+            Spacer(Modifier.height(6.dp))
+            // what this phone can actually do: the runtime in this build, the model's state, its speed
+            val ctx = androidx.compose.ui.platform.LocalContext.current
+            val built = remember { com.localghost.app.local.NativeLlama.ensureLibrary() }
+            val speed = com.localghost.app.local.LocalModel.Speed
+            val line = when {
+                !built -> "this build carries no model runtime (its llama.cpp pin is not set) , the phone cannot run one"
+                !com.localghost.app.local.LocalModel.isModelPresent(ctx) -> "runtime in this build (llama.cpp ${com.localghost.app.BuildConfig.LLAMA_CPP_COMMIT.take(8)}), no model downloaded yet"
+                speed.measured(ctx) -> "reads %.0f tokens/s, writes %.1f tokens/s on this phone".format(java.util.Locale.US, speed.promptTps(ctx), speed.genTps(ctx)) +
+                    (if (speed.loadMs(ctx) > 0) " · loads in %.1f s".format(java.util.Locale.US, speed.loadMs(ctx) / 1000.0) else "") +
+                    " · " + com.localghost.app.local.LocalModel.state.name.lowercase() +
+                    (com.localghost.app.local.LocalModel.lastFormat.takeIf { it.isNotEmpty() }?.let { " · prompt format $it" } ?: "")
+                else -> "installed, not run yet , its speed shows here after the first answer"
+            }
+            Text(line, color = if (built) TerminalDim else Warning, style = MaterialTheme.typography.labelMedium)
             Spacer(Modifier.height(6.dp))
         }
         if (models.isEmpty()) {

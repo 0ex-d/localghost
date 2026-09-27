@@ -147,3 +147,40 @@ func TestMoreWebIsAStreamThePhoneAlreadyReads(t *testing.T) {
 		t.Fatalf("done event: %v %s", err, lines[2])
 	}
 }
+
+func TestPhoneNotesArePresentedAsNotesWithTheirQuote(t *testing.T) {
+	hits := boundWeb([]webHit{
+		{Title: "Freddo prices", URL: "https://example.gr/freddo", Kind: "note", Excerpt: "- A freddo espresso costs 3 to 4.50 euros in central Athens\n- Islands are dearer",
+			Quote: "A freddo espresso costs between 3 and 4.50 euros in central Athens in 2026.", Fetched: "2026-09-27 10:00 UTC"},
+		{Title: "Weather", URL: "https://open-meteo.com", Kind: "weather", Source: "open-meteo", Excerpt: "Sunny, 27°C"},
+		{Title: "Odd", URL: "https://x.org", Kind: "gossip", Excerpt: "e"},
+	})
+	if hits[0].Kind != "note" || hits[2].Kind != "page" {
+		t.Fatalf("kinds: %s %s", hits[0].Kind, hits[2].Kind)
+	}
+	out := formatWeb(hits)
+	for _, must := range []string{
+		"read by the phone's own small model",
+		"trust the quote over the notes",
+		"[1] Freddo prices (example.gr) , page, read by the phone's model , https://example.gr/freddo",
+		"NOTES: - A freddo espresso costs 3 to 4.50 euros in central Athens / - Islands are dearer",
+		`QUOTE: "A freddo espresso costs between 3 and 4.50 euros in central Athens in 2026."`,
+		"[2] Weather (open-meteo) , weather forecast",
+	} {
+		if !strings.Contains(out, must) {
+			t.Fatalf("formatWeb lacks %q:\n%s", must, out)
+		}
+	}
+	// without notes the caution is not there
+	if strings.Contains(formatWeb(hits[1:]), "small model") {
+		t.Fatal("caution printed without notes")
+	}
+	// the box's speed as the phone reads it
+	b := planBox(engineSpeed{Known: true, OnGPU: false})
+	if b["onGPU"] != false || b["promptTPS"] != 40.0 || b["known"] != true {
+		t.Fatalf("planBox CPU: %v", b)
+	}
+	if b := planBox(engineSpeed{Known: true, OnGPU: true, PromptTPS: 2310.4}); b["promptTPS"] != 2310.0 {
+		t.Fatalf("planBox GPU: %v", b)
+	}
+}

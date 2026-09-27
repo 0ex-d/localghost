@@ -205,6 +205,19 @@ of the loop. On VERIFIED, remove the OS packages , ghost.secd prefers the volume
 automatically from the next unlock, and falls back to PATH only if the bundle is absent. From then
 on the databases are version-pinned to their own data and an apt upgrade cannot touch them.
 
+## 7d. The phone's model , root, once (optional, 2.2 GB)
+
+The app can run a small model on the phone: it reads web pages into notes when the box's model is on
+its CPU, and answers by itself when the box cannot be reached. The box offers it; the phone pulls it
+from the box, never from the internet:
+
+    sudo ./tools/phone_model.sh            # Gemma 4 E2B QAT, pinned in tools/phone_model.pins; mirror first
+    sudo ./tools/phone_model.sh --check    # what phones are offered, and whether the file matches
+
+The APK carries the model runtime only when app/android/app/src/main/cpp/CMakeLists.txt pins llama.cpp;
+pin it to the box's commit (`git -C /opt/localghost/llama.cpp rev-parse HEAD`) and rebuild the app.
+Then MODELS in the app's menu → DOWNLOAD.
+
 ## 1b. The watchdog , root, once, before the box is ever left alone
 
     sudo ./tools/watchdog.sh --arm

@@ -228,6 +228,15 @@ func main() {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		// THE BOX'S SPEED rides with every answer, so the phone can decide who reads the pages
+		// (the phone's model when the box is on its CPU). On the CPU the plan itself would take a
+		// minute: the box says so at once and the phone plans by itself.
+		sp := currentSpeed(runDir)
+		box := planBox(sp)
+		if sp.Known && !sp.OnGPU {
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "box": box, "why": "the model is on the CPU"})
+			return
+		}
 		t0 := time.Now()
 		resp, err := planClient.Infer(oracle.Request{
 			Capability: "chat", Class: oracle.ClassLocalSmall, Priority: oracle.PriorityInteractive,
@@ -235,17 +244,17 @@ func main() {
 		})
 		if err != nil || resp.Err != "" {
 			lg.Warn("web plan: no answer from the model", "fn", "plan", "err", err, "modelErr", resp.Err)
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false})
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "box": box})
 			return
 		}
 		p, ok := parsePlan(resp.Output)
 		if !ok {
 			lg.Warn("web plan: unusable answer", "fn", "plan", "out", clip(resp.Output, 200))
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false})
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "box": box})
 			return
 		}
 		lg.Info("web plan", "fn", "plan", "search", p.Search, "need", p.Need, "queries", p.Queries, "took", time.Since(t0).Round(time.Millisecond))
-		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "search": p.Search, "need": p.Need, "shape": p.Shape, "fresh": p.Fresh, "queries": p.Queries})
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "search": p.Search, "need": p.Need, "shape": p.Shape, "fresh": p.Fresh, "queries": p.Queries, "box": box})
 	})
 	streamMux.HandleFunc("/chat", func(w http.ResponseWriter, r *http.Request) {
 		var q struct {
@@ -992,6 +1001,9 @@ type webHit struct {
 	// (websmart.go ranks them against the need and writes the excerpt from the best; an old
 	// phone sends only its keyword excerpt, which then stands as it is).
 	Paragraphs []string `json:"paragraphs,omitempty"`
+	// Quote is the page's own words beside a phone's notes (kind note): the paragraph that best
+	// matches what was needed, verbatim, so a small model's slip can be seen for what it is.
+	Quote string `json:"quote,omitempty"`
 }
 
 const (
@@ -1000,7 +1012,9 @@ const (
 	webMaxSnippet = 300
 )
 
-var webKinds = map[string]bool{"page": true, "summary": true, "weather": true, "rate": true}
+// note: a page the PHONE'S model read into notes (the box was slow or far), with the page's own
+// best paragraph as a quote beside them so the notes can be checked against the page's words.
+var webKinds = map[string]bool{"page": true, "summary": true, "weather": true, "rate": true, "note": true}
 
 func boundWeb(hits []webHit) []webHit {
 	var out []webHit
@@ -1011,6 +1025,10 @@ func boundWeb(hits []webHit) []webHit {
 		h.Title = clip(strings.ReplaceAll(h.Title, "\n", " "), 160)
 		h.URL = clip(h.URL, 300)
 		h.Snippet = clip(strings.ReplaceAll(h.Snippet, "\n", " "), webMaxSnippet)
+		if h.Kind == "note" {
+			// a phone's notes are lines; keep them apart
+			h.Excerpt = strings.ReplaceAll(strings.TrimSpace(h.Excerpt), "\n", " / ")
+		}
 		h.Excerpt = clip(strings.ReplaceAll(h.Excerpt, "\n", " "), webMaxExcerpt)
 		h.Fetched = clip(h.Fetched, 32)
 		h.Published = clip(h.Published, 32)
@@ -1018,6 +1036,7 @@ func boundWeb(hits []webHit) []webHit {
 		if !webKinds[h.Kind] {
 			h.Kind = "page"
 		}
+		h.Quote = clip(strings.ReplaceAll(h.Quote, "\n", " "), 600)
 		if len(h.Paragraphs) > 16 {
 			h.Paragraphs = h.Paragraphs[:16]
 		}
@@ -1086,6 +1105,12 @@ func formatWeb(hits []webHit) string {
 	}
 	var b strings.Builder
 	b.WriteString("\n\nFound on the web by the user's phone for this question (this box has no internet; these are the only outside facts available). Cite by number, e.g. [2], and by site name, whenever you use one; prefer a dated figure to an undated page; say when the findings do not settle the question.")
+	for _, h := range hits {
+		if h.Kind == "note" {
+			b.WriteString(" Some pages were read by the phone's own small model and come as its NOTES with a verbatim QUOTE from the page: trust the quote over the notes where they differ, and treat a note nothing else supports with care.")
+			break
+		}
+	}
 	if f := hits[0].Fetched; f != "" {
 		b.WriteString(" Fetched " + f + ".")
 	}
@@ -1102,6 +1127,8 @@ func formatWeb(hits []webHit) string {
 			label = "exchange rate"
 		case "summary":
 			label = "encyclopedia summary"
+		case "note":
+			label = "page, read by the phone's model"
 		}
 		fmt.Fprintf(&b, "\n[%d] %s", i+1, h.Title)
 		if site != "" {
@@ -1116,6 +1143,15 @@ func formatWeb(hits []webHit) string {
 		b.WriteString(" , " + label + " , " + h.URL)
 		if h.Snippet != "" && h.Kind == "page" {
 			b.WriteString("\n    " + h.Snippet)
+		}
+		if h.Kind == "note" {
+			if h.Excerpt != "" {
+				b.WriteString("\n    NOTES: " + h.Excerpt)
+			}
+			if h.Quote != "" {
+				b.WriteString("\n    QUOTE: \"" + h.Quote + "\"")
+			}
+			continue
 		}
 		if h.Excerpt != "" {
 			b.WriteString("\n    " + h.Excerpt)
