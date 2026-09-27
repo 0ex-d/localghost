@@ -176,7 +176,10 @@ if [ -n "${GHOST_PIN:-}" ] && systemctl is-active --quiet ghost.secd; then
     _killed=""
     _unkillable=""
     for i in $(seq 1 45); do
-        _alive=$(pgrep -fa '/var/lib/ghost/mnt/.*/bin/' 2>/dev/null | sed -E 's|.*/bin/([^ ]+).*|\1|' | sort -u | tr '\n' ' ')
+        # (|| true: pgrep exits 1 when nothing is left, which is the success case; under pipefail
+        # that status used to END THE SCRIPT right here, before the restart , the new secd was
+        # staged but never started)
+        _alive=$( { pgrep -fa '/var/lib/ghost/mnt/.*/bin/' 2>/dev/null || true; } | sed -E 's|.*/bin/([^ ]+).*|\1|' | sort -u | tr '\n' ' ')
         if [ -z "$_alive" ]; then _left=""; break; fi
         _left="$_alive"
         # anything seen before that is no longer alive: say so now, with the second
