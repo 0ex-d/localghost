@@ -219,6 +219,29 @@ var schemaRegistry = []SchemaTable{
 		{"generated_at", "BIGINT", true, ""},
 		{"body", "JSONB", true, ""},
 	}},
+	// DAY SUMMARIES , one row per day the box knows anything about, built by ghost.synthd once
+	// the day is over and again whenever the day's inputs change (captions landing, a late sync,
+	// a route told on new streets). facts is the sheet the summary was written from (photos,
+	// places, tags, captions, the route, health, notes, the outing it belongs to); template is
+	// the deterministic sentence; summary is the model's prose when it passed the grounding
+	// check, else the template; written_by says which. "On this day" reads these , no model at
+	// request time , and the memories feed carries a projection of the days with signal.
+	{Name: "day_summaries", PK: "day", Cols: []SchemaCol{
+		{"day", "TEXT", true, ""},
+		{"built_at", "BIGINT", true, ""},
+		{"version", "INTEGER", true, "1"},
+		{"signature", "TEXT", true, "''"},
+		{"title", "TEXT", true, "''"},
+		{"template", "TEXT", true, "''"},
+		{"summary", "TEXT", true, "''"},
+		{"written_by", "TEXT", true, "'template'"},
+		{"model_at", "BIGINT", true, "0"},
+		{"prose_tries", "INTEGER", true, "0"},
+		{"tries_sig", "TEXT", true, "''"},
+		{"facts", "JSONB", false, ""},
+	}, Indexes: []string{
+		"CREATE INDEX IF NOT EXISTS day_summaries_mmdd ON day_summaries (substr(day, 6, 5))",
+	}},
 	{Name: "frame_tags", PK: "hash, tag", Cols: []SchemaCol{
 		{"hash", "TEXT", true, ""},
 		{"tag", "TEXT", true, ""},

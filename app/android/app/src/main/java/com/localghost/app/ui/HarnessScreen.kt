@@ -119,13 +119,17 @@ private fun PipelinePanel() {
                 // the rest at that pace. No pace = nothing described in the last hour, which is
                 // either done or a model that is not running; both are said plainly.
                 val left = pl.described.left
+                // An ETA is a promise about the queue: only while there IS a queue. With nothing
+                // queued the honest line is what will happen next, not "about 21 h".
                 val pace = when {
                     left == 0 -> "every photo and video is described"
+                    pl.caption.pending == 0 && pl.caption.parked > 0 -> "$left left, ${pl.caption.parked} caption jobs parked (five failures each) , unpark or check oracled"
+                    pl.caption.pending == 0 -> "$left left, nothing queued" +
+                        (if (pl.describedLastDay > 0) " · ${pl.describedLastDay} today" else "") +
+                        " , the box re-checks every six hours and asks for what is still missing"
                     pl.describedLastHour > 0 -> "${pl.describedLastHour}/h · ${pl.describedLastDay} today · " +
                         "$left left, about ${eta(pl.etaSeconds)}"
-                    pl.caption.pending > 0 -> "$left left, none described in the last hour , the vision model is idle or warming"
-                    pl.caption.parked > 0 -> "$left left, ${pl.caption.parked} caption jobs parked (five failures each) , unpark or check oracled"
-                    else -> "$left left, nothing queued , the next stock-take will queue them"
+                    else -> "$left left, none described in the last hour , the vision model is idle or warming"
                 }
                 Text(pace, color = if (left == 0) TerminalGreen else GhostText, style = MaterialTheme.typography.labelMedium)
                 Spacer(Modifier.height(4.dp))

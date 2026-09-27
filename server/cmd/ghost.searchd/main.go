@@ -194,7 +194,7 @@ func main() {
 	})
 	ctl.Handle("search", func(args json.RawMessage) (ctlsock.Response, error) {
 		var a struct {
-			Query   string `json:"query"`
+			Query   string          `json:"query"`
 			Sources json.RawMessage `json:"sources"` // CSV "email,image"; raw because ghost-cli coerces scalars
 			FromTS  int64           `json:"from"`
 			ToTS    int64           `json:"to"`
@@ -221,6 +221,39 @@ func main() {
 			return ctlsock.Response{}, err
 		}
 		data, _ := json.Marshal(res)
+		return ctlsock.Response{OK: true, Data: data}, nil
+	})
+
+	// embed: unit vectors for a few texts, for a caller that wants to rank passages (synthd ranks
+	// the phone's web findings against what the model said it needs). Bounded: 64 texts of 2000
+	// characters; the embedder's own child does the work, nobody else spawns one.
+	ctl.Handle("embed", func(args json.RawMessage) (ctlsock.Response, error) {
+		var a struct {
+			Texts []string `json:"texts"`
+		}
+		if len(args) > 0 {
+			if err := json.Unmarshal(args, &a); err != nil {
+				return ctlsock.Response{}, err
+			}
+		}
+		if len(a.Texts) == 0 {
+			return ctlsock.Response{}, fmt.Errorf("embed requires texts=[...]")
+		}
+		if len(a.Texts) > 64 {
+			a.Texts = a.Texts[:64]
+		}
+		for i, t := range a.Texts {
+			if len(t) > 2000 {
+				a.Texts[i] = t[:2000]
+			}
+		}
+		ectx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		vecs, err := embedder.Embed(ectx, a.Texts)
+		if err != nil {
+			return ctlsock.Response{}, err
+		}
+		data, _ := json.Marshal(map[string]any{"vectors": vecs})
 		return ctlsock.Response{OK: true, Data: data}, nil
 	})
 
@@ -324,11 +357,11 @@ func main() {
 	ingestTier := func(tier int) ctlsock.Handler {
 		return func(args json.RawMessage) (ctlsock.Response, error) {
 			var a struct {
-				RefID      int64  `json:"refId"`      // the entry/memory id in its producer's table
-				Body       string `json:"body"`       // the summary text (embeds whole, seq 0)
-				CapturedAt int64  `json:"capturedAt"` // period the interpretation covers
-				CiteSource string `json:"citeSource"` // source of the cited originals
-				CiteIDs    json.RawMessage `json:"citeIds"` // CSV of original ids; raw for the same coercion reason
+				RefID      int64           `json:"refId"`      // the entry/memory id in its producer's table
+				Body       string          `json:"body"`       // the summary text (embeds whole, seq 0)
+				CapturedAt int64           `json:"capturedAt"` // period the interpretation covers
+				CiteSource string          `json:"citeSource"` // source of the cited originals
+				CiteIDs    json.RawMessage `json:"citeIds"`    // CSV of original ids; raw for the same coercion reason
 			}
 			if err := json.Unmarshal(args, &a); err != nil {
 				return ctlsock.Response{}, err

@@ -13,14 +13,15 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/LocalGhostDao/localghost/server/internal/ctlsock"
-	"time"
-	"path/filepath"
-	"os/user"
-	"os"
 	"fmt"
-	"strings"
+	"github.com/LocalGhostDao/localghost/server/internal/ctlsock"
+	"github.com/LocalGhostDao/localghost/server/internal/hw"
+	"os"
+	"os/user"
+	"path/filepath"
 	"strconv"
+	"strings"
+	"time"
 )
 
 func (s *Server) handleChatsList(w http.ResponseWriter, r *http.Request) {
@@ -173,6 +174,41 @@ func (s *Server) handleMemories(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"memories": rowsOut})
+}
+
+// handleDays , GET /v1/days?before=YYYY-MM-DD&limit=N , the prebuilt day summaries, newest first
+// (the sheet included: covers, places, the route line), for a DAYS feed and "on this day"-style
+// screens. GET /v1/day?d=YYYY-MM-DD is one of them. Empty list on a box that has built none yet.
+func (s *Server) handleDays(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodGet {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	before := r.URL.Query().Get("before")
+	if before != "" {
+		if _, err := time.Parse("2006-01-02", before); err != nil {
+			http.Error(w, "before=YYYY-MM-DD", http.StatusBadRequest)
+			return
+		}
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	rowsOut, err := s.notif.DaysList(mounted, before, limit)
+	if err != nil {
+		secdLog.Warn("days list failed", "fn", "handleDays", "err", err)
+		rowsOut = nil // a box whose schema predates the table: an empty feed, not appears-down
+	}
+	if rowsOut == nil {
+		rowsOut = []hw.DayRow{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"days": rowsOut})
 }
 
 // handleMemoryDelete , POST /v1/memories/delete {"id":N} , tombstone, never resurrectable.

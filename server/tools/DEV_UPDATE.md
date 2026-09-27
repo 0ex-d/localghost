@@ -1744,3 +1744,226 @@ against the fixture) hold to; secd's two routes (auth, 204 without tiles, bytes 
 ETag). Not run: the cut on a real extract (no Geofabrik in this sandbox; the synthetic 28 MB PBF
 was the largest), the phone's drawing (no Android SDK here), the fetch from the mirror once the
 web side publishes `roads`.
+
+## The day as a route: stays, moves, on foot or by road, along the streets
+
+Vlad: "the daily walking / moving route based on the data points." The box already had the points
+(a fix a quarter hour, the photos' positions, the day's steps) and drew chords between them. Now it
+tells the day.
+
+- internal/roadtiles writes a ROUTING GRAPH beside the tiles (`graph/<x>_<y>.lgg`, the fine 0.1°
+  grid): every road way split at the nodes it shares with another road (a second bitmap in pass 1:
+  a node seen twice is a junction) and at the nodes the extract lacks, each stretch an edge with its
+  ends' ids, class, flags, length and geometry, in the cell of BOTH ends (a reader dedupes). Tiles
+  without a graph are stale, so a box that cut before this build cuts again (`-no-graph` for tiles
+  only). The synthetic 300k-road bench went from 3 s to 5 s.
+- internal/roadgraph walks it: loads the cells around two points, snaps each to the nearest road a
+  person can walk (class ≥ primary, within 120 m), A* on edge lengths with the two snaps as virtual
+  ends, the path along the roads' own geometry back. Beyond 8 km, off the roads (a beach, a boat),
+  or no way between them: an error the caller draws a chord on. Tested on a synthetic town: the
+  walk takes the streets and the diagonal footway, never the motorway; across a cell border; a
+  gap is "no route" until a bridge way joins it.
+- internal/dayroute tells the day: the fixes and photos in time order; a STAY is ten minutes or more
+  within 100 m of the running centre (two quarter-hour fixes in one place; one fix is not); a MOVE is
+  what lies between stays, WALKED when no hop was faster than 7 km/h, RIDDEN otherwise; each walked
+  hop drawn along the streets when the router finds a way under 2.5× the chord + 100 m, else the
+  chord. Totals on foot and by road; a note when the walk is longer than the steps allow; a one-line
+  title: "near Strada A → Corner Café → Voutoumi · 1.4 km on foot, 10 km by road".
+- framed: RebuildDay writes `<day>.route.json` beside the GeoJSON (the store names stays: an S
+  spot within 300 m , beach, harbour, museum , else "near <place>" within 5 km; DaySteps from the
+  health sync); the router is the road graph when the box has one; `ghost-cli ghost.framed
+  day-routes [days=N]` rebuilds the last N; after a road-tiles build the last 60 days are told
+  again on the new streets.
+- secd: GET /v1/geo/route?d=YYYY-MM-DD (ETag, 404 untold, 400 for a day that is not a day);
+  /v1/geo/tracks rows carry line, walkM, rideM, stays.
+- The phone: the lit day fetches its route; walks in green along the streets, rides as dashed blue
+  chords, each stay a ring with its name and hours (the raw line steps back to a thin thread while
+  the route is up); under the day strip, the line, on foot / by road, the stays with their hours
+  and photos. BoxClient.dayRoute, RouteStay/RouteMove/DayRoute.
+- PASSIVE FIXES (PassiveFixReceiver): the OS hands the app a copy of every fix another app asks
+  for , Maps open, the camera geotagging , delivered by PendingIntent so the process need not be
+  alive, through LocationLog.record's own rules (25 m or an hour, coarse fixes confirm rather than
+  move). No GPS of our own, no service, nothing new to a battery; the trail is denser exactly when
+  the phone moves with someone else's GPS on. Registered with the worker, gone with it, back at
+  boot. Settings says "(N from other apps' fixes)".
+
+FOUND ON THE WAY: secd read the day paths from `<mount>/paths`; framed writes them to
+`<mount>/frames/paths`. /v1/geo/tracks and /v1/geo/day answered an empty list on every box, and
+the map drew the phone's own 48 hours and nothing older. secd reads frames/paths now (with the old
+directory as a fallback where something wrote there).
+
+Tests: roadtiles (graph cells, edges split at junctions and gaps, both-cell storage, Haversine);
+roadgraph (the town, the same-street case, off-road, too far, no graph, across cells, a gap then a
+bridge); dayroute (the told day with 46 fixes, 3 stays, a walk along the streets and a ride, the
+step note, the JSON round trip; the edges: one fix, jitter, a stay with no move, no stays at all, a
+ride by speed, photos alone); secd (the route body, ETag/304, 404, 400 on a path as a day, the
+track row's line); framed's existing tests. Not run: the phone's drawing, the passive provider on
+a real phone, a real extract.
+
+## The web search, smarter: the model says what it needs, the box reads by meaning, one more round
+
+Vlad: "improve the scraping to focus just on the data we need, make it smarter somehow." The phone
+searched by the question's words and sent one keyword window per page. Three changes:
+
+- THE NEED. Before the phone searches it asks the box (POST /v1/chat/plan → synthd /plan): the
+  model, in one short call with the last four turns for what "it" means, states whether the question
+  needs the web at all, the fact that would answer it in one sentence, its shape (number, date,
+  name, list, howto, prose), whether it goes stale, and one to three searches, most specific first.
+  Parsed tolerant of the model's wrapping, validated (dupes folded, three at most, none over 120
+  chars). {"ok":false} and the phone plans by itself as before; in auto mode a "search: false" is
+  final, in "on" mode the phone searches anyway. The first two searches run; the third is spare.
+- THE PARAGRAPHS. The phone sends each read page's paragraphs (the twelve with the most question
+  terms plus the first and the description, in page order, 6 KB a page) beside its old excerpt.
+  synthd embeds the need and the paragraphs through searchd's new `embed` command (EmbeddingGemma,
+  the child searchd already runs; 64 texts of 2000 chars) and keeps, per page, the three closest to
+  the need in page order as the excerpt , the passage that answers, not the one that repeats the
+  words. No embedder: a term-share pick stands in. The context event's note says how it read.
+- ONE MORE ROUND. When the best paragraph is under 0.30 to the need (or nothing was found) and a
+  spare search exists and this is round 1, the stream says `{"more":{"queries":[…]}}` and ends with
+  `{"done":true,"more":true}` before the model speaks; the phone runs them all, merges by URL, and
+  asks again as round 2. Never a third.
+
+secd forwards need/round/spare and takes 256 KB of findings (was 32). Old phones and old boxes
+interoperate: a phone without paragraphs gets the old excerpt path; a box without /plan gets the
+phone's own plan.
+
+Tests: parsePlan (fences, dupes, the cap, no-search plans, refusals), planPrompt (turns, date,
+bounds), rankParagraphs without an embedder (the price paragraph wins, page order kept, a hit
+without paragraphs keeps its excerpt), boundWeb, moreWeb's stream shape; WebSearchTest (the plan's
+first/spare, worthSending, merge) , 8 JUnit tests run here. Not run: the model's actual plans (its
+JSON discipline is the risk; the parser tolerates prose around it and refuses the rest), the
+embedder over the socket, a phone.
+
+## The memories, written: outings and days from a fact sheet, checked against it
+
+Vlad picked "model-written text, grounded". prosePass (synthd, prose.go), only with the model on
+the GPU (OnGPU; on the CPU the template stands):
+
+- OUTINGS: three a pass, newest first, those without `meta.prose`. The sheet: the memory's own
+  dates, days, photos, main place, country, places, trip/distance from home, distance moved, the
+  top tags, the cover frames' SCENE captions (from search.originals; without access, without them),
+  and the route lines of its days. The model writes two to four sentences in the second person,
+  past tense, from the sheet only. groundedProse keeps it only when: 60–900 chars; no list, heading,
+  refusal or markdown; and EVERY number in it is a number in the sheet (as written or its integer
+  part: "2.3 km" allows "2.3" and "2", never "2.5"). Kept: body = prose, meta.prose and
+  meta.template; outingPass carries the prose along while the template it was written from stands,
+  and drops back to a fresh template (to be written again) when the facts change. Three failed
+  tries and the template stays.
+- DAYS (kind='day', source_ref='day:<date>'): a day with signal , two or more stays, a walk of
+  3 km, five photos , from its route (stays with hours and names, moves with how far and how, the
+  totals, the steps), its photos (count, places, tags, four captions spread across the day). Two a
+  pass, the last 45 days, told once the day is over, told again when the day's line changes (new
+  points), tries tracked in settings (no empty cards). Title "Friday 25 September 2026 · Corner
+  Café, Voutoumi"; meta carries the line and up to five covers; the app shows a day's covers and
+  "a day, from your trail and photos · <line>".
+
+Tests: groundedProse (a good memory kept, an invented number refused, the integer-part rule, lists/
+headings/refusals/markdown/short/preamble refused, cleanup of quotes, exclamation marks and
+newlines), memoryPrompt, dayHasSignal, dayTitle, dayFacts from a route alone, kmText. Not run: the
+model's prose (the check is what makes it safe to ship untried).
+
+## The captions that closed without describing: why "1051 left" stood still with nothing queued
+
+Vlad, with the status screen: 30336 photos, described 31858 of 32909, tagged 31893, "50/h · 2343
+today · 1051 left, about 21 h", queue captions 0 · tags 0, last check a day ago. The queue was
+EMPTY with 1051 frames undescribed: their jobs had run and completed without describing anything.
+The one path that does that: a caption the model returned without the fixed `SCENE:` section ,
+thinking that ran past the token budget, a refusal, prose with dressed-up headings ("**Scene:**")
+the section reader did not read. Caption() stored anything over 20 characters; ApplyCaption wrote
+the description only from a SCENE section; the job closed; every stock-take found the frame
+undescribed, asked searchd, which found a caption in meta and re-applied nothing. And the
+stock-take itself only ran at boot.
+
+- search.NormalizeCaption puts the headings back into the contract's form (markdown, case, spacing,
+  "Colors" → "COLOURS", each at the start of its line; text before the first heading dropped) and
+  says whether a SCENE section exists. Caption() refuses a caption without one (the job retries with
+  the backoff and parks visibly after five, where the queue line shows it) and stores the
+  normalised text otherwise.
+- ensureCaptioned (the stock-take's ask) discards a stored caption with no sections, drops the
+  chunks it seeded the index with, and queues the frame again , the repair for the 1051.
+- framed runs the stock-take every six hours, not only at start.
+- The status line says "N left, nothing queued , the box re-checks every six hours" instead of an
+  ETA computed from a queue that is empty.
+
+On the box after the drop: `ghost-cli ghost.framed converge`, then searchd's log: "caption without
+sections discarded, frame queued again" per frame is the proof; the described count moves within
+the hour at the GPU's pace. If the count of those stays at zero and the 1051 do not move, this
+diagnosis is wrong and the searchd log around one of the undescribed frames is the next step.
+
+Tests: NormalizeCaption (markdown headings, a preamble, the colour spelling, a clean caption
+unchanged, the section reader on the result; thinking, a refusal, prose without headings and an
+empty SCENE refused).
+
+## The map as a map: opens where you are, stops at the world, no grid, you are here; the viewer pans
+
+- OPENS WHERE YOU ARE: the phone's last fix is known at once (prefs), so the first frame is the
+  place, ~100 km across; without a fix ever, the newest photo at the same span; without either, the
+  world. The never-blank fallback (an empty local view snaps to the world) now applies only on a box
+  without map tiles , with the coast and the roads drawn, a view with no photos is still a map.
+- ZOOM-OUT STOPS AT THE WORLD: minimum zoom 1 (the world fills the short side), and the centre is
+  held so no edge of the world comes inside the screen (clampCamera after every gesture).
+- NO GRID: the graticule draws under the debug switch only.
+- YOU ARE HERE: on its own canvas over the map (the pulse redraws that layer, not the land and the
+  roads): the fix's error circle when wider than the dot at this zoom (LocationLog.last carries
+  the accuracy now), a pulse ring growing and fading, a white ring with a green heart, "you" beside
+  it in bold with a halo , "you, 3 h ago" and dimmed when the fix is old. Under the title: "[ where
+  I am ]" (a town's worth around the phone; tap again for the streets) and "[ the world ]".
+- THE VIEWER: the gestures sat AFTER the graphicsLayer, so a finger's pan arrived divided by the
+  zoom (100 px of drag moved a 3× photo 33 px). Pointer input before the layer now, in screen
+  pixels; pinch zooms about the fingers, double-tap zooms about the tap, the offset is clamped so
+  the photo never leaves the screen.
+
+Not run: any of it on a phone (structural check only).
+
+## The days, prebuilt: one summary a day in Postgres, growing as the box learns more; "on this day" reads them
+
+Vlad: "we need the summaries of the days and when we look at history on this day we can just
+prebuild it in the evening and slowly add more things for each day, save it in postgres, and the
+summaries need to be better."
+
+- TABLE day_summaries (schemadef; created at the next converge): day, built_at, version,
+  signature, title, template, summary, written_by (template | model), model_at, prose_tries,
+  tries_sig, facts JSONB. One row per day the box knows anything about.
+- THE SHEET (days.go, gatherDayFacts): the photos (count, how many described so far, six covers
+  spread across the day, places and country from the hierarchy, the top ten tags, five covers'
+  SCENE captions), the route as framed told it (line, stays with hours and names, moves with how
+  far and how, totals, fixes), raw trail points, the health sync (steps, sleep, exercise), the
+  check-in's feeling, the journal's note titles, the chats started that day by title, and the
+  outing the day belongs to ("day 3 of 5 of Antipaxos · 19–23 Sep 2026", away or not). Its
+  signature (a hash of all of it) is what says the day changed.
+- THE PASS (daySummaryPass, every ten minutes inside distillLoop, after the outings): today from
+  20:00 UTC (template only), the last fourteen ended days every pass (late syncs, captions landing),
+  and a slice of 26 older days walking back to the first photo or trail point (a watermark in
+  settings; it starts over from the recent edge when the past is done). A day whose signature is
+  unchanged and already summarised is skipped. Otherwise: the TEMPLATE always ("Day 3 of 5 of
+  Antipaxos · 19–23 Sep 2026. Near Strada A → Corner Café → Voutoumi · 1.4 km on foot, 10 km by
+  road. 14 photos around Gaios and Voutoumi, mostly beach, boat, sea, taverna and dog. 8,400 steps,
+  35 min of exercise, 7h 10m of sleep. You said you felt tired but happy. You wrote: "Boat for
+  Saturday". You asked the box about ferry times to Corfu."), and the MODEL when it is on the GPU,
+  the day is over and has signal (two stays, a 3 km walk, five photos, a feeling, a note, an
+  outing), four a pass, three tries per signature: from the sheet only, second person, what
+  mattered first, the order of the day, the numbers as given, the evening last; groundedProse
+  keeps it or the template stands. A model text is rewritten only when the sheet changed AND the
+  last text is twelve hours old , captions land one by one and a rewrite per caption would be
+  noise; the template refreshes every time.
+- "ON THIS DAY" reads the rows (substr(day,6,5) index): each other year's summary, title, route
+  line, covers, places and notes; years the backfill has not reached come with photos and places
+  and no narrative until it does. No model at request time; the report cache is an hour.
+- The memories feed: a day with signal that no outing already tells is projected as kind='day'
+  (title, summary, covers, line); an outing's days stay inside the outing. Yesterday's dayProse
+  and the old episodePass (the one-line 'episode' memories) are retired; existing episode rows
+  stay where they are.
+- secd: GET /v1/days?before=YYYY-MM-DD&limit=N (the feed with the sheet), /v1/onthisday carries
+  title and line per year. ghost-cli ghost.synthd days [day=YYYY-MM-DD] [rewrite=true] [pass=true]:
+  counts, the backfill's position, a day cleared to be built again (rewrite lets the model write
+  it again at once), a pass now. health.sh: "day summaries N (M by the model), back to …,
+  backfill at …".
+- The app: the on-this-day card shows the day's title and route line above the narrative.
+
+Days are UTC days, like the paths and the routes , a photo at one in the morning in Athens is the
+previous day's. A local-day cut is a later change and touches all three.
+
+Tests: dayTemplate/dayTitle/sheet over a full day and a thin one, the signature moving with a
+caption landing, a model memory over the sheet passing and an invented one refused, thousands
+separators in the model's numbers, joinAnd/thousands/topKeys. Not run: the pass against Postgres
+(no Postgres here; the SQL is read, and the shapes match the schema), the model.

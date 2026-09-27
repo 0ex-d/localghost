@@ -89,12 +89,12 @@ private class Dot(val x: Double, val y: Double, val cell: BoxClient.GeoCell)
  *  clock per vertex when the box supplied one (empty otherwise); [phone] marks the part of a day
  *  the phone holds and the box has not seen yet (the spool waiting for a sync, or no box at all). */
 private class Track(val day: String, val xs: DoubleArray, val ys: DoubleArray, val times: LongArray, val distanceM: Double, val phone: Boolean,
-                    val minX: Double, val minY: Double, val maxX: Double, val maxY: Double, val glitches: Int = 0) {
+                    val minX: Double, val minY: Double, val maxX: Double, val maxY: Double, val glitches: Int = 0, val line: String = "") {
     val n: Int get() = xs.size
     val hasTimes: Boolean get() = times.size == xs.size && xs.isNotEmpty()
 }
 
-private fun trackOf(day: String, lat: DoubleArray, lon: DoubleArray, times: LongArray, distanceM: Double, phone: Boolean, glitches: Int = 0): Track {
+private fun trackOf(day: String, lat: DoubleArray, lon: DoubleArray, times: LongArray, distanceM: Double, phone: Boolean, glitches: Int = 0, line: String = ""): Track {
     val xs = DoubleArray(lat.size); val ys = DoubleArray(lat.size)
     var minX = Double.MAX_VALUE; var minY = Double.MAX_VALUE; var maxX = -Double.MAX_VALUE; var maxY = -Double.MAX_VALUE
     for (i in lat.indices) {
@@ -103,8 +103,23 @@ private fun trackOf(day: String, lat: DoubleArray, lon: DoubleArray, times: Long
         if (x < minX) minX = x; if (x > maxX) maxX = x
         if (y < minY) minY = y; if (y > maxY) maxY = y
     }
-    return Track(day, xs, ys, times, distanceM, phone, minX, minY, maxX, maxY, glitches)
+    return Track(day, xs, ys, times, distanceM, phone, minX, minY, maxX, maxY, glitches, line)
 }
+
+/** THE DAY ROUTE projected once: each move's path in map units, each stay's centre. The box told
+ *  the day as stays and moves (internal/dayroute); a walk's path runs along the streets where the
+ *  box has them, a ride's between its fixes. */
+private class RouteMoveXY(val m: BoxClient.RouteMove, val xs: DoubleArray, val ys: DoubleArray)
+private class RouteStayXY(val s: BoxClient.RouteStay, val x: Double, val y: Double)
+private class RouteXY(val day: String, val moves: List<RouteMoveXY>, val stays: List<RouteStayXY>, val r: BoxClient.DayRoute)
+
+private fun routeOf(r: BoxClient.DayRoute): RouteXY = RouteXY(r.day,
+    r.moves.map { m -> RouteMoveXY(m, DoubleArray(m.lat.size) { mercXD(m.lon[it]) }, DoubleArray(m.lat.size) { mercYD(m.lat[it]) }) },
+    r.stays.map { s -> RouteStayXY(s, mercXD(s.lon), mercYD(s.lat)) }, r)
+
+/** "08:45–09:15" or, for a stay that runs from the first fix of the day, "until 08:00". */
+private fun span(from: Long, to: Long): String = if (from == to) clock(from) else clock(from) + "–" + clock(to)
+private val MapRide = androidx.compose.ui.graphics.Color(0xFF7FB2E5)
 
 private fun trackOf(pts: List<Pair<Double, Double>>): Track =
     trackOf("", DoubleArray(pts.size) { pts[it].first }, DoubleArray(pts.size) { pts[it].second }, LongArray(0), 0.0, false)
@@ -121,6 +136,27 @@ private fun distanceOf(pts: List<com.localghost.app.sync.LocationLog.Point>): Do
         if (out[0] >= 15f) total += out[0]
     }
     return total
+}
+
+/** The zoom at which the view's short side spans about 2×[radiusKm] at [lat] (Mercator stretches
+ *  the north-south scale by 1/cos(lat), so the same kilometres are more map units up north). */
+private fun zoomForRadiusKm(radiusKm: Double, lat: Double): Float {
+    val degLat = 2 * radiusKm / 111.0
+    val units = degLat * (WORLD_UNITS / 360.0) / kotlin.math.cos(lat * PI / 180).coerceAtLeast(0.2)
+    return (WORLD_UNITS / units).toFloat().coerceIn(1f, 250000f)
+}
+
+/** The camera never leaves the map: zoom stops where the world fills the view's short side, and
+ *  the centre is held so no edge of the world comes inside the screen (when the whole world is
+ *  narrower than the view on an axis, it sits centred on that axis). */
+private fun clampCamera(cx: Double, cy: Double, zoom: Float, viewW: Float, viewH: Float): Triple<Double, Double, Float> {
+    val z = zoom.coerceIn(1f, 250000f)
+    if (viewW <= 0f || viewH <= 0f) return Triple(cx, cy, z)
+    val pxz = (minOf(viewW, viewH) / WORLD) * z
+    val halfW = viewW / 2.0 / pxz; val halfH = viewH / 2.0 / pxz
+    val x = if (halfW >= WORLD_UNITS / 2) WORLD_UNITS / 2 else cx.coerceIn(halfW, WORLD_UNITS - halfW)
+    val y = if (halfH >= WORLD_UNITS / 2) WORLD_UNITS / 2 else cy.coerceIn(halfH, WORLD_UNITS - halfH)
+    return Triple(x, y, z)
 }
 
 /** "today", "yesterday", else "Thu 18 Sep", for a UTC day key. */
@@ -206,6 +242,17 @@ fun MapScreen() {
     }
     // The lit day as one time-ordered list of points (the box's line, then the phone's continuation).
     val dayPts = remember(trailDay, tracks) { trailDay?.let { d -> dayPoints(tracks.filter { it.day == d }) } ?: emptyList() }
+    // THE DAY ROUTE of the lit day: fetched when a day is picked (and again when the tracks refresh,
+    // since today's route grows as fixes land); null while loading, on a box without routes, or
+    // for a day the box has not told. Drawn over the raw track; listed under the strip.
+    var route by remember { mutableStateOf<RouteXY?>(null) }
+    LaunchedEffect(trailDay, tracks) {
+        val d = trailDay
+        if (d == null) { route = null; return@LaunchedEffect }
+        if (route?.day != d) route = null
+        val r = BoxClient.dayRoute(ctx, d)
+        route = if (r != null && r.day == d) routeOf(r) else null
+    }
     val scrubAt = remember(dayPts, scrub) {
         if (dayPts.isEmpty()) null else dayPts[(scrub * (dayPts.size - 1)).toInt().coerceIn(0, dayPts.size - 1)]
     }
@@ -264,7 +311,7 @@ fun MapScreen() {
         val batch = BoxClient.geoDayTracks(ctx, 60)
         val loaded = ArrayList<Track>()
         if (batch != null) {
-            for (t in batch) if (t.n >= 2) loaded.add(trackOf(t.day, t.lat, t.lon, t.times, t.distanceM, phone = false, glitches = t.glitches))
+            for (t in batch) if (t.n >= 2) loaded.add(trackOf(t.day, t.lat, t.lon, t.times, t.distanceM, phone = false, glitches = t.glitches, line = t.line))
         } else {
             val days = BoxClient.geoDays(ctx, 14) ?: emptyList()
             for (d in days) {
@@ -282,9 +329,20 @@ fun MapScreen() {
     var cy by remember { mutableStateOf(WORLD_UNITS / 2) }
     var zoom by remember { mutableStateOf(1f) }
     var worldFallback by remember { mutableStateOf(false) }
-    // OPENS ON THE NEWEST PHOTO, close in , the map answers "where was I last" before it answers
-    // "where have I ever been". Pan/pinch out from there; the whole archive is one gesture away.
+    // OPENS WHERE YOU ARE, about a hundred kilometres around , like any map on a phone. The
+    // phone's last fix is known at once (prefs), so the first frame is already here; without a
+    // fix ever taken, the newest photo at the same span; without either, the world.
     var openerDone by remember { mutableStateOf(false) }
+    val startFix = remember { com.localghost.app.sync.LocationLog.last(ctx) }
+    LaunchedEffect(Unit) {
+        val f = startFix ?: return@LaunchedEffect
+        if (!openerDone && f.lat.isFinite() && f.lon.isFinite() && f.lat > -90.0 && f.lat < 90.0 && f.lon >= -180.0 && f.lon <= 180.0) {
+            openerDone = true
+            worldFallback = true // placed on purpose: the never-blank rule stays out of it
+            cx = mercXD(f.lon); cy = mercYD(f.lat)
+            zoom = zoomForRadiusKm(100.0, f.lat)
+        }
+    }
     LaunchedEffect(newest, cells) {
         val nw = newest
         if (nw != null && !openerDone &&
@@ -292,8 +350,8 @@ fun MapScreen() {
             nw.lat > -90.0 && nw.lat < 90.0 && nw.lon >= -180.0 && nw.lon <= 180.0) {
             openerDone = true
             cx = mercXD(nw.lon); cy = mercYD(nw.lat)
-            zoom = 6000f
-        } else if (cells.isNotEmpty() && zoom <= 1f) {
+            zoom = zoomForRadiusKm(100.0, nw.lat)
+        } else if (cells.isNotEmpty() && zoom <= 1f && !openerDone) {
             // Skew fallback: no newest endpoint , fit everything, like the map used to.
             val xs = cells.map { mercXD(it.lon) }; val ys = cells.map { mercYD(it.lat) }
             cx = (xs.min() + xs.max()) / 2.0; cy = (ys.min() + ys.max()) / 2.0
@@ -395,7 +453,9 @@ fun MapScreen() {
             }
         }
         // NEVER-BLANK RULE , an empty LOCAL view zoomed-in falls back to the whole world once.
-        if (cells.isEmpty() && zoom > 4f && !worldFallback) {
+        // Only on a box without map tiles: with the coast and the roads drawn, a view with no
+        // photos in it is still a map, and the opener put it where the phone is on purpose.
+        if (cells.isEmpty() && zoom > 4f && !worldFallback && tileIndex == null && roadIndex == null) {
             worldFallback = true
             fetchedSpan = 0.0
             cx = WORLD_UNITS / 2; cy = WORLD_UNITS / 2; zoom = 1f
@@ -459,6 +519,19 @@ fun MapScreen() {
             color = android.graphics.Color.argb(0xD0, 0x0A, 0x16, 0x20); style = android.graphics.Paint.Style.STROKE; strokeWidth = 3f * density
         }
     }
+    // "you", left of nothing and right of the dot: its own paints, left-aligned.
+    val youPaint = remember {
+        android.graphics.Paint().apply {
+            color = android.graphics.Color.argb(0xFF, 0xF0, 0xF0, 0xE8); textSize = 11f * density
+            typeface = android.graphics.Typeface.MONOSPACE; isAntiAlias = true; isFakeBoldText = true
+            textAlign = android.graphics.Paint.Align.LEFT
+        }
+    }
+    val youHalo = remember {
+        android.graphics.Paint(youPaint).apply {
+            color = android.graphics.Color.argb(0xE0, 0x0A, 0x16, 0x20); style = android.graphics.Paint.Style.STROKE; strokeWidth = 3.5f * density
+        }
+    }
     // One Paint for every cluster label, not one per label per frame.
     val labelPaint = remember {
         android.graphics.Paint().apply {
@@ -472,11 +545,25 @@ fun MapScreen() {
     Column(Modifier.fillMaxSize()) {
         Text("> MAP", color = TerminalGreen, style = MaterialTheme.typography.titleMedium,
             modifier = Modifier.padding(16.dp))
-        Text("[ reset view ]", color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
-            modifier = Modifier.clickable {
-                // The hatch , whatever the camera got into, one tap is the whole world again.
-                cx = WORLD_UNITS / 2; cy = WORLD_UNITS / 2; zoom = 1f; worldFallback = false
-            }.padding(vertical = 4.dp))
+        Row {
+            Text("[ where I am ]", color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.clickable {
+                    // back to the phone, a town's worth around it; twice narrows to the streets
+                    val f = com.localghost.app.sync.LocationLog.last(ctx)
+                    if (f != null) {
+                        val close = kotlin.math.abs(cx - mercXD(f.lon)) < 0.01 && kotlin.math.abs(cy - mercYD(f.lat)) < 0.01 && zoom >= zoomForRadiusKm(12.0, f.lat) * 0.9f
+                        cx = mercXD(f.lon); cy = mercYD(f.lat)
+                        zoom = zoomForRadiusKm(if (close) 1.5 else 12.0, f.lat)
+                        worldFallback = true // a view on purpose is never "empty", never snaps back to the world
+                    }
+                }.padding(vertical = 4.dp))
+            Spacer(Modifier.width(16.dp))
+            Text("[ the world ]", color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.clickable {
+                    // The hatch , whatever the camera got into, one tap is the whole world again.
+                    cx = WORLD_UNITS / 2; cy = WORLD_UNITS / 2; zoom = 1f; worldFallback = false
+                }.padding(vertical = 4.dp))
+        }
         // The tiles the view needs, asked for as the camera settles on them (equal lists do not
         // re-fire, so a pan within the same cells costs nothing).
         val pxzNow = if (viewW > 0f && viewH > 0f) (minOf(viewW, viewH) / WORLD) * zoom else 0f
@@ -522,6 +609,12 @@ fun MapScreen() {
         // otherwise only what a person needs: nothing while it has photos to show, the one line
         // that says why when it has none.
         val debug = remember { com.localghost.app.settings.AppSettings.debugMode(ctx) }
+        // YOU ARE HERE breathes: a slow pulse on the halo, so the eye finds it on a busy map
+        val pulse by androidx.compose.animation.core.rememberInfiniteTransition(label = "you").animateFloat(
+            initialValue = 0f, targetValue = 1f, label = "pulse",
+            animationSpec = androidx.compose.animation.core.infiniteRepeatable(
+                androidx.compose.animation.core.tween(1600, easing = androidx.compose.animation.core.LinearEasing),
+                androidx.compose.animation.core.RepeatMode.Restart))
         val mapNote = if (debug) loadNote + (if (worldNote.isNotEmpty()) " · " + worldNote else "") + coastNote
             else if (cells.isEmpty()) loadNote else ""
         if (mapNote.isNotEmpty()) Text(mapNote,
@@ -543,17 +636,20 @@ fun MapScreen() {
                         if (!cx.isFinite() || !cy.isFinite() || !zoom.isFinite()) {
                             cx = WORLD_UNITS / 2; cy = WORLD_UNITS / 2; zoom = 1f
                         }
-                        // zoom about the finger centroid, then pan , standard camera algebra
-                        val newZoom = (zoom * gz).coerceIn(0.8f, 250000f)
+                        // zoom about the finger centroid, then pan , standard camera algebra;
+                        // then the camera is held on the map (zoom-out stops at the world, no
+                        // edge of it comes inside the screen)
+                        val newZoom = (zoom * gz).coerceIn(1f, 250000f)
                         val sw = size.width.toDouble(); val sh = size.height.toDouble()
                         val scale = minOf(sw, sh) / WORLD_UNITS
                         val pxOld = scale * zoom; val pxNew = scale * newZoom
                         val wx = cx + (centroid.x - sw / 2) / pxOld
                         val wy = cy + (centroid.y - sh / 2) / pxOld
-                        cx = wx - (centroid.x - sw / 2) / pxNew
-                        cy = wy - (centroid.y - sh / 2) / pxNew
-                        zoom = newZoom
-                        cx -= pan.x / pxNew; cy -= pan.y / pxNew
+                        var ncx = wx - (centroid.x - sw / 2) / pxNew
+                        var ncy = wy - (centroid.y - sh / 2) / pxNew
+                        ncx -= pan.x / pxNew; ncy -= pan.y / pxNew
+                        val (kx, ky, kz) = clampCamera(ncx, ncy, newZoom, sw.toFloat(), sh.toFloat())
+                        cx = kx; cy = ky; zoom = kz
                         picked = null
                     }
                 }
@@ -593,18 +689,21 @@ fun MapScreen() {
                 // Visible window in map units, with a margin, for bbox culling.
                 val vx0 = cx - (sw / 2.0 + 32) / pxzD; val vx1 = cx + (sw / 2.0 + 32) / pxzD
                 val vy0 = cy - (sh / 2.0 + 32) / pxzD; val vy1 = cy + (sh / 2.0 + 32) / pxzD
-                // graticule every 15 degrees , always drawn, the honest skeleton of the projection
-                var lon = -180.0
-                while (lon <= 180.0) {
-                    val x = sx(mercXD(lon))
-                    if (x in -2f..sw + 2f) drawLine(GhostBorder, Offset(x, 0f), Offset(x, sh), 1f)
-                    lon += 15.0
-                }
-                var lat = -75.0
-                while (lat <= 75.0) {
-                    val y = sy(mercYD(lat))
-                    if (y in -2f..sh + 2f) drawLine(GhostBorder, Offset(0f, y), Offset(sw, y), 1f)
-                    lat += 15.0
+                // graticule every 15 degrees , the projection's skeleton, for the debug switch
+                // only: a map is land, water and where you are, not a grid
+                if (debug) {
+                    var lon = -180.0
+                    while (lon <= 180.0) {
+                        val x = sx(mercXD(lon))
+                        if (x in -2f..sw + 2f) drawLine(GhostBorder, Offset(x, 0f), Offset(x, sh), 1f)
+                        lon += 15.0
+                    }
+                    var lat = -75.0
+                    while (lat <= 75.0) {
+                        val y = sy(mercYD(lat))
+                        if (y in -2f..sh + 2f) drawLine(GhostBorder, Offset(0f, y), Offset(sw, y), 1f)
+                        lat += 15.0
+                    }
                 }
                 // PRE-BUILT PATHS UNDER A TRANSFORM. Each ring's Path is in map units relative to
                 // its own origin; the canvas is translated to that origin's screen position
@@ -738,9 +837,11 @@ fun MapScreen() {
                 // The lit day (the trail panel's pick) is green and wider; the phone's own part of
                 // a day, not yet on the box, is dashed with a dot per fix so the quarter-hour
                 // rhythm shows; every other day is the dim thread it always was.
+                val routeShown = route != null && route?.day == trailDay
                 for (t in tracks) {
                     if (t.maxX < vx0 || t.minX > vx1 || t.maxY < vy0 || t.minY > vy1) continue
-                    val lit = t.day.isNotEmpty() && t.day == trailDay
+                    // with the day's route on screen the raw line steps back to a thin thread
+                    val lit = t.day.isNotEmpty() && t.day == trailDay && !routeShown
                     val colour = if (lit || t.phone) TerminalGreen else MapTrail
                     val width = if (lit) 3.5f else 2.5f
                     if (t.n >= 2) {
@@ -759,13 +860,36 @@ fun MapScreen() {
                         drawCircle(colour, radius = if (t.phone) 3f else 2f, center = Offset(x, y))
                     }
                 }
-                // Where the phone is now: the last fix, a ring the "trail" line dates.
-                lastFix?.let { f ->
-                    val x = sx(mercXD(f.lon)); val y = sy(mercYD(f.lat))
-                    if (x > -20f && x < sw + 20f && y > -20f && y < sh + 20f) {
-                        drawCircle(TerminalGreen.copy(alpha = 0.25f), radius = 14f, center = Offset(x, y))
-                        drawCircle(TerminalGreen, radius = 9f, center = Offset(x, y), style = Stroke(width = 2f))
-                        drawCircle(TerminalGreen, radius = 3.5f, center = Offset(x, y))
+                // THE DAY ROUTE: the lit day as the box told it. Walks along the streets in green, a
+                // dark halo under them; rides as dashed blue chords; each stay a ring with its name
+                // and hours, drawn last so a name never hides under a line.
+                route?.takeIf { routeShown }?.let { rt ->
+                    for (mv in rt.moves) {
+                        if (mv.xs.size < 2) continue
+                        trackPath.reset()
+                        trackPath.moveTo(sx(mv.xs[0]), sy(mv.ys[0]))
+                        for (i in 1 until mv.xs.size) trackPath.lineTo(sx(mv.xs[i]), sy(mv.ys[i]))
+                        val walk = mv.m.mode == "walk"
+                        drawPath(trackPath, MapWater, style = Stroke(width = if (walk) 6.5f else 5f))
+                        drawPath(trackPath, if (walk) TerminalGreen else MapRide, style = Stroke(width = if (walk) 4f else 2.5f,
+                            pathEffect = if (walk) null else PathEffect.dashPathEffect(floatArrayOf(10f, 6f))))
+                    }
+                    val nc = drawContext.canvas.nativeCanvas
+                    for (st in rt.stays) {
+                        val x = sx(st.x); val y = sy(st.y)
+                        if (x < -40f || x > sw + 40f || y < -40f || y > sh + 40f) continue
+                        drawCircle(MapWater, radius = 9f, center = Offset(x, y))
+                        drawCircle(GhostText, radius = 7f, center = Offset(x, y), style = Stroke(width = 2.5f))
+                        drawCircle(if (st.s.photos > 0) TerminalGreen else GhostTextDim, radius = 3f, center = Offset(x, y))
+                        if (pxz >= LandTileGeom.TILE_PXZ) {
+                            val name = when {
+                                st.s.name.isEmpty() -> span(st.s.from, st.s.to)
+                                st.s.kind == "near" -> "near ${st.s.name} · ${span(st.s.from, st.s.to)}"
+                                else -> "${st.s.name} · ${span(st.s.from, st.s.to)}"
+                            }
+                            nc.drawText(name, x, y - 12f, roadNameHalo)
+                            nc.drawText(name, x, y - 12f, roadNamePaint)
+                        }
                     }
                 }
                 // The scrubber's point on the lit day, with its clock.
@@ -818,6 +942,43 @@ fun MapScreen() {
                     drawCircle(TerminalGreen, radius = 10f, center = Offset(x, y), style = Stroke(2f))
                 }
             }
+            // YOU ARE HERE, on its own small canvas over the map, so the pulse redraws this layer
+            // sixty times a second and not the land, the roads and the trails under it. The fix's
+            // error circle when it is wider than the dot at this zoom, a pulse ring that grows and
+            // fades, a white ring with a green heart, and the word beside it with how old the fix
+            // is , faded when the fix is hours old: the map says where the phone WAS.
+            lastFix?.let { f ->
+                if (viewW > 0f && viewH > 0f) Canvas(Modifier.fillMaxSize().clipToBounds()) {
+                    val sw = size.width; val sh = size.height
+                    val pxzD = (minOf(sw, sh) / WORLD).toDouble() * zoom
+                    val x = ((mercXD(f.lon) - cx) * pxzD + sw / 2.0).toFloat()
+                    val y = ((mercYD(f.lat) - cy) * pxzD + sh / 2.0).toFloat()
+                    if (x > -60f && x < sw + 60f && y > -40f && y < sh + 40f) {
+                        val age = nowSec - f.ts
+                        val fresh = age < 2 * 3600
+                        val tone = if (fresh) TerminalGreen else GhostTextDim
+                        if (f.acc > 0f) {
+                            // metres → map units at this latitude → px
+                            val unitsPerM = (WORLD_UNITS / 360.0) / 111_320.0 / kotlin.math.cos(f.lat * PI / 180).coerceAtLeast(0.2)
+                            val rPx = (f.acc * unitsPerM * pxzD).toFloat()
+                            if (rPx > 14f) {
+                                drawCircle(tone.copy(alpha = 0.10f), radius = rPx.coerceAtMost(sw), center = Offset(x, y))
+                                drawCircle(tone.copy(alpha = 0.35f), radius = rPx.coerceAtMost(sw), center = Offset(x, y), style = Stroke(width = 1f))
+                            }
+                        }
+                        val d = density
+                        drawCircle(tone.copy(alpha = 0.45f * (1f - pulse)), radius = (10f + 16f * pulse) * d, center = Offset(x, y))
+                        drawCircle(MapWater, radius = 9f * d, center = Offset(x, y))
+                        drawCircle(GhostText, radius = 8f * d, center = Offset(x, y), style = Stroke(width = 2.5f * d))
+                        drawCircle(tone, radius = 5f * d, center = Offset(x, y))
+                        val label = if (fresh) "you" else "you, ${ago(age)}"
+                        val nc = drawContext.canvas.nativeCanvas
+                        val tx = x + 14f * d; val ty = y + 4f * d
+                        nc.drawText(label, tx, ty, youHalo)
+                        nc.drawText(label, tx, ty, youPaint)
+                    }
+                }
+            }
         }
         // THE TRAIL , where this phone has been, by day. One line closed; open, a strip of days
         // with their distance (a dot after the label means part of it is still only on the phone),
@@ -858,6 +1019,29 @@ fun MapScreen() {
                             " · ${dayPts.size} points" + (if (waiting > 0) " · $waiting waiting for the box" else "") +
                             (if (glitches > 0) " · $glitches glitch${if (glitches > 1) "es" else ""} ignored" else ""),
                         color = GhostText, style = MaterialTheme.typography.labelMedium)
+                    // the day as the box tells it: one line, then the stays with their hours and the
+                    // moves with how far and how (along the streets, or straight lines)
+                    route?.takeIf { it.day == d }?.let { rt ->
+                        if (rt.r.line.isNotEmpty()) Text(rt.r.line, color = TerminalGreen, style = MaterialTheme.typography.labelMedium)
+                        val walks = rt.r.moves.count { it.mode == "walk" }
+                        val routedHops = rt.r.moves.filter { it.mode == "walk" }.sumOf { it.routed }
+                        val walkHops = rt.r.moves.filter { it.mode == "walk" }.sumOf { it.hops }
+                        if (walks > 0) Text(
+                            "on foot ${km(rt.r.walkM)}" + (if (walkHops > 0) " · $routedHops of $walkHops stretches along the streets" else "") +
+                                (if (rt.r.rideM >= 1000) " · by road ${km(rt.r.rideM)}" else ""),
+                            color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+                        rt.r.stays.forEach { st ->
+                            val what = when {
+                                st.name.isEmpty() -> "a stop"
+                                st.kind == "near" -> "near ${st.name}"
+                                st.kind.isEmpty() || st.kind == "spot" -> st.name
+                                else -> "${st.name} (${st.kind})"
+                            }
+                            Text("${span(st.from, st.to)}  $what" + (if (st.photos > 0) " · ${st.photos} photo${if (st.photos > 1) "s" else ""}" else ""),
+                                color = GhostText, style = MaterialTheme.typography.labelMedium)
+                        }
+                        if (rt.r.note.isNotEmpty()) Text(rt.r.note, color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+                    }
                     if (dayPts.size >= 2) {
                         Slider(value = scrub, onValueChange = { scrub = it },
                             colors = SliderDefaults.colors(thumbColor = TerminalGreen, activeTrackColor = TerminalGreen, inactiveTrackColor = VoidLighter))

@@ -50,17 +50,32 @@ object WebSearch {
         val kind: String = "page",
         val source: String = "duckduckgo",
         var published: String = "",
+        /** The page's paragraphs as read (the ones most worth the box's time, in page order), so
+         *  the box can pick the passages that answer rather than the window that matches words. */
+        var paragraphs: List<String> = emptyList(),
     ) {
         val site: String get() = runCatching { URL(url).host.removePrefix("www.") }.getOrDefault("")
 
         fun toJson(fetched: String): JSONObject = JSONObject()
             .put("title", title).put("url", url).put("snippet", snippet).put("excerpt", excerpt)
             .put("kind", kind).put("source", source).put("published", published).put("fetched", fetched)
+            .apply { if (paragraphs.isNotEmpty()) put("paragraphs", JSONArray().also { a -> paragraphs.forEach { a.put(it) } }) }
 
         companion object {
             fun fromJson(o: JSONObject): Hit = Hit(o.optString("title"), o.optString("url"), o.optString("snippet"),
-                o.optString("excerpt"), o.optString("kind", "page"), o.optString("source", "duckduckgo"), o.optString("published"))
+                o.optString("excerpt"), o.optString("kind", "page"), o.optString("source", "duckduckgo"), o.optString("published"),
+                o.optJSONArray("paragraphs")?.let { a -> (0 until a.length()).map { a.optString(it) } } ?: emptyList())
         }
+    }
+
+    /** What the box's model said the question needs from the web (/v1/chat/plan): whether to
+     *  search at all, the fact in one sentence, its shape, whether it goes stale, and the searches
+     *  that would find it, most specific first. */
+    class Plan(val search: Boolean, val need: String, val shape: String, val fresh: Boolean, val queries: List<String>) {
+        /** The searches run in the first round: the first two. */
+        val first: List<String> get() = queries.take(2)
+        /** The rest, kept for a second round the box may ask for when the first read thin. */
+        val spare: List<String> get() = queries.drop(2)
     }
 
     /** Where the phone is, for a weather question that names no place. */
@@ -71,6 +86,8 @@ object WebSearch {
     private const val FETCH_TOP = 3
     private const val PAGE_CAP = 400 * 1024
     private const val EXCERPT_CHARS = 1400
+    private const val PARAS_PER_PAGE = 12
+    private const val PARAS_CHARS = 6000
     private const val CACHE_TTL_MS = 10 * 60 * 1000L
     private const val CACHE_MAX = 32
 
@@ -150,22 +167,35 @@ object WebSearch {
         val brave: Boolean get() = name == "brave" && key.isNotBlank()
     }
 
-    suspend fun search(question: String, here: Here? = null, engine: Engine = Engine()): List<Hit> = withContext(Dispatchers.IO) {
-        val key = cacheKey(question, here) + (if (engine.brave) "#b" else "")
+    /** Search for a question. With [queries] (the box's plan, or the searches it asked for in a
+     *  second round) those run instead of the phone's own plan , the first always, the rest when
+     *  the first came back thin, or all of them when [runAll]. [need] steers which paragraphs of a
+     *  page are worth sending: the box's one sentence beats the question's words. */
+    suspend fun search(question: String, here: Here? = null, engine: Engine = Engine(), queries: List<String>? = null,
+                       need: String = "", runAll: Boolean = false): List<Hit> = withContext(Dispatchers.IO) {
+        val key = cacheKey(question, here) + (if (engine.brave) "#b" else "") + (queries?.joinToString("|", prefix = "#") ?: "") + (if (runAll) "#all" else "")
         synchronized(cache) { cache[key]?.let { (at, hits) -> if (System.currentTimeMillis() - at < CACHE_TTL_MS) return@withContext hits } }
-        val out = run(question, here, engine)
+        val out = run(question, here, engine, queries, need, runAll)
         if (out.isNotEmpty()) synchronized(cache) { cache[key] = System.currentTimeMillis() to out }
         out
     }
 
-    private fun run(question: String, here: Here?, engine: Engine = Engine()): List<Hit> {
+    /** Two rounds' findings as one list: by URL, the first round's order, the new ones after. */
+    fun merge(first: List<Hit>, second: List<Hit>): List<Hit> {
+        val seen = HashSet<String>()
+        val out = ArrayList<Hit>()
+        for (h in first + second) if (seen.add(h.url.ifEmpty { h.title })) out.add(h)
+        return out
+    }
+
+    private fun run(question: String, here: Here?, engine: Engine = Engine(), planned: List<String>? = null, need: String = "", runAll: Boolean = false): List<Hit> {
         val pool = Executors.newFixedThreadPool(FETCH_TOP + 2)
         try {
             // Tools and the first search leave together; the extra queries only when the first
             // came back thin. Every future is bounded on its own, so one slow host costs its own
             // seconds and nobody else's.
             val toolFutures: List<Future<Hit?>> = Tools.forQuestion(question, here).map { t -> pool.submit(Callable { runCatching { t.call() }.getOrNull() }) }
-            val queries = plan(question)
+            val queries = if (planned != null && planned.isNotEmpty()) planned.mapIndexed { i, q -> Query(q, runAll || i == 0) } else plan(question)
             val pages = ArrayList<Hit>()
             val agree = HashMap<String, Int>()
             for (q in queries) {
@@ -180,7 +210,7 @@ object WebSearch {
             }
             // Several queries agreeing on a page moves it up; otherwise the search engine's order.
             val ordered = pages.withIndex().sortedWith(compareByDescending<IndexedValue<Hit>> { agree[it.value.url] ?: 1 }.thenBy { it.index }).map { it.value }.take(MAX_HITS)
-            val termList = terms(cleanQuery(question))
+            val termList = terms(cleanQuery(question)) + (if (need.isNotBlank()) terms(need) else emptyList())
             val reads = ordered.take(FETCH_TOP).map { h -> pool.submit(Callable { read(h, termList) }) }
             for (f in reads) runCatching { f.get(8, TimeUnit.SECONDS) }
             val tools = toolFutures.mapNotNull { f -> runCatching { f.get(6, TimeUnit.SECONDS) }.getOrNull() }
@@ -359,6 +389,7 @@ object WebSearch {
         }
         val page = fetchPage(h.url) ?: return
         h.excerpt = page.excerptFor(terms)
+        h.paragraphs = page.worthSending(terms)
         // The page's own date when it states one; otherwise keep what the search engine knew (Brave's page_age).
         if (page.published.isNotBlank()) h.published = page.published
     }
@@ -371,6 +402,32 @@ object WebSearch {
             val body = bestWindow(paragraphs, terms)
             if (description.isEmpty() || body.contains(description.take(40))) return body
             return (description + " — " + body).take(EXCERPT_CHARS)
+        }
+
+        /** The paragraphs worth the box's time: the ones with the most question terms, up to
+         *  PARAS_PER_PAGE and PARAS_CHARS, plus the first paragraph and the description, back in
+         *  page order , the box ranks them by meaning; this is only the cut that keeps a 400 KB
+         *  page from travelling whole over the phone's link. */
+        fun worthSending(terms: List<String>): List<String> {
+            if (paragraphs.isEmpty()) return if (description.isEmpty()) emptyList() else listOf(description)
+            val lower = terms.map { it.lowercase() }
+            val scored = paragraphs.withIndex().map { (i, p) ->
+                val t = p.lowercase()
+                var n = 0
+                for (w in lower) if (t.contains(w)) n++
+                Triple(i, n + (if (i == 0) 1 else 0), p)
+            }
+            val picked = scored.sortedWith(compareByDescending<Triple<Int, Int, String>> { it.second }.thenBy { it.first })
+            val keep = ArrayList<Triple<Int, Int, String>>()
+            var chars = 0
+            for (s in picked) {
+                if (keep.size >= PARAS_PER_PAGE) break
+                val len = minOf(s.third.length, 1200)
+                if (chars + len > PARAS_CHARS && keep.isNotEmpty()) continue
+                keep.add(s); chars += len
+            }
+            val out = keep.sortedBy { it.first }.map { it.third.take(1200) }
+            return if (description.isNotEmpty() && out.none { it.contains(description.take(40)) }) listOf(description) + out else out
         }
     }
 

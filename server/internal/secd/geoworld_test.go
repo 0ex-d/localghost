@@ -131,7 +131,7 @@ func TestGeoTracksBatch(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil || len(got.Tracks) != 0 {
 		t.Fatalf("young box must answer an empty list: %v %s", err, rr.Body.String())
 	}
-	dir := filepath.Join(s.cfg.StateDir, "mnt", "slot0", "paths")
+	dir := filepath.Join(s.cfg.StateDir, "mnt", "slot0", "frames", "paths")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -180,5 +180,63 @@ func TestGeoTracksBatch(t *testing.T) {
 	}
 	if got.Tracks[2].Times != nil || got.Tracks[2].DistanceM != 0 {
 		t.Fatalf("an old day file has no times and no distance: %+v", got.Tracks[2])
+	}
+	// THE DAY ROUTE beside a path: served whole by /v1/geo/route, summarised on the track row
+	route := `{"day":"2026-09-18","stays":[{"name":"Gaios","kind":"harbour","lat":39.2,"lon":20.18,"from":100,"to":200,"fixes":2},` +
+		`{"name":"Voutoumi","kind":"beach","lat":39.14,"lon":20.23,"from":260,"to":300,"fixes":3}],` +
+		`"moves":[{"mode":"walk","from":200,"to":260,"meters":1830,"chordM":1400,"routed":2,"hops":2,"path":[[39.2,20.18],[39.19,20.19],[39.14,20.23]],"kmh":4.1}],` +
+		`"walkM":1830,"rideM":0,"fixes":5,"photos":0,"line":"Gaios → Voutoumi · 1.8 km on foot"}`
+	if err := os.WriteFile(filepath.Join(dir, "2026-09-18.route.json"), []byte(route), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rr = get("/v1/geo/route?d=2026-09-18")
+	if rr.Code != 200 || rr.Header().Get("ETag") == "" {
+		t.Fatalf("route: %d %q", rr.Code, rr.Header().Get("ETag"))
+	}
+	var rd struct {
+		Line  string `json:"line"`
+		Stays []struct {
+			Name string `json:"name"`
+		} `json:"stays"`
+		Moves []struct {
+			Mode string       `json:"mode"`
+			Path [][2]float64 `json:"path"`
+		} `json:"moves"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &rd); err != nil || len(rd.Stays) != 2 || rd.Stays[1].Name != "Voutoumi" || len(rd.Moves) != 1 || len(rd.Moves[0].Path) != 3 {
+		t.Fatalf("route body: %v %s", err, rr.Body.String())
+	}
+	req := httptest.NewRequest("GET", "/v1/geo/route?d=2026-09-18", nil)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("If-None-Match", rr.Header().Get("ETag"))
+	rr2 := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr2, req)
+	if rr2.Code != 304 {
+		t.Fatalf("unchanged route must be 304: %d", rr2.Code)
+	}
+	if rr = get("/v1/geo/route?d=2026-09-17"); rr.Code != 404 {
+		t.Fatalf("a day without a route: %d", rr.Code)
+	}
+	if rr = get("/v1/geo/route?d=yesterday"); rr.Code != 400 {
+		t.Fatalf("a bad day: %d", rr.Code)
+	}
+	if rr = get("/v1/geo/route?d=../../etc/passwd"); rr.Code != 400 {
+		t.Fatalf("a path as a day: %d", rr.Code)
+	}
+	var sum struct {
+		Tracks []struct {
+			Day   string  `json:"day"`
+			Line  string  `json:"line"`
+			WalkM float64 `json:"walkM"`
+			Stays int     `json:"stays"`
+		} `json:"tracks"`
+	}
+	rr = get("/v1/geo/tracks?limit=2")
+	_ = json.Unmarshal(rr.Body.Bytes(), &sum)
+	if len(sum.Tracks) != 2 || sum.Tracks[0].Line != "Gaios → Voutoumi · 1.8 km on foot" || sum.Tracks[0].WalkM != 1830 || sum.Tracks[0].Stays != 2 {
+		t.Fatalf("track row must carry the route's line: %+v", sum.Tracks)
+	}
+	if sum.Tracks[1].Line != "" || sum.Tracks[1].Stays != 0 {
+		t.Fatalf("a day without a route has no line: %+v", sum.Tracks[1])
 	}
 }

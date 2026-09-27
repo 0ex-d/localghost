@@ -57,14 +57,16 @@ fun SettingsScreen(
         val trailBackground = remember(trailTick) { com.localghost.app.sync.LocationLog.hasBackground(ctx) }
         val waiting = remember(trailTick) { com.localghost.app.sync.LocationLog.pendingCount(ctx) }
         val today = remember(trailTick) { com.localghost.app.sync.LocationLog.countToday(ctx) }
+        val passive = remember(trailTick) { com.localghost.app.sync.LocationLog.passiveToday(ctx) }
+        val todayLine = "$today today" + (if (passive > 0) " ($passive from other apps' fixes)" else "")
         toggleRow(
             label = "keep the trail",
             sub = when {
                 !trailOn -> "off, the phone takes no fixes"
                 !trailAllowed -> "on, but location is not allowed for LocalGhost , nothing is recorded"
                 !trailBackground -> "on while the app is open only ('always' not allowed)"
-                waiting > 0 -> "on, a point every quarter hour · $today today · $waiting waiting for the box"
-                else -> "on, a point every quarter hour · $today today · all on the box"
+                waiting > 0 -> "on, a point every quarter hour plus other apps' fixes · $todayLine · $waiting waiting for the box"
+                else -> "on, a point every quarter hour plus other apps' fixes · $todayLine · all on the box"
             },
             checked = trailOn,
             onChange = { on ->

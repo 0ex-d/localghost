@@ -272,6 +272,24 @@ tiles, or on request, in the background, one build at a time:
 map credits "© OpenStreetMap contributors" wherever it draws them; `TERMS-osm-odbl.txt` travels with
 the extracts and the tiles.
 
+The cut also writes the ROUTING GRAPH beside the tiles (`<volume>/roadtiles/graph/`, the roads as
+edges between junctions), which the box uses for the DAY ROUTE: each day told as the places you
+stayed and the moves between them, on foot along the streets or by road, from the trail's fixes,
+the photos' positions and the day's steps (`<volume>/frames/paths/<day>.route.json`, served at
+`/v1/geo/route`). Tiles cut before the graph existed are cut again at framed's next start
+(`-no-graph` on `bin/ghost-roadtiles` for tiles only). Without a graph the route draws straight
+lines between fixes. To tell the last N days again (after the graph arrived, after a geo-import):
+
+    sudo ./tools/ns.sh ./bin/ghost-cli ghost.framed day-routes days=60
+
+## 1b''''. The days, prebuilt , nothing to run
+
+ghost.synthd builds one summary per day (`day_summaries`): the template the evening the day ends,
+the model's prose over the following passes when the GPU is up, richer as captions land. History is
+backfilled a slice per pass. `tools/health.sh` shows the count and where the backfill is;
+`ghost-cli ghost.synthd days` the same with detail, `days day=2026-09-25 rewrite=true` to have one
+day written again. "On this day" and the memories feed read these rows.
+
 ## 1c. When the GPU misbehaves , root
 
     sudo ./tools/gpu.sh          # is the model on the card, and is the card doing the work

@@ -631,3 +631,56 @@ func (s *Store) WeeklyHighlight() error {
 	return s.db.Exec(
 		"INSERT INTO settings (key, value) VALUES ('framed_week_highlight',$1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", wk)
 }
+
+// StayName names a position for the day route (dayroute.Namer): the spot it is at , a beach, a
+// harbour, a museum, one of the S rows geo-import keeps for the interests , within 300 m, else the
+// nearest populated place within 5 km as "near <place>". Empty when the box has no geo data.
+func (s *Store) StayName(lat, lon float64) (name, kind string) {
+	cosLat := math.Cos(lat * math.Pi / 180)
+	if cosLat < 0.05 {
+		cosLat = 0.05
+	}
+	const win = 0.004 // ~440 m of latitude
+	rows, err := s.db.Query(
+		`SELECT name, fcode, lat, lon FROM geo_points
+		 WHERE kind = 'S' AND lat BETWEEN $1 AND $2 AND lon BETWEEN $3 AND $4
+		 ORDER BY (lat-$5)*(lat-$5) + (lon-$6)*(lon-$6)*$7 LIMIT 50`,
+		lat-win, lat+win, lon-win/cosLat, lon+win/cosLat, lat, lon, cosLat*cosLat)
+	if err == nil {
+		bestD := 0.3
+		for _, v := range rows.Vals {
+			if len(v) < 4 || v[0] == nil || v[2] == nil || v[3] == nil {
+				continue
+			}
+			rlat, _ := strconv.ParseFloat(*v[2], 64)
+			rlon, _ := strconv.ParseFloat(*v[3], 64)
+			if d := haversineKm(lat, lon, rlat, rlon); d < bestD {
+				bestD = d
+				name = *v[0]
+				kind = "spot"
+				if v[1] != nil {
+					if k := outings.KindName(*v[1]); k != "" {
+						kind = k
+					}
+				}
+			}
+		}
+		if name != "" {
+			return name, kind
+		}
+	}
+	if r, ok := s.geoNearest(lat, lon, 'P', 5); ok {
+		return r.name, "near"
+	}
+	return "", ""
+}
+
+// DaySteps is the day's step count from the phone's health sync, 0 when unknown.
+func (s *Store) DaySteps(day string) float64 {
+	rows, err := s.db.Query("SELECT value FROM health_metrics WHERE day = $1 AND metric = 'steps'", day)
+	if err != nil || len(rows.Vals) == 0 || len(rows.Vals[0]) == 0 || rows.Vals[0][0] == nil {
+		return 0
+	}
+	v, _ := strconv.ParseFloat(*rows.Vals[0][0], 64)
+	return v
+}

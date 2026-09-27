@@ -150,6 +150,13 @@ for svc in $CHECK; do
                 ts=$(echo "$o" | sed -n 's/.*"taste":"\([^"]*\)".*/\1/p' | head -1)
                 [ -n "$n" ] && printf '  outings %s (%s trips)\n' "$n" "${tr_:-0}"
                 [ -n "$ts" ] && printf '  taste: %s\n' "$(echo "$ts" | cut -c1-140)"
+                # The days, prebuilt: one summary a day, the model's where it passed the check.
+                d=$("$CLI" ghost.synthd days 2>/dev/null)
+                dn=$(echo "$d" | sed -n 's/.*"days":\([0-9]*\).*/\1/p' | head -1)
+                dm=$(echo "$d" | sed -n 's/.*"byModel":\([0-9]*\).*/\1/p' | head -1)
+                dl=$(echo "$d" | sed -n 's/.*"oldest":"\([^"]*\)".*/\1/p' | head -1)
+                dw=$(echo "$d" | sed -n 's/.*"backfillAt":"\([^"]*\)".*/\1/p' | head -1)
+                [ -n "$dn" ] && printf '  day summaries %s (%s by the model), back to %s, backfill at %s\n' "$dn" "${dm:-0}" "${dl:-?}" "${dw:-start}"
             fi
         else
             printf '  %s   (socket present but not answering ping , wedged or mid-restart)\n' "$(red STALE)"

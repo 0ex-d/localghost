@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/LocalGhostDao/localghost/server/internal/exif"
+	"github.com/LocalGhostDao/localghost/server/internal/dayroute"
 	"github.com/LocalGhostDao/localghost/server/internal/geo"
 )
 
@@ -107,6 +108,9 @@ type Pipeline struct {
 	// is derived state, a failure is logged and the frame is still archived; Converge at the next
 	// start re-covers anything missed.
 	notifySearch func(archivePath, renderPath string, takenAt int64, ensure bool)
+	// router, when set, walks the streets between a day's fixes for the day route (internal/
+	// dayroute over internal/roadgraph); nil draws chords. Set by main once the road tiles exist.
+	router dayroute.Router
 	// resolvePlace, when non-nil, reverse-geocodes GPS frames , DB-backed (geo_points, imported by
 	// `ghost-cli ghost.framed geo-import`). Nil means no geo data yet: empty place strings,
 	// reprocess backfills after an import.
@@ -116,6 +120,9 @@ type Pipeline struct {
 func NewPipeline(dirs Dirs, store *Store, log *slog.Logger) *Pipeline {
 	return &Pipeline{dirs: dirs, store: store, log: log}
 }
+
+// SetRouter gives the day route its streets (nil: chords).
+func (p *Pipeline) SetRouter(r dayroute.Router) { p.router = r }
 
 // OnArchived registers the search-layer notify hook.
 func (p *Pipeline) OnArchived(fn func(archivePath, renderPath string, takenAt int64, ensure bool)) {
@@ -548,8 +555,52 @@ func (p *Pipeline) RebuildDay(day string) {
 		p.log.Warn("path write failed", "fn", "rebuildDay", "day", day, "err", err)
 		return
 	}
+	// THE DAY ROUTE beside the path: the same points, told as stays and moves, walked along the
+	// streets where the box has them (<day>.route.json; secd's /v1/geo/route). The cleaned points
+	// only, and the day's own.
+	cleaned, _ := CleanTrack(pts)
+	fixes := make([]dayroute.Fix, 0, len(cleaned)+len(photos))
+	for _, q := range cleaned {
+		if q.TS >= start && q.TS < end {
+			fixes = append(fixes, dayroute.Fix{TS: q.TS, Lat: q.Lat, Lon: q.Lon})
+		}
+	}
+	for _, ph := range photos {
+		fixes = append(fixes, dayroute.Fix{TS: ph.TakenAt, Lat: ph.Lat, Lon: ph.Lon, Photo: true})
+	}
+	t0 := time.Now()
+	route := dayroute.Build(day, fixes, p.store.DaySteps(day), p.store, p.router)
+	if rb, err := json.Marshal(route); err == nil {
+		if err := os.WriteFile(filepath.Join(p.dirs.Paths, day+".route.json"), rb, 0o640); err != nil {
+			p.log.Warn("route write failed", "fn", "rebuildDay", "day", day, "err", err)
+		}
+	}
 	p.log.Info("day path rebuilt", "fn", "rebuildDay", "day", day, "trackPoints", len(pts),
-		"photoPoints", len(photos))
+		"photoPoints", len(photos), "stays", len(route.Stays), "moves", len(route.Moves),
+		"walkM", route.WalkM, "rideM", route.RideM, "routeIn", time.Since(t0).Round(time.Millisecond))
+}
+
+// RebuildRecentDays rebuilds the newest n days that have a path file (or points), oldest first,
+// and returns how many. For after the streets arrive, or a geocoder import.
+func (p *Pipeline) RebuildRecentDays(n int) int {
+	es, err := os.ReadDir(p.dirs.Paths)
+	if err != nil {
+		return 0
+	}
+	var days []string
+	for _, e := range es {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".geojson") {
+			days = append(days, strings.TrimSuffix(e.Name(), ".geojson"))
+		}
+	}
+	sort.Strings(days)
+	if len(days) > n {
+		days = days[len(days)-n:]
+	}
+	for _, d := range days {
+		p.RebuildDay(d)
+	}
+	return len(days)
 }
 
 // PendingCounts reports the intake backlog for the ctlsock queue command.

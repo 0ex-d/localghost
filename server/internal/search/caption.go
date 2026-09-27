@@ -12,6 +12,7 @@ package search
 import (
 	"context"
 	"errors"
+	"regexp"
 	"strings"
 	"time"
 
@@ -85,8 +86,49 @@ func (v *VisionOracle) Caption(ctx context.Context, imagePath string) (string, e
 	if len(resp.Output) < 20 {
 		return "", errors.New("caption implausibly short; job will retry")
 	}
-	return resp.Output, nil
+	// THE SECTIONS ARE THE CONTRACT. A caption without a SCENE section is not a caption , the
+	// model's thinking that ran past the token budget, a refusal, prose in a shape nobody parses ,
+	// and storing it meant a frame with a "caption" that never described it: the description
+	// stayed empty, the tag pass had nothing to read, and every stock-take found it "undescribed",
+	// asked for it again, saw a caption in meta, and moved on. Headings the model dresses up
+	// ("**SCENE:**", "Scene:", "## SCENE") are normalised; a caption with no SCENE at all fails
+	// the job, so it retries and, if the model keeps doing it, parks where the queue line shows it.
+	out, ok := NormalizeCaption(resp.Output)
+	if !ok {
+		return "", errors.New("caption without a SCENE section (the model did not answer in the fixed sections); job will retry")
+	}
+	return out, nil
 }
+
+// captionHeadings are the fixed sections, in the order the prompt asks for them.
+var captionHeadings = []string{"SCENE:", "OBJECTS:", "PEOPLE:", "TEXT:", "COLOURS_STYLE:", "SETTING_GUESS:"}
+
+// NormalizeCaption puts the model's headings back into the fixed form (markdown, case and
+// spacing stripped: "**Scene:**", "## OBJECTS :", "colours_style:" all become the contract's
+// headings, each at the start of its own line) and reports whether a SCENE section is there at
+// all. Text before the first heading (a preamble, leaked thinking) is dropped.
+func NormalizeCaption(raw string) (string, bool) {
+	s := strings.ReplaceAll(raw, "\r", "")
+	// COLORS_STYLE and COLOURS STYLE are the same heading to a model that spells
+	s = headingRe.ReplaceAllStringFunc(s, func(m string) string {
+		name := strings.ToUpper(headingRe.FindStringSubmatch(m)[1])
+		name = strings.ReplaceAll(strings.ReplaceAll(name, " ", "_"), "COLORS", "COLOURS")
+		return "\n" + name + ": "
+	})
+	i := strings.Index(s, "SCENE:")
+	if i < 0 {
+		return "", false
+	}
+	s = strings.TrimSpace(s[i:])
+	if len(captionSection(s, "SCENE:")) < 5 {
+		return "", false // a heading with nothing under it describes nothing
+	}
+	return s, true
+}
+
+// headingRe matches a dressed-up heading: optional markdown/hash/bullet, the name in any case with
+// space or underscore, optional markdown, the colon, optional markdown after.
+var headingRe = regexp.MustCompile(`(?i)(?:^|\n)[ \t]*[#*_\-]*[ \t]*(scene|objects|people|text|colou?rs[ _]style|setting[ _]guess)[ \t]*[*_]*[ \t]*:[ \t]*[*_]*[ \t]*`)
 
 // Tagger extracts tags from a caption. Text-only , cheap compared to the vision pass that made the
 // caption, so tagging rides the same background queue without meaningfully competing.

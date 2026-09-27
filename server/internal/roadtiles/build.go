@@ -23,6 +23,7 @@ type Options struct {
 	Work     string       // scratch directory (node files, cell buffers); default outDir+".work"
 	Progress func(string) // told what is happening, now and then
 	BufferMB int          // cell buffers held in memory before they are flushed to disk (default 512)
+	NoGraph  bool         // skip the routing graph (graph.go): tiles only
 }
 
 // Stats is what a build produced.
@@ -33,12 +34,15 @@ type Stats struct {
 	FineTiles  int
 	Points     int64
 	Bytes      int64
+	GraphCells int
+	Edges      int64
+	GraphBytes int64
 	Took       time.Duration
 }
 
 func (s Stats) String() string {
-	return fmt.Sprintf("%d files, %d road ways → %d major tiles + %d fine tiles (%d points, %.1f GB) in %s",
-		s.Files, s.Ways, s.MajorTiles, s.FineTiles, s.Points, float64(s.Bytes)/1e9, s.Took.Round(time.Second))
+	return fmt.Sprintf("%d files, %d road ways → %d major tiles + %d fine tiles (%d points, %.1f GB), %d graph cells (%d edges, %.1f GB) in %s",
+		s.Files, s.Ways, s.MajorTiles, s.FineTiles, s.Points, float64(s.Bytes)/1e9, s.GraphCells, s.Edges, float64(s.GraphBytes)/1e9, s.Took.Round(time.Second))
 }
 
 // Build cuts the roads of the PBF files into tiles under outDir: index.bin, 1/<x>_<y>.lgr (major
@@ -47,11 +51,14 @@ func (s Stats) String() string {
 // themselves , then one pass over the cells. Written beside outDir and swapped in whole when
 // complete, so a reader sees the old tiles or the new ones, never half.
 //
-// Memory: a bitmap over the node id space (about 1.6 GB for the planet's ids, the same for a small
-// extract, since ids are global), the cell buffers (BufferMB), and the OS page cache for the node
-// file (16 bytes per road node: ~10 GB for Europe; a box with less RAM than that still finishes,
-// slower). Disk: the node files (removed after each PBF) and the cell buffers (about the size of
-// the finished tiles) under Work.
+// Memory: two bitmaps over the node id space (the roads' nodes and the junctions; about 1.6 GB
+// each for the planet's ids, the same for a small extract, since ids are global), the cell buffers
+// (BufferMB), and the OS page cache for the node file (16 bytes per road node: ~10 GB for Europe; a
+// box with less RAM than that still finishes, slower). Disk: the node files (removed after each
+// PBF) and the cell buffers (about the size of the finished tiles and graph) under Work.
+//
+// Beside the tiles, unless NoGraph, the routing graph (graph.go): the same ways as edges between
+// junctions, under outDir/graph, for the box's own router.
 func Build(pbfs []string, outDir string, opt Options) (Stats, error) {
 	t0 := time.Now()
 	var st Stats
@@ -85,6 +92,7 @@ func Build(pbfs []string, outDir string, opt Options) (Stats, error) {
 		// pass 1: which nodes the roads need
 		say(name + ": pass 1 of 3, finding the roads' nodes")
 		need := newBitmap()
+		twice := newBitmap() // a node two road ways share: a junction, where the graph's edges split
 		var roadWays int64
 		err := osmpbf.Scan(pbf, opt.Workers, func(b *osmpbf.Block) error {
 			for i := range b.Ways {
@@ -94,7 +102,11 @@ func Build(pbfs []string, outDir string, opt Options) (Stats, error) {
 				}
 				roadWays++
 				for _, r := range w.Refs {
-					need.set(r)
+					if need.has(r) {
+						twice.set(r)
+					} else {
+						need.set(r)
+					}
 				}
 			}
 			return nil
@@ -102,7 +114,7 @@ func Build(pbfs []string, outDir string, opt Options) (Stats, error) {
 		if err != nil {
 			return st, fmt.Errorf("%s: %w", name, err)
 		}
-		say(fmt.Sprintf("%s: %d road ways, %d nodes to find", name, roadWays, need.count()))
+		say(fmt.Sprintf("%s: %d road ways, %d nodes to find, %d junctions", name, roadWays, need.count(), twice.count()))
 		if roadWays == 0 {
 			continue
 		}
@@ -157,6 +169,7 @@ func Build(pbfs []string, outDir string, opt Options) (Stats, error) {
 		say(name + ": pass 3 of 3, cutting the roads")
 		var missing int64
 		coords := make([]float64, 0, 1024)
+		pts := make([]nodePt, 0, 512)
 		err = osmpbf.Scan(pbf, opt.Workers, func(b *osmpbf.Block) error {
 			for i := range b.Ways {
 				w := &b.Ways[i]
@@ -165,13 +178,16 @@ func Build(pbfs []string, outDir string, opt Options) (Stats, error) {
 					continue
 				}
 				coords = coords[:0]
+				pts = pts[:0]
 				for _, r := range w.Refs {
 					lat, lon, ok := nodes.lookup(r)
 					if !ok {
 						missing++
+						pts = append(pts, nodePt{id: r})
 						continue
 					}
 					coords = append(coords, lon, lat)
+					pts = append(pts, nodePt{id: r, lon: lon, lat: lat, ok: true})
 				}
 				if len(coords) < 4 {
 					continue
@@ -201,9 +217,15 @@ func Build(pbfs []string, outDir string, opt Options) (Stats, error) {
 						return err
 					}
 				}
+				if !opt.NoGraph {
+					if err := emitEdges(pts, uint8(class), flags, twice, cells); err != nil {
+						return err
+					}
+				}
 			}
 			return nil
 		}, pct(say, name+": pass 3"))
+		twice = nil
 		nodes.close()
 		_ = os.Remove(nodePath)
 		if err != nil {
@@ -225,6 +247,9 @@ func Build(pbfs []string, outDir string, opt Options) (Stats, error) {
 			return st, err
 		}
 	}
+	if err := os.MkdirAll(filepath.Join(tmp, "graph"), 0o755); err != nil {
+		return st, err
+	}
 	ix := NewIndex()
 	last := time.Now()
 	n := 0
@@ -240,6 +265,20 @@ func Build(pbfs []string, outDir string, opt Options) (Stats, error) {
 		if err != nil {
 			return err
 		}
+		if c.Level == GraphLevel {
+			count := countEdges(body)
+			if count == 0 {
+				return nil
+			}
+			c.Level = 0
+			if err := writeFile(filepath.Join(tmp, GraphName(c)), graphHeader(c, count), body); err != nil {
+				return err
+			}
+			st.GraphCells++
+			st.Edges += int64(count)
+			st.GraphBytes += int64(graphHdr + len(body))
+			return nil
+		}
 		count, points := countPieces(body)
 		if count == 0 {
 			return nil
@@ -251,20 +290,8 @@ func Build(pbfs []string, outDir string, opt Options) (Stats, error) {
 		le.PutUint16(hdr[5:], uint16(c.X))
 		le.PutUint16(hdr[7:], uint16(c.Y))
 		le.PutUint32(hdr[9:], uint32(count))
-		out := filepath.Join(tmp, TileName(c))
-		f, err := os.Create(out)
-		if err != nil {
+		if err := writeFile(filepath.Join(tmp, TileName(c)), hdr[:], body); err != nil {
 			return err
-		}
-		_, werr := f.Write(hdr[:])
-		if werr == nil {
-			_, werr = f.Write(body)
-		}
-		if cerr := f.Close(); werr == nil {
-			werr = cerr
-		}
-		if werr != nil {
-			return werr
 		}
 		ix.Set(c)
 		if c.Level == 1 {
@@ -303,6 +330,22 @@ func Build(pbfs []string, outDir string, opt Options) (Stats, error) {
 	return st, nil
 }
 
+// writeFile writes a header and a body as one file.
+func writeFile(path string, hdr, body []byte) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	_, werr := f.Write(hdr)
+	if werr == nil {
+		_, werr = f.Write(body)
+	}
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	return werr
+}
+
 // pct turns a scan's byte progress into a line now and then.
 func pct(say func(string), what string) func(read, total int64) {
 	last := time.Now()
@@ -315,10 +358,14 @@ func pct(say func(string), what string) func(read, total int64) {
 	}
 }
 
-// Stale reports whether the tiles under outDir are missing or older than any of the PBF files.
+// Stale reports whether the tiles under outDir are missing, older than any of the PBF files, or
+// from before the routing graph was written beside them.
 func Stale(pbfs []string, outDir string) bool {
 	ii, err := os.Stat(filepath.Join(outDir, "index.bin"))
 	if err != nil {
+		return len(pbfs) > 0
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "graph")); err != nil {
 		return len(pbfs) > 0
 	}
 	for _, p := range pbfs {
@@ -462,24 +509,33 @@ func newCellBuffers(dir string, max int64) *cellBuffers {
 	return &cellBuffers{dir: dir, max: max, bufs: map[Cell][]byte{}}
 }
 
+// rawPath is a cell's spool file: <cells>/1/<x>_<y>.raw for the major grid, <cells>/<0|2>/<xx>/
+// <x>_<y>.raw for the fine grid (0 = tile pieces, GraphLevel = edges), fanned out by x/100.
 func rawPath(dir string, c Cell) string {
 	if c.Level == 1 {
 		return filepath.Join(dir, "1", fmt.Sprintf("%03d_%03d.raw", c.X, c.Y))
 	}
-	return filepath.Join(dir, "0", fmt.Sprintf("%02d", c.X/100), fmt.Sprintf("%04d_%04d.raw", c.X, c.Y))
+	return filepath.Join(dir, fmt.Sprint(c.Level), fmt.Sprintf("%02d", c.X/100), fmt.Sprintf("%04d_%04d.raw", c.X, c.Y))
 }
 
-// cellOfRaw is the cell a raw file belongs to.
+// cellOfRaw is the cell a raw file belongs to, read back from its path.
 func cellOfRaw(p string) (Cell, bool) {
 	base := strings.TrimSuffix(filepath.Base(p), ".raw")
 	var x, y int
 	if _, err := fmt.Sscanf(base, "%d_%d", &x, &y); err != nil {
 		return Cell{}, false
 	}
-	if strings.Contains(p, string(filepath.Separator)+"1"+string(filepath.Separator)) {
+	parent := filepath.Base(filepath.Dir(p))
+	if parent == "1" {
 		return Cell{1, x, y}, true
 	}
-	return Cell{0, x, y}, true
+	switch filepath.Base(filepath.Dir(filepath.Dir(p))) {
+	case "0":
+		return Cell{0, x, y}, true
+	case fmt.Sprint(GraphLevel):
+		return Cell{GraphLevel, x, y}, true
+	}
+	return Cell{}, false
 }
 
 func (cb *cellBuffers) add(c Cell, piece []byte) error {

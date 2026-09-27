@@ -531,64 +531,95 @@ class MainActivity : ComponentActivity() {
                 messages[messages.size - 1] = Message(Message.Role.GHOST, "", status = s)
             else messages.add(Message(Message.Role.GHOST, "", status = s))
         }
-        if (com.localghost.app.net.WebSearch.shouldSearch(mode, text)) {
-            val engine = com.localghost.app.net.WebSearch.Engine(AppSettings.searchEngine(this), AppSettings.braveKey(this))
-            status("searching the web on this phone" + (if (engine.brave) " (Brave)" else "") + "…")
-            webHits = com.localghost.app.net.WebSearch.search(text, fix?.let { com.localghost.app.net.WebSearch.Here(it.lat, it.lon) }, engine)
+        // THE SMARTER SEARCH: the box's model says first what the question needs and which
+        // searches would find it (a few seconds; the phone plans by itself when the box cannot
+        // say), the phone runs them and sends each read page's paragraphs, the box keeps the
+        // passages that answer. When what was read comes nowhere near the need and the plan had
+        // a search left, the box asks for it (ChatChunk.More) and the question is asked again
+        // with both rounds' findings , once, never a loop.
+        val here = fix?.let { com.localghost.app.net.WebSearch.Here(it.lat, it.lon) }
+        val engine = com.localghost.app.net.WebSearch.Engine(AppSettings.searchEngine(this), AppSettings.braveKey(this))
+        var wantWeb = com.localghost.app.net.WebSearch.shouldSearch(mode, text)
+        val plan: com.localghost.app.net.WebSearch.Plan? = if (wantWeb) {
+            status("asking your box what to look for…")
+            BoxClient.chatPlan(this, text, messages.toList())
+        } else null
+        // in auto mode the model's "this needs nothing from outside" is final; "on" searches anyway
+        if (plan != null && !plan.search && mode != "on") wantWeb = false
+        if (wantWeb) {
+            status("searching the web on this phone" + (if (engine.brave) " (Brave)" else "") +
+                (plan?.need?.takeIf { it.isNotBlank() }?.let { " for: $it" } ?: "") + "…")
+            webHits = com.localghost.app.net.WebSearch.search(text, here, engine, plan?.first, plan?.need ?: "")
             if (webHits.isNotEmpty()) web = com.localghost.app.net.WebSearch.toJson(webHits)
-            val read = webHits.count { it.excerpt.isNotBlank() }
-            status(if (webHits.isEmpty()) "nothing found on the web , asking your box from your archive alone…"
+            val read = webHits.count { it.paragraphs.isNotEmpty() || it.excerpt.isNotBlank() }
+            status(if (webHits.isEmpty()) "nothing found on the web , asking your box…"
                 else "${webHits.size} found, $read read on this phone , asking your box…")
         } else {
             status("asking your box…")
         }
-        BoxClient.chat(incognito = incognitoState, chatId = if (incognitoState) 0L else currentChatId, messages.toList(), text, activeConvId, atts, chatCaps, imageB64 = imageB64, web = web,
-            here = fix?.let { it.lat to it.lon }).collect { chunk ->
-            when (chunk) {
-                is BoxClient.ChatChunk.Memories -> mems = chunk.ids
-                is BoxClient.ChatChunk.Status -> if (reply.isEmpty() && reasoning.isEmpty()) status(chunk.text)
-                is BoxClient.ChatChunk.ChatId -> {
-                    currentChatId = chunk.id
-                    // Persisted so the conversation survives the PROCESS, not just the box , the box
-                    // always kept it; the screen forgot it on every re-unlock.
-                    AppSettings.setLastChatId(this@MainActivity, chunk.id)
-                    refreshChats() // the adopted chat just moved to the top of the recents
-                }
-                is BoxClient.ChatChunk.Reasoning -> {
-                    // The model thinking, LIVE , the TEXT, not just a count. The bubble renders it
-                    // collapsed behind a "thinking… (n)" toggle that streams while expanded; before
-                    // the first answer token it doubles as the progress indicator (no more dead
-                    // air), and it stays expandable after the answer lands. The indicator string no
-                    // longer pollutes msg.text , the markdown renderer only ever sees the answer.
-                    reasoning += chunk.text
-                    val body = reply // "" until the first real token
-                    if (messages.lastOrNull()?.role == Message.Role.GHOST)
-                        messages[messages.size - 1] = Message(Message.Role.GHOST, body, mems, reasoning = reasoning, web = webHits)
-                    else messages.add(Message(Message.Role.GHOST, body, mems, reasoning = reasoning, web = webHits))
-                }
-                is BoxClient.ChatChunk.Token -> {
-                    if (genStartMs == 0L) genStartMs = System.currentTimeMillis()
-                    genChars += chunk.text.length
-                    reply += chunk.text
-                    if (messages.lastOrNull()?.role == Message.Role.GHOST)
-                        messages[messages.size - 1] = Message(Message.Role.GHOST, reply, mems, reasoning = reasoning, web = webHits)
-                    else messages.add(Message(Message.Role.GHOST, reply, mems, reasoning = reasoning, web = webHits))
-                }
-                BoxClient.ChatChunk.Done -> {
-                    streaming = false
-                    // A stream that ended without a word must not leave "asking your box…" standing forever.
-                    if (reply.isEmpty() && reasoning.isEmpty() && messages.lastOrNull()?.role == Message.Role.GHOST && messages.last().text.isEmpty())
-                        messages[messages.size - 1] = Message(Message.Role.GHOST, "The box sent no answer , Box Status says whether the model is up.")
-                    // DEBUG tok/s , chars/4 approximates tokens well enough for a health readout;
-                    // timed from FIRST answer token so model thinking does not dilute the rate.
-                    if (genStartMs > 0 && genChars > 0) {
-                        val secs = (System.currentTimeMillis() - genStartMs).coerceAtLeast(1) / 1000.0
-                        lastGenStats = "≈ %.1f tok/s · %d chars · %.1fs".format(
-                            (genChars / 4.0) / secs, genChars, secs)
+        var round = if (wantWeb) 1 else 0
+        var more: List<String>? = null
+        while (true) {
+            more = null
+            BoxClient.chat(incognito = incognitoState, chatId = if (incognitoState) 0L else currentChatId, messages.toList(), text, activeConvId, atts, chatCaps, imageB64 = imageB64, web = web,
+                here = fix?.let { it.lat to it.lon }, need = plan?.need ?: "", round = round,
+                spare = if (round == 1) (plan?.spare ?: emptyList()) else emptyList()).collect { chunk ->
+                when (chunk) {
+                    is BoxClient.ChatChunk.Memories -> mems = chunk.ids
+                    is BoxClient.ChatChunk.More -> { more = chunk.queries; status("the box read the findings and wants more: ${chunk.queries.joinToString(" · ")} , searching again…") }
+                    is BoxClient.ChatChunk.Status -> if (reply.isEmpty() && reasoning.isEmpty()) status(chunk.text)
+                    is BoxClient.ChatChunk.ChatId -> {
+                        currentChatId = chunk.id
+                        // Persisted so the conversation survives the PROCESS, not just the box , the box
+                        // always kept it; the screen forgot it on every re-unlock.
+                        AppSettings.setLastChatId(this@MainActivity, chunk.id)
+                        refreshChats() // the adopted chat just moved to the top of the recents
                     }
-                    genStartMs = 0L; genChars = 0
+                    is BoxClient.ChatChunk.Reasoning -> {
+                        // The model thinking, LIVE , the TEXT, not just a count. The bubble renders it
+                        // collapsed behind a "thinking… (n)" toggle that streams while expanded; before
+                        // the first answer token it doubles as the progress indicator (no more dead
+                        // air), and it stays expandable after the answer lands. The indicator string no
+                        // longer pollutes msg.text , the markdown renderer only ever sees the answer.
+                        reasoning += chunk.text
+                        val body = reply // "" until the first real token
+                        if (messages.lastOrNull()?.role == Message.Role.GHOST)
+                            messages[messages.size - 1] = Message(Message.Role.GHOST, body, mems, reasoning = reasoning, web = webHits)
+                        else messages.add(Message(Message.Role.GHOST, body, mems, reasoning = reasoning, web = webHits))
+                    }
+                    is BoxClient.ChatChunk.Token -> {
+                        if (genStartMs == 0L) genStartMs = System.currentTimeMillis()
+                        genChars += chunk.text.length
+                        reply += chunk.text
+                        if (messages.lastOrNull()?.role == Message.Role.GHOST)
+                            messages[messages.size - 1] = Message(Message.Role.GHOST, reply, mems, reasoning = reasoning, web = webHits)
+                        else messages.add(Message(Message.Role.GHOST, reply, mems, reasoning = reasoning, web = webHits))
+                    }
+                    BoxClient.ChatChunk.Done -> {
+                        if (more != null) return@collect // the second round follows; the bubble stays a status line
+                        streaming = false
+                        // A stream that ended without a word must not leave "asking your box…" standing forever.
+                        if (reply.isEmpty() && reasoning.isEmpty() && messages.lastOrNull()?.role == Message.Role.GHOST && messages.last().text.isEmpty())
+                            messages[messages.size - 1] = Message(Message.Role.GHOST, "The box sent no answer , Box Status says whether the model is up.")
+                        // DEBUG tok/s , chars/4 approximates tokens well enough for a health readout;
+                        // timed from FIRST answer token so model thinking does not dilute the rate.
+                        if (genStartMs > 0 && genChars > 0) {
+                            val secs = (System.currentTimeMillis() - genStartMs).coerceAtLeast(1) / 1000.0
+                            lastGenStats = "≈ %.1f tok/s · %d chars · %.1fs".format(
+                                (genChars / 4.0) / secs, genChars, secs)
+                        }
+                        genStartMs = 0L; genChars = 0
+                    }
                 }
             }
+            val again = more
+            if (again == null || round != 1 || !streaming) break
+            // round two: the searches the box asked for, all of them, merged with the first round
+            val second = com.localghost.app.net.WebSearch.search(text, here, engine, again, plan?.need ?: "", runAll = true)
+            webHits = com.localghost.app.net.WebSearch.merge(webHits, second)
+            web = if (webHits.isNotEmpty()) com.localghost.app.net.WebSearch.toJson(webHits) else null
+            status("${second.size} more found , asking your box again…")
+        round = 2
         }
     }
 

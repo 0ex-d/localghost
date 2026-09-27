@@ -93,7 +93,7 @@ object LocationLog {
         val p = prefs(ctx)
         val ts = p.getLong("last_ts", 0L)
         if (ts == 0L) return null
-        return Point(ts, p.getFloat("last_lat", 0f).toDouble(), p.getFloat("last_lon", 0f).toDouble())
+        return Point(ts, p.getFloat("last_lat", 0f).toDouble(), p.getFloat("last_lon", 0f).toDouble(), p.getFloat("last_acc", 0f))
     }
 
     /** Append a point unless it is the same place as the last one, recently, or not newer than
@@ -133,7 +133,7 @@ object LocationLog {
         r.appendText(line)
         if (r.length() > 64_000) trimRecent(r, pt.ts)
         prefs(ctx).edit().putLong("last_ts", pt.ts).putFloat("last_lat", pt.lat.toFloat())
-            .putFloat("last_lon", pt.lon.toFloat()).apply()
+            .putFloat("last_lon", pt.lon.toFloat()).putFloat("last_acc", pt.acc).apply()
         bumpToday(ctx)
         return true
     }
@@ -338,6 +338,8 @@ object LocationLog {
             .setConstraints(Constraints.Builder().setRequiresBatteryNotLow(true).build())
             .build()
         WorkManager.getInstance(ctx).enqueueUniquePeriodicWork(NAME, ExistingPeriodicWorkPolicy.UPDATE, request)
+        // and copies of whatever fixes other apps ask for, at no cost of our own (PassiveFixReceiver)
+        PassiveFixReceiver.register(ctx)
     }
 
     /** schedule() when the trail is on and allowed; a no-op otherwise. */
@@ -349,6 +351,26 @@ object LocationLog {
      *  or the person wipes the app; it is theirs. */
     fun stop(ctx: Context) {
         WorkManager.getInstance(ctx).cancelUniqueWork(NAME)
+        PassiveFixReceiver.unregister(ctx)
+    }
+
+    /** Passive fixes kept since local midnight, for the settings line ("of which N passive"). */
+    fun passiveToday(ctx: Context): Int {
+        val p = prefs(ctx)
+        return if (p.getLong("passive_from", 0L) == localMidnight()) p.getInt("passive_n", 0) else 0
+    }
+
+    internal fun notePassive(ctx: Context, n: Int) {
+        val p = prefs(ctx)
+        val midnight = localMidnight()
+        val have = if (p.getLong("passive_from", 0L) == midnight) p.getInt("passive_n", 0) else 0
+        p.edit().putLong("passive_from", midnight).putInt("passive_n", have + n).apply()
+    }
+
+    private fun localMidnight(): Long {
+        val cal = java.util.Calendar.getInstance()
+        cal.set(java.util.Calendar.HOUR_OF_DAY, 0); cal.set(java.util.Calendar.MINUTE, 0); cal.set(java.util.Calendar.SECOND, 0)
+        return cal.timeInMillis / 1000
     }
 
     /** Points recorded since local midnight , the number the settings line shows. */

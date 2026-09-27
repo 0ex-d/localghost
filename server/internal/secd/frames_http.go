@@ -804,7 +804,7 @@ func (s *Server) handleGeoDays(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 || limit > 400 {
 		limit = 60
 	}
-	dir := filepath.Join(s.cfg.StateDir, "mnt", fmt.Sprintf("slot%d", mounted), "paths")
+	dir := s.pathsDir(mounted)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		// No paths dir yet is a normal young-box state , empty list, not appears-down.
@@ -854,9 +854,15 @@ func (s *Server) handleGeoTracks(w http.ResponseWriter, r *http.Request) {
 		Times     []int64      `json:"times,omitempty"`     // unix seconds, parallel to coords (day files from framed ≥ this build)
 		DistanceM float64      `json:"distanceM,omitempty"` // over the cleaned points, standing-still jitter excluded
 		Glitches  int          `json:"glitches,omitempty"`  // raw points framed's rules threw out (spikes to a cell tower and back)
+		// from the day route beside the path (<day>.route.json, /v1/geo/route): the day in one line,
+		// how far on foot and by road, how many stays; absent for days framed has not told yet
+		Line  string  `json:"line,omitempty"`
+		WalkM float64 `json:"walkM,omitempty"`
+		RideM float64 `json:"rideM,omitempty"`
+		Stays int     `json:"stays,omitempty"`
 	}
 	out := []track{}
-	dir := filepath.Join(s.cfg.StateDir, "mnt", fmt.Sprintf("slot%d", mounted), "paths")
+	dir := s.pathsDir(mounted)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -912,11 +918,67 @@ func (s *Server) handleGeoTracks(w http.ResponseWriter, r *http.Request) {
 			if len(f.Properties.Times) == len(lonlat) {
 				t.Times = f.Properties.Times
 			}
+			if rb, err := os.ReadFile(filepath.Join(dir, d+".route.json")); err == nil {
+				var rt struct {
+					Line  string  `json:"line"`
+					WalkM float64 `json:"walkM"`
+					RideM float64 `json:"rideM"`
+					Stays []json.RawMessage `json:"stays"`
+				}
+				if json.Unmarshal(rb, &rt) == nil {
+					t.Line, t.WalkM, t.RideM, t.Stays = rt.Line, rt.WalkM, rt.RideM, len(rt.Stays)
+				}
+			}
 			out = append(out, t)
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"tracks": out})
+}
+
+// pathsDir is where framed writes the day paths and routes: <mount>/frames/paths (framed.DefaultDirs).
+// Until this build secd looked in <mount>/paths, a directory nothing ever wrote, so the box's day
+// tracks never reached the map; the phone drew its own 48 hours and nobody missed the rest.
+func (s *Server) pathsDir(mounted int) string {
+	slot := filepath.Join(s.cfg.StateDir, "mnt", fmt.Sprintf("slot%d", mounted))
+	want := filepath.Join(slot, "frames", "paths")
+	if _, err := os.Stat(want); err != nil {
+		if old := filepath.Join(slot, "paths"); dirHasFiles(old) {
+			return old // a volume where something did write there: keep serving it
+		}
+	}
+	return want
+}
+
+func dirHasFiles(dir string) bool {
+	es, err := os.ReadDir(dir)
+	return err == nil && len(es) > 0
+}
+
+// handleGeoRoute , GET /v1/geo/route?d=YYYY-MM-DD , the day told as stays and moves along the
+// streets (internal/dayroute, written by framed beside the day's path). 404 when framed has not
+// told that day; the phone then draws the track alone.
+func (s *Server) handleGeoRoute(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodGet {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	d := r.URL.Query().Get("d")
+	if _, err := time.Parse("2006-01-02", d); err != nil {
+		http.Error(w, "d=YYYY-MM-DD", http.StatusBadRequest)
+		return
+	}
+	p := filepath.Join(s.pathsDir(mounted), d+".route.json")
+	if !serveStatic(w, r, p, "application/json") {
+		http.NotFound(w, r)
+	}
 }
 
 // handleGeoDay , GET /v1/geo/day?d=YYYY-MM-DD , one day's track GeoJSON, exactly as framed wrote it.
@@ -937,7 +999,7 @@ func (s *Server) handleGeoDay(w http.ResponseWriter, r *http.Request) {
 		s.appearsDown(w)
 		return
 	}
-	path := filepath.Join(s.cfg.StateDir, "mnt", fmt.Sprintf("slot%d", mounted), "paths", d+".geojson")
+	path := filepath.Join(s.pathsDir(mounted), d+".geojson")
 	f, err := os.Open(path)
 	if err != nil {
 		s.appearsDown(w)

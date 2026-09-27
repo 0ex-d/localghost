@@ -26,6 +26,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/LocalGhostDao/localghost/server/internal/landtiles"
+	"github.com/LocalGhostDao/localghost/server/internal/roadgraph"
 	"github.com/LocalGhostDao/localghost/server/internal/roadtiles"
 	"log"
 	"log/slog"
@@ -156,6 +157,13 @@ func main() {
 		categorize(searchCli, rep, lg)
 		t := time.NewTicker(time.Duration(cfg.PollSeconds) * time.Second)
 		defer t.Stop()
+		// THE STOCK-TAKE, AGAIN, EVERY SIX HOURS. It ran at start only, so a frame that fell
+		// through (a caption job that completed without describing, a searchd that was not up
+		// when the notify went out) waited for the next reboot , and the box's status said
+		// "1051 left" for days with nothing queued. A box that runs for weeks finishes its work
+		// by itself now; the operator's `converge` is still there for right-now.
+		again := time.NewTicker(6 * time.Hour)
+		defer again.Stop()
 		for {
 			select {
 			case <-ctx.Done():
@@ -163,6 +171,9 @@ func main() {
 			case <-t.C:
 				pipe.DrainIncoming()
 				pipe.DrainLocations()
+			case <-again.C:
+				lg.Info("stock-take again (every six hours)", "fn", "main")
+				categorize(searchCli, pipe.Converge(), lg)
 			}
 		}
 	}()
@@ -281,6 +292,10 @@ func main() {
 	// PBF is newer than the tiles.
 	roadsIn := filepath.Join(*mount, "geo", "roads")
 	roadsOut := filepath.Join(*mount, "roadtiles")
+	// the day route walks the streets on the graph the road-tiles build writes beside the tiles;
+	// without tiles it draws chords, and it forgets its loaded cells after every rebuild
+	roads := roadgraph.Open(roadsOut)
+	pipe.SetRouter(roads)
 	var roadsBusy sync.Mutex
 	buildRoads := func(why string) string {
 		pbfs := roadtiles.FindPBFs(roadsIn)
@@ -304,6 +319,10 @@ func main() {
 				return
 			}
 			lg.Info("road tiles: done , "+st.String(), "fn", "road-tiles")
+			roads.Reset()
+			// the days drawn as chords before there were streets get their routes again
+			n := pipe.RebuildRecentDays(60)
+			lg.Info("day routes rebuilt on the new streets", "fn", "road-tiles", "days", n)
 			b, _ := json.Marshal(map[string]any{"state": "ready", "majorTiles": st.MajorTiles, "fineTiles": st.FineTiles, "points": st.Points, "bytes": st.Bytes})
 			_ = store.SetState("roadtiles", b)
 		}()
@@ -420,6 +439,24 @@ func main() {
 			categorize(searchCli, pipe.Converge(), lg)
 		}()
 		return ctlsock.Response{OK: true, Text: "converge started (watch the log for the summary line)"}, nil
+	})
+	// day-routes [days=N]: rebuild the last N days' paths and routes (default 60), e.g. after the
+	// road tiles arrived or the geo data changed
+	ctl.Handle("day-routes", func(args json.RawMessage) (ctlsock.Response, error) {
+		var a struct {
+			Days int `json:"days"`
+		}
+		if len(args) > 0 {
+			_ = json.Unmarshal(args, &a)
+		}
+		if a.Days <= 0 {
+			a.Days = 60
+		}
+		go func() {
+			n := pipe.RebuildRecentDays(a.Days)
+			lg.Info("day routes rebuilt", "fn", "day-routes", "days", n)
+		}()
+		return ctlsock.Response{OK: true, Text: fmt.Sprintf("rebuilding the last %d days' paths and routes (watch the log)", a.Days)}, nil
 	})
 	ctl.Handle("rebuild-day", func(args json.RawMessage) (ctlsock.Response, error) {
 		var a struct {

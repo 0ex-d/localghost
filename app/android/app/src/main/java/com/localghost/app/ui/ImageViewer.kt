@@ -28,7 +28,7 @@ import kotlinx.coroutines.withContext
 /**
  * Full-screen photo viewer with pinch-zoom and pan , fetched on open, never cached to disk (the
  * archive is the box's job; the phone is a window, not a second copy). Double-tap toggles fit/3x,
- * single tap dismisses, drag pans while zoomed.
+ * single tap dismisses, drag pans while zoomed (in screen pixels, about the fingers).
  *
  * SMALL FIRST. It used to fetch the ORIGINAL, the preview AND the thumb before showing anything ,
  * three round trips, the first of them a 5-12 MB file decoded at 12 megapixels , so every tap on a
@@ -73,27 +73,48 @@ fun ImageViewer(hash: String, caption: String = "", onDismiss: () -> Unit) {
         properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
             when {
+                // THE GESTURES sit BEFORE the graphicsLayer in the chain, so a finger's movement
+                // arrives in screen pixels: with the pointer input after the layer, a pan came
+                // through divided by the zoom (a 100 px drag moved the photo 33 px at 3×), which
+                // is what made a zoomed photo so hard to move around. Zoom is about the fingers'
+                // centroid, double-tap zooms about the tap, and the offset is clamped so the photo
+                // never leaves the screen.
                 bmp != null -> Image(
                     bitmap = bmp!!.asImageBitmap(),
                     contentDescription = null,
                     contentScale = ContentScale.Fit,
                     modifier = Modifier.fillMaxSize()
-                        .graphicsLayer(scaleX = scale, scaleY = scale,
-                            translationX = offX, translationY = offY)
                         .pointerInput(hash) {
-                            detectTransformGestures { _, pan, gz, _ ->
-                                scale = (scale * gz).coerceIn(1f, 12f)
-                                if (scale > 1f) { offX += pan.x; offY += pan.y }
-                                else { offX = 0f; offY = 0f }
+                            detectTransformGestures { centroid, pan, gz, _ ->
+                                val w = size.width.toFloat(); val h = size.height.toFloat()
+                                val s0 = scale
+                                val s1 = (s0 * gz).coerceIn(1f, 12f)
+                                // the point under the fingers stays under the fingers through the zoom
+                                val cxr = centroid.x - w / 2f; val cyr = centroid.y - h / 2f
+                                var nx = cxr - (cxr - offX) / s0 * s1 + pan.x
+                                var ny = cyr - (cyr - offY) / s0 * s1 + pan.y
+                                val mx = (s1 - 1f) * w / 2f; val my = (s1 - 1f) * h / 2f
+                                nx = nx.coerceIn(-mx, mx); ny = ny.coerceIn(-my, my)
+                                scale = s1
+                                if (s1 <= 1f) { offX = 0f; offY = 0f } else { offX = nx; offY = ny }
                             }
                         }
                         .pointerInput(hash) {
                             detectTapGestures(
-                                onDoubleTap = {
-                                    if (scale > 1.2f) { scale = 1f; offX = 0f; offY = 0f } else scale = 3f
+                                onDoubleTap = { tap ->
+                                    if (scale > 1.2f) { scale = 1f; offX = 0f; offY = 0f }
+                                    else {
+                                        val w = size.width.toFloat(); val h = size.height.toFloat()
+                                        val s = 3f
+                                        offX = ((tap.x - w / 2f) * (1f - s)).coerceIn(-(s - 1f) * w / 2f, (s - 1f) * w / 2f)
+                                        offY = ((tap.y - h / 2f) * (1f - s)).coerceIn(-(s - 1f) * h / 2f, (s - 1f) * h / 2f)
+                                        scale = s
+                                    }
                                 },
                                 onTap = { if (scale <= 1.05f) onDismiss() })
-                        })
+                        }
+                        .graphicsLayer(scaleX = scale, scaleY = scale,
+                            translationX = offX, translationY = offY))
                 failed -> Text("! could not load this photo from the box",
                     color = TerminalDim, style = MaterialTheme.typography.bodyMedium)
                 else -> Text("loading…", color = GhostTextDim,

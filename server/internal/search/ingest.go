@@ -182,6 +182,27 @@ func (in *Ingester) ensureCaptioned(id int64, render string) error {
 	if err != nil {
 		return err
 	}
+	// A stored "caption" with no SCENE section (from before Caption refused them: thinking that
+	// ran past the budget, a refusal) described nothing and never will. Forget it, drop the
+	// chunks it seeded the index with, and caption the frame again , this is the repair for the
+	// frames every stock-take found undescribed and could not move.
+	if st.Caption != "" {
+		if fixed, ok := NormalizeCaption(st.Caption); !ok {
+			in.Log.Info("caption without sections discarded, frame queued again", "fn", "ensureCaptioned", "orig", id, "head", firstChars(st.Caption, 60))
+			if err := in.Store.SetCaption(id, ""); err != nil {
+				return err
+			}
+			if err := in.Store.db.Exec("DELETE FROM search.chunks WHERE tier = 0 AND orig_source = 'image' AND orig_id = $1", id); err != nil {
+				return err
+			}
+			st.Caption = ""
+		} else if fixed != st.Caption {
+			// headings dressed up by the model: stored as the contract has them from now on
+			if err := in.Store.SetCaption(id, fixed); err == nil {
+				st.Caption = fixed
+			}
+		}
+	}
 	if st.Caption == "" && st.DupOf != 0 {
 		rep, rerr := in.Store.CaptionStateOf(st.DupOf)
 		if rerr == nil && rep.Caption != "" {
@@ -254,6 +275,14 @@ func (in *Ingester) ApplyCaption(origID int64, path, caption string, captured ti
 	return in.Store.EnqueueJob("tag", map[string]any{
 		"origId": origID, "path": path, "caption": caption, "captured": captured.Unix(),
 	})
+}
+
+func firstChars(s string, n int) string {
+	s = strings.ReplaceAll(strings.TrimSpace(s), "\n", " ")
+	if r := []rune(s); len(r) > n {
+		return string(r[:n]) + "…"
+	}
+	return s
 }
 
 // decodeFile decodes an image file for the perceptual hash without holding more than that file.

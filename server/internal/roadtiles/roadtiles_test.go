@@ -164,6 +164,37 @@ func TestBuildFromAPBF(t *testing.T) {
 	if len(west.Pieces) != 1 || west.Pieces[0].Points[len(west.Pieces[0].Points)-2] != Q {
 		t.Fatalf("west piece: %+v", west)
 	}
+	// the graph: the primary is one edge (no junction on it) in both cells it touches, the street
+	// one edge, the footway one edge starting at the junction it shares with the broken tertiary,
+	// which itself has one found node and no edge
+	if st.GraphCells != 2 || st.Edges != 4 {
+		t.Fatalf("graph stats: %+v", st)
+	}
+	gb, _ := os.ReadFile(filepath.Join(out, GraphName(Cell{0, 2061, 1344})))
+	gc, edges, err := DecodeGraph(gb)
+	if err != nil || gc != (Cell{0, 2061, 1344}) || len(edges) != 3 {
+		t.Fatalf("graph cell: %v %v %d", gc, err, len(edges))
+	}
+	byFrom := map[int64]Edge{}
+	for _, e := range edges {
+		byFrom[e.From] = e
+	}
+	if e := byFrom[1]; e.To != 3 || e.Class != ClassPrimary || len(e.Lat) != 3 || e.Flags&FlagOneway == 0 || e.Meters < 8000 || e.Meters > 9000 {
+		t.Fatalf("primary edge: %+v", e) // 26.05→26.15 at 44.45°: ~8 km
+	}
+	if e := byFrom[4]; e.To != 5 || e.Class != ClassResidential || e.Meters < 150 || e.Meters > 250 {
+		t.Fatalf("street edge: %+v", e)
+	}
+	if e := byFrom[6]; e.To != 7 || e.Class != ClassPath {
+		t.Fatalf("footway edge: %+v", e)
+	}
+	gb, _ = os.ReadFile(filepath.Join(out, GraphName(Cell{0, 2060, 1344})))
+	if _, west, err := DecodeGraph(gb); err != nil || len(west) != 1 || west[0].From != 1 {
+		t.Fatalf("west graph cell: %v %+v", err, west)
+	}
+	if _, err := os.Stat(filepath.Join(out, GraphName(Cell{0, 2062, 1344}))); err == nil {
+		t.Fatal("a cell with no edge got a graph file")
+	}
 	// nothing left behind, and a rebuild swaps the directory whole
 	if _, err := os.Stat(out + ".tmp"); err == nil {
 		t.Fatal("tmp left behind")
@@ -211,5 +242,51 @@ func TestBitmapAndNodeFile(t *testing.T) {
 	}
 	if lat, _, ok := nf.lookup(10); !ok || lat != 44.4268 {
 		t.Fatal("first")
+	}
+}
+
+func TestEdgesSplitAtJunctionsAndGaps(t *testing.T) {
+	tw := newBitmap()
+	tw.set(3)
+	tw.set(30)
+	cb := newCellBuffers(t.TempDir(), 1<<30)
+	// 1-2-3(junction)-4(missing)-5: one edge 1→3; nothing after the gap (a single node is no edge)
+	pts := []nodePt{{1, 26.10, 44.40, true}, {2, 26.11, 44.40, true}, {3, 26.12, 44.40, true}, {4, 0, 0, false}, {5, 26.14, 44.40, true}}
+	if err := emitEdges(pts, ClassResidential, 0, tw, cb); err != nil {
+		t.Fatal(err)
+	}
+	// 10-20-30(junction)-40-50: two edges, 10→30 and 30→50, the junction on both
+	pts = []nodePt{{10, 26.10, 44.41, true}, {20, 26.11, 44.41, true}, {30, 26.12, 44.41, true}, {40, 26.13, 44.41, true}, {50, 26.14, 44.41, true}}
+	if err := emitEdges(pts, ClassTertiary, FlagOneway, tw, cb); err != nil {
+		t.Fatal(err)
+	}
+	// a way whose first node is missing starts at the first one found
+	pts = []nodePt{{60, 0, 0, false}, {61, 26.10, 44.42, true}, {62, 26.11, 44.42, true}}
+	if err := emitEdges(pts, ClassPath, 0, tw, cb); err != nil {
+		t.Fatal(err)
+	}
+	c := Cell{GraphLevel, 2061, 1344}
+	body := cb.bufs[c]
+	if n := countEdges(body); n != 4 {
+		t.Fatalf("%d edges, want 4", n)
+	}
+	_, edges, err := DecodeGraph(append(graphHeader(Cell{0, 2061, 1344}, 4), body...))
+	if err != nil || len(edges) != 4 {
+		t.Fatal(err)
+	}
+	want := []struct{ from, to int64 }{{1, 3}, {10, 30}, {30, 50}, {61, 62}}
+	for i, w := range want {
+		if edges[i].From != w.from || edges[i].To != w.to {
+			t.Fatalf("edge %d: %d→%d, want %d→%d", i, edges[i].From, edges[i].To, w.from, w.to)
+		}
+	}
+	if len(edges[0].Lat) != 3 || edges[1].Flags&FlagOneway == 0 || edges[1].Meters < 1500 || edges[1].Meters > 1700 {
+		t.Fatalf("edge detail: %+v %+v", edges[0], edges[1]) // 0.02° of longitude at 44.4°: ~1.6 km
+	}
+	if _, _, err := DecodeGraph([]byte("nope")); err == nil {
+		t.Fatal("garbage decoded as a graph cell")
+	}
+	if d := Haversine(51.5074, -0.1278, 48.8566, 2.3522); d < 343000 || d > 344500 {
+		t.Fatalf("London–Paris %.0f m", d)
 	}
 }

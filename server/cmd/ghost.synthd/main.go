@@ -214,6 +214,39 @@ func main() {
 	//   data: {"t":"..."}              tokens, oracled's translation of llama's SSE
 	//   data: {"done":true,"model":x}  last
 	streamMux := http.NewServeMux()
+	// /plan: what the question needs from the web and which searches would find it, from the
+	// model, in one short call (websmart.go). The phone asks before it searches; on any failure
+	// it plans by itself as before. {"ok":false} is an honest "plan it yourself".
+	planClient := oracle.NewClient(runDir, 25*time.Second)
+	streamMux.HandleFunc("/plan", func(w http.ResponseWriter, r *http.Request) {
+		var q struct {
+			Prompt  string     `json:"prompt"`
+			History []chatTurn `json:"history,omitempty"`
+		}
+		if r.Method != http.MethodPost || json.NewDecoder(r.Body).Decode(&q) != nil || q.Prompt == "" {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		t0 := time.Now()
+		resp, err := planClient.Infer(oracle.Request{
+			Capability: "chat", Class: oracle.ClassLocalSmall, Priority: oracle.PriorityInteractive,
+			Input: planPrompt(q.Prompt, q.History, time.Now()), MaxTokens: 220, Temperature: 0.1, DeadlineMS: 8000,
+		})
+		if err != nil || resp.Err != "" {
+			lg.Warn("web plan: no answer from the model", "fn", "plan", "err", err, "modelErr", resp.Err)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false})
+			return
+		}
+		p, ok := parsePlan(resp.Output)
+		if !ok {
+			lg.Warn("web plan: unusable answer", "fn", "plan", "out", clip(resp.Output, 200))
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false})
+			return
+		}
+		lg.Info("web plan", "fn", "plan", "search", p.Search, "need", p.Need, "queries", p.Queries, "took", time.Since(t0).Round(time.Millisecond))
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "search": p.Search, "need": p.Need, "shape": p.Shape, "fresh": p.Fresh, "queries": p.Queries})
+	})
 	streamMux.HandleFunc("/chat", func(w http.ResponseWriter, r *http.Request) {
 		var q struct {
 			Prompt    string `json:"prompt"`
@@ -231,6 +264,12 @@ func main() {
 			// The phone's last fix (recent ones only), so a question about going somewhere can be
 			// answered with places near it that fit what the person likes. Never leaves the box.
 			Here *hereT `json:"here,omitempty"`
+			// THE SMARTER SEARCH (websmart.go): what the model said the question needs (/plan),
+			// which round this is (1, or 2 after the box asked for more), and the plan's searches
+			// the phone has not run yet, so the box can ask for one when what it read is thin.
+			Need  string   `json:"need,omitempty"`
+			Round int      `json:"round,omitempty"`
+			Spare []string `json:"spare,omitempty"`
 		}
 		if r.Method != http.MethodPost || json.NewDecoder(r.Body).Decode(&q) != nil || q.Prompt == "" {
 			http.Error(w, "bad request", http.StatusBadRequest)
@@ -270,6 +309,30 @@ func main() {
 			items = append(real, extra...)
 		}
 		web := boundWeb(q.Web)
+		// THE PARAGRAPHS, ranked against the need: each page's excerpt becomes the passages that
+		// say what is needed. Thin, with a search still unrun: ask the phone for one more round
+		// instead of answering from nothing.
+		webNote := ""
+		if hasParagraphs(web) {
+			need := clip(strings.TrimSpace(q.Need), 300)
+			if need == "" {
+				need = clip(q.Prompt, 300)
+			}
+			best, embedded := rankParagraphs(runDir, need, web)
+			how := "by meaning"
+			if !embedded {
+				how = "by the words"
+			}
+			webNote = fmt.Sprintf("read %d pages' paragraphs %s, best match %.2f", len(web), how, best)
+			lg.Info("web findings ranked", "fn", "chat", "need", need, "pages", len(web), "best", fmt.Sprintf("%.2f", best), "embedded", embedded)
+			if q.Round <= 1 && len(q.Spare) > 0 && best < rankThinBelow {
+				moreWeb(w, q.Spare, fmt.Sprintf("nothing read comes close to what is needed (best %.2f); searching once more", best))
+				return
+			}
+		} else if len(web) == 0 && q.Round <= 1 && len(q.Spare) > 0 && q.Need != "" {
+			moreWeb(w, q.Spare, "the first searches found nothing; searching once more")
+			return
+		}
 		// THE BUDGET: what the model can read in about twenty seconds at its measured prefill
 		// speed. Only asked when there is something big to fit (the web, a long history).
 		var speed engineSpeed
@@ -325,6 +388,13 @@ func main() {
 		if !speed.at.IsZero() {
 			if note := readingNote(speed, len(input)+histChars, trimmed); note != "" {
 				ev["note"] = note
+			}
+		}
+		if webNote != "" {
+			if n, _ := ev["note"].(string); n != "" {
+				ev["note"] = n + " · " + webNote
+			} else {
+				ev["note"] = webNote
 			}
 		}
 		ctxEv, _ := json.Marshal(ev)
@@ -600,6 +670,61 @@ func main() {
 			data, _ := json.Marshal(out)
 			return ctlsock.Response{OK: true, Data: data}, nil
 		})
+		// days: the prebuilt day summaries , how many, how many the model wrote, the newest and
+		// the oldest told; day=YYYY-MM-DD marks one day to be built again at the next pass (its
+		// signature and tries cleared; rewrite=true also lets the model write it again at once);
+		// pass=true runs a pass now.
+		ctl.Handle("days", func(args json.RawMessage) (ctlsock.Response, error) {
+			var a struct {
+				Day     string `json:"day"`
+				Rewrite bool   `json:"rewrite"`
+				Pass    bool   `json:"pass"`
+			}
+			if len(args) > 0 {
+				_ = json.Unmarshal(args, &a)
+			}
+			db := chatStore(mount)
+			if db == nil {
+				return ctlsock.Response{OK: false, Err: "no database (box locked?)"}, nil
+			}
+			out := map[string]any{}
+			if a.Day != "" {
+				if _, err := time.Parse("2006-01-02", a.Day); err != nil {
+					return ctlsock.Response{OK: false, Err: "day=YYYY-MM-DD"}, nil
+				}
+				q := "UPDATE day_summaries SET signature = '', prose_tries = 0, tries_sig = ''"
+				if a.Rewrite {
+					q += ", written_by = 'template', model_at = 0"
+				}
+				if err := db.Exec(q+" WHERE day = $1", a.Day); err != nil {
+					return ctlsock.Response{OK: false, Err: err.Error()}, nil
+				}
+				out["cleared"] = a.Day
+				a.Pass = true
+			}
+			if a.Pass {
+				lastDayPass = time.Time{}
+				oc := oracle.NewClient(runDir, 2*time.Minute)
+				built, wrote, err := daySummaryPass(db, oc, mount, lg)
+				if err != nil {
+					return ctlsock.Response{OK: false, Err: err.Error()}, nil
+				}
+				out["built"] = built
+				out["byModelNow"] = wrote
+			}
+			if rows, err := db.Query("SELECT count(*), count(*) FILTER (WHERE written_by = 'model'), coalesce(min(day),''), coalesce(max(day),'') FROM day_summaries"); err == nil && len(rows.Vals) == 1 && len(rows.Vals[0]) >= 4 {
+				v := rows.Vals[0]
+				out["days"], _ = strconv.Atoi(str(v[0]))
+				out["byModel"], _ = strconv.Atoi(str(v[1]))
+				out["oldest"] = str(v[2])
+				out["newest"] = str(v[3])
+			}
+			if rows, err := db.Query("SELECT value FROM settings WHERE key = 'synthd_days_watermark'"); err == nil && len(rows.Vals) == 1 && len(rows.Vals[0]) > 0 {
+				out["backfillAt"] = str(rows.Vals[0][0])
+			}
+			data, _ := json.Marshal(out)
+			return ctlsock.Response{OK: true, Data: data}, nil
+		})
 		defer ctl.Cleanup()
 		go func() {
 			if err := ctl.Serve(ctx); err != nil {
@@ -863,6 +988,10 @@ type webHit struct {
 	Source    string `json:"source,omitempty"`    // duckduckgo | wikipedia | open-meteo | frankfurter
 	Published string `json:"published,omitempty"` // the page's own date, when it had one
 	Fetched   string `json:"fetched,omitempty"`   // "2026-09-20 10:41 UTC", set by the phone
+	// Paragraphs is the page as the phone's readability pass cut it, when the phone sends them
+	// (websmart.go ranks them against the need and writes the excerpt from the best; an old
+	// phone sends only its keyword excerpt, which then stands as it is).
+	Paragraphs []string `json:"paragraphs,omitempty"`
 }
 
 const (
@@ -889,12 +1018,44 @@ func boundWeb(hits []webHit) []webHit {
 		if !webKinds[h.Kind] {
 			h.Kind = "page"
 		}
+		if len(h.Paragraphs) > 16 {
+			h.Paragraphs = h.Paragraphs[:16]
+		}
+		for i, p := range h.Paragraphs {
+			h.Paragraphs[i] = clip(strings.ReplaceAll(p, "\n", " "), rankParaMaxLen)
+		}
 		out = append(out, h)
 		if len(out) == webMaxHits {
 			break
 		}
 	}
 	return out
+}
+
+func hasParagraphs(hits []webHit) bool {
+	for _, h := range hits {
+		if len(h.Paragraphs) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// moreWeb ends a chat stream before the model spoke: the phone should run these searches and ask
+// again (round 2). The stream shape stays the phone's: a context event, then done.
+func moreWeb(w http.ResponseWriter, queries []string, why string) {
+	if len(queries) > 3 {
+		queries = queries[:3]
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	ev, _ := json.Marshal(map[string]any{"context": []ctxItem{}, "note": why})
+	more, _ := json.Marshal(map[string]any{"more": map[string]any{"queries": queries, "why": why}})
+	done, _ := json.Marshal(map[string]any{"done": true, "more": true})
+	fmt.Fprintf(w, "data: %s\n\ndata: %s\n\ndata: %s\n\n", ev, more, done)
+	if fl, ok := w.(http.Flusher); ok {
+		fl.Flush()
+	}
 }
 
 // webSite is the host of a hit, the name the model attributes it by.
@@ -1059,15 +1220,21 @@ func distillLoop(ctx context.Context, mount, runDir string, lg *slog.Logger) {
 		if n > 0 {
 			lg.Info("distilled", "fn", "distillLoop", "memories", n)
 		}
-		if en, eerr := episodePass(db, lg); eerr != nil {
-			lg.Warn("episode pass failed", "fn", "distillLoop", "err", eerr)
-		} else if en > 0 {
-			lg.Info("day episodes updated", "fn", "distillLoop", "episodes", en)
-		}
 		if on, oerr := outingPass(db, lg); oerr != nil {
 			lg.Warn("outing pass failed", "fn", "distillLoop", "err", oerr)
 		} else if on > 0 {
 			lg.Info("outings updated", "fn", "distillLoop", "outings", on)
+		}
+		if pn, perr := prosePass(db, oc, mount, lg); perr != nil {
+			lg.Warn("prose pass failed", "fn", "distillLoop", "err", perr)
+		} else if pn > 0 {
+			lg.Info("memories written by the model", "fn", "distillLoop", "memories", pn)
+		}
+		// THE DAYS, after the outings (a day's sheet names the outing it belongs to)
+		if built, wrote, derr := daySummaryPass(db, oc, mount, lg); derr != nil {
+			lg.Warn("day summary pass failed", "fn", "distillLoop", "err", derr)
+		} else if built > 0 {
+			lg.Info("day summaries built", "fn", "distillLoop", "days", built, "byModel", wrote)
 		}
 	}
 }
@@ -1266,7 +1433,9 @@ func memoriesSource(runDir, prompt string) []ctxItem {
 type otdYear struct {
 	Year      int      `json:"year"`
 	YearsAgo  int      `json:"years_ago"`
-	Narrative string   `json:"narrative,omitempty"`
+	Narrative string   `json:"narrative,omitempty"` // the day's stored summary (day_summaries), model or template
+	Title     string   `json:"title,omitempty"`     // "Friday 25 September 2026 · Corner Café, Voutoumi"
+	Line      string   `json:"line,omitempty"`      // the route in one line, when the day had one
 	Places    []string `json:"places,omitempty"`
 	Photos    []string `json:"photos,omitempty"` // frame hashes , the app renders via /v1/frames/thumb
 	Notes     []string `json:"notes,omitempty"`  // journal entry titles
@@ -1285,11 +1454,11 @@ func onThisDay(runDir, day string, lg *slog.Logger) (string, error) {
 		memDB = poltergres.NewReadWrite(hw.SocketForMount(mount), cfg.Postgres.Port,
 			cfg.Postgres.RWUser, cfg.Postgres.RWPass, cfg.Postgres.Name)
 	}
-	// fresh cache wins
+	// fresh cache wins , an hour: the rows underneath change only when a day pass rebuilds one
 	if rows, err := memDB.Query("SELECT body, generated_at FROM reports WHERE day = $1", day); err == nil &&
 		len(rows.Vals) == 1 && rows.Vals[0][0] != nil && rows.Vals[0][1] != nil {
 		if gen, perr := strconv.ParseInt(*rows.Vals[0][1], 10, 64); perr == nil &&
-			time.Since(time.UnixMilli(gen)) < 20*time.Hour {
+			time.Since(time.UnixMilli(gen)) < time.Hour {
 			return *rows.Vals[0][0], nil
 		}
 	}
@@ -1301,7 +1470,37 @@ func onThisDay(runDir, day string, lg *slog.Logger) (string, error) {
 		}
 		return years[y]
 	}
-	// photos + places for this month-day, every year except the current one
+	// THE PREBUILT DAYS FIRST: the summary the day pass wrote (the model's when it passed the
+	// check, the template otherwise), its covers, places and notes. No model at request time.
+	told := map[int]bool{}
+	if rows, err := memDB.Query(`SELECT day, summary, title, facts::text FROM day_summaries WHERE substr(day, 6, 5) = $1 AND summary <> '' ORDER BY day`, day); err == nil {
+		for _, v := range rows.Vals {
+			if len(v) < 4 || v[0] == nil || v[1] == nil {
+				continue
+			}
+			y, _ := strconv.Atoi((*v[0])[:4])
+			if y == 0 || y == nowYear {
+				continue
+			}
+			yr := get(y)
+			yr.Narrative = *v[1]
+			if v[2] != nil {
+				yr.Title = *v[2]
+			}
+			if v[3] != nil {
+				var f dayFacts
+				if json.Unmarshal([]byte(*v[3]), &f) == nil {
+					yr.Photos = f.Covers
+					yr.Places = f.Places
+					yr.Notes = f.Notes
+					yr.Line = f.Line
+				}
+			}
+			told[y] = true
+		}
+	}
+	// years the day pass has not reached yet: the quick facts, no narrative (the backfill will
+	// tell them; the report refreshes within the hour)
 	if rows, err := memDB.Query(`
 		SELECT hash, COALESCE(place,''), extract(year from to_timestamp(taken_at))::int AS y
 		FROM frames WHERE kind = 'photo' AND to_char(to_timestamp(taken_at), 'MM-DD') = $1
@@ -1311,11 +1510,11 @@ func onThisDay(runDir, day string, lg *slog.Logger) (string, error) {
 				continue
 			}
 			y, _ := strconv.Atoi(*v[2])
-			if y == 0 || y == nowYear {
+			if y == 0 || y == nowYear || told[y] {
 				continue
 			}
 			yr := get(y)
-			yr.Photos = append(yr.Photos, *v[0]) // ALL candidates; hour-spread picks 12 below
+			yr.Photos = append(yr.Photos, *v[0])
 			if v[1] != nil && *v[1] != "" {
 				seen := false
 				for _, p := range yr.Places {
@@ -1330,7 +1529,6 @@ func onThisDay(runDir, day string, lg *slog.Logger) (string, error) {
 			}
 		}
 	}
-	// journal notes for this month-day (chats, dropped texts, jots)
 	if rows, err := memDB.Query(`
 		SELECT title, extract(year from to_timestamp(ts))::int FROM journal_entries
 		WHERE to_char(to_timestamp(ts), 'MM-DD') = $1 AND title <> ''
@@ -1340,7 +1538,7 @@ func onThisDay(runDir, day string, lg *slog.Logger) (string, error) {
 				continue
 			}
 			y, _ := strconv.Atoi(*v[1])
-			if y == 0 || y == nowYear {
+			if y == 0 || y == nowYear || told[y] {
 				continue
 			}
 			if yr := get(y); len(yr.Notes) < 6 {
@@ -1348,10 +1546,11 @@ func onThisDay(runDir, day string, lg *slog.Logger) (string, error) {
 			}
 		}
 	}
-	// SMARTER photo pick: 12 spread ACROSS the day, not the first 12 , the first-N cut showed
-	// twelve frames of breakfast and none of the summit. Photos arrived taken_at-ordered, so
-	// even striding preserves chronology while sampling the whole arc of the day.
-	for _, yr := range years {
+	// the untold years' photos: twelve spread across the day, not the first twelve
+	for y, yr := range years {
+		if told[y] {
+			continue
+		}
 		if n := len(yr.Photos); n > 12 {
 			picked := make([]string, 0, 12)
 			for i := 0; i < 12; i++ {
@@ -1360,34 +1559,14 @@ func onThisDay(runDir, day string, lg *slog.Logger) (string, error) {
 			yr.Photos = picked
 		}
 	}
-	// order years newest-first, narrate the ones with substance (cap 5 model calls)
 	keys := make([]int, 0, len(years))
 	for y := range years {
 		keys = append(keys, y)
 	}
 	sort.Sort(sort.Reverse(sort.IntSlice(keys)))
-	oc := oracle.NewClient(runDir, 90*time.Second)
-	narrated := 0
 	out := make([]otdYear, 0, len(keys))
 	for _, y := range keys {
-		yr := years[y]
-		if narrated < 5 && (len(yr.Places) > 0 || len(yr.Notes) > 0) {
-			wd := ""
-			if t, terr := time.Parse("2006-01-02", strconv.Itoa(yr.Year)+"-"+day); terr == nil {
-				wd = "It was a " + t.Weekday().String() + ". "
-			}
-			facts := wd + "Places: " + strings.Join(yr.Places, "; ") + ". Notes: " + strings.Join(yr.Notes, "; ") +
-				". Photo count: " + strconv.Itoa(len(yr.Photos)) + "."
-			if resp, ierr := oc.Infer(oracle.Request{
-				Capability: "summarize", Priority: oracle.PriorityBackground,
-				Input: "Write 2-3 warm, concrete sentences telling the USER what they were doing on this day " +
-					strconv.Itoa(yr.YearsAgo) + " year(s) ago, from these facts. Speak to them as 'you'. No preamble, no invented details.\n\n" + facts,
-			}); ierr == nil {
-				yr.Narrative = strings.TrimSpace(resp.Output)
-				narrated++
-			}
-		}
-		out = append(out, *yr)
+		out = append(out, *years[y])
 	}
 	b, _ := json.Marshal(map[string]any{"day": day, "years": out})
 	body := string(b)
@@ -1397,169 +1576,4 @@ func onThisDay(runDir, day string, lg *slog.Logger) (string, error) {
 		lg.Warn("report cache write failed (report still served)", "fn", "onThisDay", "err", err)
 	}
 	return body, nil
-}
-
-// episodePass , THE GHOST'S MEMORY OF YOUR DAYS. For each of the last 90 days with any signal,
-// one memory (kind='episode', source_ref='episode:<day>') assembled DETERMINISTICALLY from what
-// the box already knows: photos and where they were taken (framed), steps and sleep (tallyd),
-// how the person said they felt (the check-in), what they wrote (noted). No model call , this is
-// honest template text from real data; the model can polish prose later, but a memory of a day
-// should exist the day it happened, not when a GPU gets around to it. User edits and tombstones
-// permanently outrank regeneration, the standing rule.
-func episodePass(db *poltergres.ReadWrite, lg *slog.Logger) (int, error) {
-	type ep struct {
-		photos   int
-		place    string
-		steps    float64
-		sleepMin float64
-		feelings string
-		notes    int
-	}
-	days := map[string]*ep{}
-	get := func(d string) *ep {
-		if days[d] == nil {
-			days[d] = &ep{}
-		}
-		return days[d]
-	}
-	// BACKFILL WATERMARK , "the last photo might not be from today". A library import or a quiet
-	// season means the interesting days are OLD; the recent-90 window alone would never see them.
-	// Each pass also walks a 120-day historical window backwards from the watermark until the
-	// earliest frame is passed, then parks. Bounded work per pass; all of history, eventually.
-	cutoff := time.Now().AddDate(0, 0, -90)
-	back := struct{ from, to time.Time }{}
-	{
-		wm := time.Now().AddDate(0, 0, -90)
-		if rows, err := db.Query("SELECT value FROM settings WHERE key = 'synthd_episode_watermark'"); err == nil && len(rows.Vals) == 1 && rows.Vals[0][0] != nil {
-			if t, perr := time.Parse("2006-01-02", *rows.Vals[0][0]); perr == nil {
-				wm = t
-			}
-		}
-		earliest := time.Time{}
-		if rows, err := db.Query("SELECT min(taken_at) FROM frames WHERE kind = 'photo' AND taken_at > 0"); err == nil && len(rows.Vals) == 1 && rows.Vals[0][0] != nil {
-			if ts, perr := strconv.ParseInt(*rows.Vals[0][0], 10, 64); perr == nil && ts > 0 {
-				earliest = time.Unix(ts, 0)
-			}
-		}
-		if !earliest.IsZero() && wm.After(earliest) {
-			back.to = wm
-			back.from = wm.AddDate(0, 0, -120)
-			if back.from.Before(earliest) {
-				back.from = earliest.AddDate(0, 0, -1)
-			}
-			cutoff = back.from // one query window covers recent + this backfill slice
-			_ = db.Exec("INSERT INTO settings (key, value) VALUES ('synthd_episode_watermark',$1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-				back.from.Format("2006-01-02"))
-		}
-	}
-	cutTS := cutoff.Unix()
-	cutDay := cutoff.Format("2006-01-02")
-
-	rows, err := db.Query(`
-		SELECT to_char(to_timestamp(taken_at), 'YYYY-MM-DD') AS d, count(*)::text,
-		       coalesce(min(place) FILTER (WHERE place <> ''), '')
-		FROM frames WHERE kind = 'photo' AND taken_at >= $1 GROUP BY d`, cutTS)
-	if err != nil {
-		return 0, err
-	}
-	for _, v := range rows.Vals {
-		if len(v) < 3 || v[0] == nil {
-			continue
-		}
-		e := get(*v[0])
-		if v[1] != nil {
-			e.photos, _ = strconv.Atoi(*v[1])
-		}
-		if v[2] != nil && *v[2] != "" {
-			parts := strings.Split(*v[2], " / ")
-			e.place = parts[len(parts)-1]
-		}
-	}
-	rows, err = db.Query("SELECT day, metric, value::text FROM health_metrics WHERE day >= $1 AND metric IN ('steps','sleep_minutes')", cutDay)
-	if err == nil {
-		for _, v := range rows.Vals {
-			if len(v) < 3 || v[0] == nil || v[1] == nil || v[2] == nil {
-				continue
-			}
-			e := get(*v[0])
-			f, _ := strconv.ParseFloat(*v[2], 64)
-			if *v[1] == "steps" {
-				e.steps = f
-			} else {
-				e.sleepMin = f
-			}
-		}
-	}
-	rows, err = db.Query(
-		"SELECT title, body FROM journal_entries WHERE source = 'ghost.noted' AND ts >= $1", cutTS)
-	if err == nil {
-		for _, v := range rows.Vals {
-			if len(v) < 2 || v[0] == nil {
-				continue
-			}
-			if strings.HasPrefix(*v[0], "Daily check-in ") {
-				d := strings.TrimPrefix(*v[0], "Daily check-in ")
-				if v[1] != nil {
-					for _, line := range strings.Split(*v[1], "\n") {
-						if strings.HasPrefix(strings.TrimSpace(line), "Feeling: ") {
-							get(d).feelings = strings.TrimPrefix(strings.TrimSpace(line), "Feeling: ")
-						}
-					}
-				}
-			}
-		}
-	}
-
-	written := 0
-	for d, e := range days {
-		if e.photos == 0 && e.steps == 0 && e.sleepMin == 0 && e.feelings == "" {
-			continue
-		}
-		t, terr := time.Parse("2006-01-02", d)
-		if terr != nil {
-			continue
-		}
-		var b strings.Builder
-		if e.photos > 0 {
-			fmt.Fprintf(&b, "%d photo(s)", e.photos)
-			if e.place != "" {
-				fmt.Fprintf(&b, " around %s", e.place)
-			}
-			b.WriteString(". ")
-		}
-		if e.steps > 0 {
-			fmt.Fprintf(&b, "%.0f steps. ", e.steps)
-		}
-		if e.sleepMin > 0 {
-			fmt.Fprintf(&b, "%dh %02dm sleep. ", int(e.sleepMin)/60, int(e.sleepMin)%60)
-		}
-		if e.feelings != "" {
-			fmt.Fprintf(&b, "You said you felt %s.", e.feelings)
-		}
-		body := strings.TrimSpace(b.String())
-		ref := "episode:" + d
-		ex, qerr := db.Query("SELECT id, user_edited, tombstoned FROM memories WHERE kind = 'episode' AND source_ref = $1", ref)
-		if qerr != nil {
-			return written, qerr
-		}
-		title := t.Format("Mon, Jan 2 2006")
-		if len(ex.Vals) > 0 {
-			v := ex.Vals[0]
-			if (len(v) > 1 && v[1] != nil && *v[1] == "t") || (len(v) > 2 && v[2] != nil && *v[2] == "t") {
-				continue // the person's version of this day outranks the machine's, forever
-			}
-			if err := db.Exec("UPDATE memories SET body = $1, updated_at = $2 WHERE id = $3",
-				body, time.Now().UnixMilli(), *v[0]); err != nil {
-				return written, err
-			}
-		} else {
-			if err := db.Exec(
-				"INSERT INTO memories (title, body, kind, source_ref, created_at, updated_at) VALUES ($1,$2,'episode',$3,$4,$5)",
-				title, body, ref, t.UnixMilli()+12*3600*1000, time.Now().UnixMilli()); err != nil {
-				return written, err
-			}
-		}
-		written++
-	}
-	return written, nil
 }

@@ -90,6 +90,7 @@
         </activity-alias>
 
         <receiver android:name=".notify.MuteReceiver" android:exported="false" />
+        <receiver android:name=".sync.PassiveFixReceiver" android:exported="false" />
 
         <!-- ghost.phrased , the phrase you need now, on the lock screen and as a widget. -->
         <!-- The widget's own settings screen: opacity, size, lines, tint. Exported for the launcher,

@@ -139,4 +139,38 @@ class WebSearchTest {
         assertTrue(WebSearch.Engine("brave", "k").brave)
         assertTrue(!WebSearch.Engine("brave", "").brave)
     }
+
+    @Test fun paragraphsWorthSendingAndThePlan() {
+        // the box's plan: the first two searches run, the rest wait for a second round
+        val plan = WebSearch.Plan(true, "the price of a freddo in Athens", "number", true, listOf("freddo price athens 2026", "freddo espresso price", "coffee prices greece"))
+        assertEquals(listOf("freddo price athens 2026", "freddo espresso price"), plan.first)
+        assertEquals(listOf("coffee prices greece"), plan.spare)
+        assertTrue(WebSearch.Plan(false, "", "prose", false, emptyList()).first.isEmpty())
+        // the paragraphs worth sending: the ones with the question's words, the first one, the
+        // description, back in page order, bounded
+        val paras = ArrayList<String>()
+        paras.add("Welcome to our guide to Athens, the capital of Greece and a city of coffee drinkers, first paragraph of the page.")
+        for (i in 0 until 30) paras.add("Filler paragraph number $i about something else entirely, long enough to have counted as prose on the page.")
+        paras.add("A freddo espresso costs between three and four euros in the centre of Athens this year, more on the islands.")
+        paras.add("The price of a cappuccino freddo is a little higher than the espresso version, around four euros in Athens.")
+        val page = WebSearch.Page("t", "Coffee prices in Athens explained.", "", paras)
+        val terms = WebSearch.terms("how much is a freddo espresso in athens") + WebSearch.terms(plan.need)
+        val sent = page.worthSending(terms)
+        assertTrue(sent.size <= 13) // 12 paragraphs plus the description
+        assertEquals("Coffee prices in Athens explained.", sent[0])
+        assertTrue(sent[1].startsWith("Welcome to our guide")) // the first paragraph always comes
+        assertTrue(sent.any { it.startsWith("A freddo espresso costs") } && sent.any { it.startsWith("The price of a cappuccino") })
+        // page order kept: the freddo paragraphs come after the first paragraph, espresso before cappuccino
+        assertTrue(sent.indexOfFirst { it.startsWith("A freddo") } < sent.indexOfFirst { it.startsWith("The price of a cappuccino") })
+        assertTrue(sent.sumOf { it.length } <= 6000 + 1200)
+        // an empty page sends its description only
+        assertEquals(listOf("d"), WebSearch.Page("t", "d", "", emptyList()).worthSending(terms))
+        // merge: by URL, the first round's order, the new ones after
+        val a = WebSearch.Hit("A", "https://a", "", kind = "page")
+        val b = WebSearch.Hit("B", "https://b", "")
+        val b2 = WebSearch.Hit("B again", "https://b", "")
+        val c = WebSearch.Hit("C", "https://c", "")
+        val m = WebSearch.merge(listOf(a, b), listOf(b2, c))
+        assertEquals(listOf("A", "B", "C"), m.map { it.title })
+    }
 }

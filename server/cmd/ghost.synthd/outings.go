@@ -7,8 +7,9 @@ package main
 // writes one memory per outing (kind='outing', source_ref='outing:<day>', body from a template
 // over real numbers, meta as JSON for the app's cards). Then the TASTE: which tags recur across
 // the days with a camera out, folded onto the fixed interests, written to settings for /v1/taste
-// and /v1/nearby. No model call anywhere: a memory of a trip exists the week it happened,
-// whether or not a GPU is alive; the model may polish prose later. User edits and tombstones
+// and /v1/nearby. No model call HERE: a memory of a trip exists the week it happened, whether or
+// not a GPU is alive; prosePass (prose.go) has the model write it from the facts afterwards, and
+// this pass keeps that text as long as the facts it was written from stand. User edits and tombstones
 // outrank regeneration, the standing rule; outings that dissolve on a re-clustering (a merge, a
 // split) are removed unless the person touched them.
 
@@ -99,7 +100,7 @@ func outingPass(db *poltergres.ReadWrite, lg *slog.Logger) (int, error) {
 		keep = append(keep, o.Ref)
 		meta, _ := json.Marshal(o)
 		title, body := o.Title(), o.Body()
-		ex, qerr := db.Query("SELECT id, user_edited, tombstoned, body FROM memories WHERE kind = 'outing' AND source_ref = $1", o.Ref)
+		ex, qerr := db.Query("SELECT id, user_edited, tombstoned, body, coalesce(meta->>'template',''), coalesce(meta->>'prose','') FROM memories WHERE kind = 'outing' AND source_ref = $1", o.Ref)
 		if qerr != nil {
 			return written, qerr
 		}
@@ -108,20 +109,37 @@ func outingPass(db *poltergres.ReadWrite, lg *slog.Logger) (int, error) {
 			if (len(v) > 1 && v[1] != nil && *v[1] == "t") || (len(v) > 2 && v[2] != nil && *v[2] == "t") {
 				continue // the person's version outranks the machine's, forever
 			}
-			if len(v) > 3 && v[3] != nil && *v[3] == body {
-				// unchanged prose; refresh the meta only (covers, tags) without churning updated_at
-				if err := db.Exec("UPDATE memories SET meta = $1::jsonb WHERE id = $2", string(meta), *v[0]); err != nil {
+			oldTemplate, prose := "", ""
+			if len(v) > 4 && v[4] != nil {
+				oldTemplate = *v[4]
+			}
+			if len(v) > 5 && v[5] != nil {
+				prose = *v[5]
+			}
+			if prose != "" && oldTemplate == body {
+				// the model wrote this one from these same facts: keep its text, refresh the meta
+				// (covers, tags) and carry the prose and template along
+				if err := db.Exec("UPDATE memories SET meta = $1::jsonb || jsonb_build_object('template', $2::text, 'prose', $3::text) WHERE id = $4", string(meta), body, prose, *v[0]); err != nil {
 					return written, err
 				}
 				continue
 			}
-			if err := db.Exec("UPDATE memories SET title = $1, body = $2, meta = $3::jsonb, updated_at = $4 WHERE id = $5",
+			if len(v) > 3 && v[3] != nil && *v[3] == body {
+				// unchanged prose; refresh the meta only (covers, tags) without churning updated_at
+				if err := db.Exec("UPDATE memories SET meta = $1::jsonb || jsonb_build_object('template', $2::text) WHERE id = $3", string(meta), body, *v[0]); err != nil {
+					return written, err
+				}
+				continue
+			}
+			// the facts changed (new photos, a re-clustering): the template stands until the
+			// model writes it again (prosePass finds it without 'prose')
+			if err := db.Exec("UPDATE memories SET title = $1, body = $2, meta = $3::jsonb || jsonb_build_object('template', $2::text), updated_at = $4 WHERE id = $5",
 				title, body, string(meta), now, *v[0]); err != nil {
 				return written, err
 			}
 		} else {
 			if err := db.Exec(
-				"INSERT INTO memories (title, body, kind, source_ref, meta, created_at, updated_at) VALUES ($1,$2,'outing',$3,$4::jsonb,$5,$6)",
+				"INSERT INTO memories (title, body, kind, source_ref, meta, created_at, updated_at) VALUES ($1,$2,'outing',$3,$4::jsonb || jsonb_build_object('template', $2::text),$5,$6)",
 				title, body, o.Ref, string(meta), o.End*1000, now); err != nil {
 				return written, err
 			}

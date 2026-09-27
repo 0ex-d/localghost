@@ -248,6 +248,9 @@ object BoxClient {
         /** A line from the box about the wait itself ("reading 1,300 words of context on the CPU ,
          *  about 35s before the first word"), shown until the first word arrives. */
         data class Status(val text: String) : ChatChunk
+        /** The box read the findings, found them thin, and asks for these searches before it
+         *  answers (one more round; the caller re-asks with round 2). The stream ends after it. */
+        data class More(val queries: List<String>, val why: String) : ChatChunk
         data object Done : ChatChunk
     }
 
@@ -262,6 +265,9 @@ object BoxClient {
         imageB64: String = "",
         web: org.json.JSONArray? = null, // what the phone found on the web for this question; the box adds it as labelled context
         here: Pair<Double, Double>? = null, // the phone's last fix when recent: "near here" means somewhere, against the box's own map data
+        need: String = "",                 // what the box's model said the question needs (chatPlan); the box ranks the pages' paragraphs against it
+        round: Int = 0,                    // 1 on the first ask with findings, 2 after the box asked for more
+        spare: List<String> = emptyList(), // the plan's searches not run yet, for the box to ask for
     ): Flow<ChatChunk> = kotlinx.coroutines.flow.channelFlow {
         // REAL STREAMING end-to-end: app -> secd -> ghost.synthd (context injection + transparency)
         // -> ghost.oracled -> llama-server, tokens flowing back as they generate. Event protocol,
@@ -292,6 +298,9 @@ object BoxClient {
                     .apply { if (historyJson.length() > 0) put("history", historyJson) }
                     .apply { if (imageB64.isNotBlank()) put("imageB64", imageB64) }
                     .apply { if (web != null && web.length() > 0) put("web", web) }
+                    .apply { if (need.isNotBlank()) put("need", need) }
+                    .apply { if (round > 0) put("round", round) }
+                    .apply { if (spare.isNotEmpty()) put("spare", org.json.JSONArray(spare)) }
                     .apply { if (here != null) put("here", org.json.JSONObject().put("lat", here.first).put("lon", here.second)) }) { line ->
                 if (!line.startsWith("data: ")) return@postStreamLines true
                 val o = try { org.json.JSONObject(line.removePrefix("data: ")) } catch (_: Exception) { return@postStreamLines true }
@@ -309,6 +318,12 @@ object BoxClient {
                             if (mems.isNotEmpty()) channel.trySendBlocking(ChatChunk.Memories(mems))
                         }
                         o.optString("note").takeIf { it.isNotBlank() }?.let { channel.trySendBlocking(ChatChunk.Status(it)) }
+                        true
+                    }
+                    o.has("more") -> {
+                        val m = o.optJSONObject("more")
+                        val qs = m?.optJSONArray("queries")?.let { a -> (0 until a.length()).map { a.optString(it) }.filter { it.isNotBlank() } } ?: emptyList()
+                        if (qs.isNotEmpty()) channel.trySendBlocking(ChatChunk.More(qs, m?.optString("why") ?: ""))
                         true
                     }
                     o.has("r") -> { channel.trySendBlocking(ChatChunk.Reasoning(o.optString("r"))); true }
@@ -714,10 +729,11 @@ object BoxClient {
     } catch (_: Exception) { null }
 
     data class OtdYear(val year: Int, val yearsAgo: Int, val narrative: String,
-        val places: List<String>, val photos: List<String>, val notes: List<String>)
+        val places: List<String>, val photos: List<String>, val notes: List<String>,
+        val title: String = "", val line: String = "")
 
-    /** The On This Day retrospective , synthd-composed, cached on the box. First build of a day
-     *  narrates through the model and can take a minute; cached calls are instant. */
+    /** The On This Day retrospective , read from the box's prebuilt day summaries (no model at
+     *  request time); years the backfill has not reached yet come with photos and places only. */
     suspend fun onThisDay(ctx: Context): List<OtdYear>? = try {
         val r = BoxHttp.getJson(ctx, "/v1/onthisday")
         val a = r.optJSONArray("years") ?: return emptyList()
@@ -726,7 +742,7 @@ object BoxClient {
             fun arr(k: String): List<String> { val x = o.optJSONArray(k) ?: return emptyList()
                 return (0 until x.length()).map { x.optString(it) } }
             OtdYear(o.optInt("year"), o.optInt("years_ago"), o.optString("narrative"),
-                arr("places"), arr("photos"), arr("notes"))
+                arr("places"), arr("photos"), arr("notes"), o.optString("title"), o.optString("line"))
         }
     } catch (e: Exception) { android.util.Log.w("LocalGhost", "onthisday: ${e.message}"); null }
 
@@ -938,6 +954,29 @@ object BoxClient {
         (0 until a.length()).map { a.optString(it) }
     } catch (_: Exception) { null }
 
+    /** Ask the box's model what a question needs from the web before the phone searches
+     *  (/v1/chat/plan). Null when the box cannot say (old box, model busy, {"ok":false}) , the
+     *  phone then plans by itself, as it always did. Bounded to a few seconds: a plan that takes
+     *  longer than the search it saves is not worth waiting for. */
+    suspend fun chatPlan(ctx: Context, prompt: String, history: List<Message>, timeoutMs: Long = 9000): WebSearch.Plan? =
+        kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
+            try {
+                val hist = org.json.JSONArray().apply {
+                    history.filter { it.text.isNotBlank() }.takeLast(4).forEach { m ->
+                        put(org.json.JSONObject().put("role", if (m.role == Message.Role.USER) "user" else "assistant").put("content", m.text.take(600)))
+                    }
+                }
+                val r = BoxHttp.postJson(ctx, "/v1/chat/plan", org.json.JSONObject().put("prompt", prompt).apply { if (hist.length() > 0) put("history", hist) })
+                if (!r.optBoolean("ok", false)) null
+                else {
+                    val qs = r.optJSONArray("queries")?.let { a -> (0 until a.length()).map { a.optString(it) }.filter { it.isNotBlank() } } ?: emptyList()
+                    WebSearch.Plan(r.optBoolean("search", true), r.optString("need", ""), r.optString("shape", "prose"), r.optBoolean("fresh", false), qs)
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("LocalGhost", "chat plan: ${e.message}"); null
+            }
+        }
+
     /** The newest N day tracks in ONE round trip, each an ordered list of lat/lon pairs. Null when
      *  the box predates /v1/geo/tracks (the caller falls back to days + one fetch per day). */
     suspend fun geoTracks(ctx: Context, limit: Int = 14): List<Pair<String, List<Pair<Double, Double>>>>? = try {
@@ -959,10 +998,51 @@ object BoxClient {
 
     /** One day of the trail as the box has it: the simplified line with, from boxes at or past the
      *  times build, a clock per vertex and the day's distance over the raw points. */
-    data class DayTrack(val day: String, val lat: DoubleArray, val lon: DoubleArray, val times: LongArray, val distanceM: Double, val glitches: Int = 0) {
+    data class DayTrack(val day: String, val lat: DoubleArray, val lon: DoubleArray, val times: LongArray, val distanceM: Double, val glitches: Int = 0,
+                        val line: String = "", val walkM: Double = 0.0, val rideM: Double = 0.0, val stays: Int = 0) {
         val n: Int get() = lat.size
         val hasTimes: Boolean get() = times.size == lat.size && lat.isNotEmpty()
     }
+
+    /** A stay of the day route: time spent in one place, named by the box when it can. */
+    data class RouteStay(val name: String, val kind: String, val lat: Double, val lon: Double, val from: Long, val to: Long, val fixes: Int, val photos: Int)
+
+    /** A move of the day route: "walk" along the streets where the box has them (routed hops), or
+     *  "ride" as straight lines between the fixes. [lat]/[lon] is the path to draw. */
+    data class RouteMove(val mode: String, val from: Long, val to: Long, val meters: Double, val chordM: Double, val routed: Int, val hops: Int,
+                         val lat: DoubleArray, val lon: DoubleArray, val photos: Int, val kmh: Double)
+
+    /** The day told as stays and moves (/v1/geo/route; internal/dayroute on the box). */
+    data class DayRoute(val day: String, val stays: List<RouteStay>, val moves: List<RouteMove>, val walkM: Double, val rideM: Double,
+                        val fixes: Int, val photos: Int, val steps: Double, val note: String, val line: String)
+
+    /** One day's route; null when the box has not told that day (404) or predates the route. */
+    suspend fun dayRoute(ctx: Context, day: String): DayRoute? = try {
+        val r = BoxHttp.getJson(ctx, "/v1/geo/route?d=$day")
+        if (!r.has("stays") && !r.has("moves")) null
+        else {
+            val st = r.optJSONArray("stays") ?: org.json.JSONArray()
+            val stays = (0 until st.length()).mapNotNull { i ->
+                val o = st.optJSONObject(i) ?: return@mapNotNull null
+                RouteStay(o.optString("name", ""), o.optString("kind", ""), o.optDouble("lat"), o.optDouble("lon"),
+                    o.optLong("from"), o.optLong("to"), o.optInt("fixes"), o.optInt("photos"))
+            }
+            val mv = r.optJSONArray("moves") ?: org.json.JSONArray()
+            val moves = (0 until mv.length()).mapNotNull { i ->
+                val o = mv.optJSONObject(i) ?: return@mapNotNull null
+                val p = o.optJSONArray("path") ?: org.json.JSONArray()
+                val lat = DoubleArray(p.length()); val lon = DoubleArray(p.length())
+                for (j in 0 until p.length()) {
+                    val q = p.optJSONArray(j) ?: return@mapNotNull null
+                    lat[j] = q.optDouble(0); lon[j] = q.optDouble(1)
+                }
+                RouteMove(o.optString("mode", "walk"), o.optLong("from"), o.optLong("to"), o.optDouble("meters", 0.0), o.optDouble("chordM", 0.0),
+                    o.optInt("routed"), o.optInt("hops"), lat, lon, o.optInt("photos"), o.optDouble("kmh", 0.0))
+            }
+            DayRoute(r.optString("day", day), stays, moves, r.optDouble("walkM", 0.0), r.optDouble("rideM", 0.0),
+                r.optInt("fixes"), r.optInt("photos"), r.optDouble("steps", 0.0), r.optString("note", ""), r.optString("line", ""))
+        }
+    } catch (_: Exception) { null }
 
     /** The newest [limit] day tracks with their times and distances; null on a box that predates
      *  /v1/geo/tracks (the map then walks the per-day feed as before). */
@@ -981,7 +1061,8 @@ object BoxClient {
                 }
                 val t = o.optJSONArray("times")
                 val times = if (t != null && t.length() == c.length()) LongArray(t.length()) { t.optLong(it) } else LongArray(0)
-                DayTrack(o.optString("day", ""), lat, lon, times, o.optDouble("distanceM", 0.0).let { if (it.isNaN()) 0.0 else it }, o.optInt("glitches", 0))
+                DayTrack(o.optString("day", ""), lat, lon, times, o.optDouble("distanceM", 0.0).let { if (it.isNaN()) 0.0 else it }, o.optInt("glitches", 0),
+                    o.optString("line", ""), o.optDouble("walkM", 0.0), o.optDouble("rideM", 0.0), o.optInt("stays", 0))
             }
         }
     } catch (_: Exception) { null }

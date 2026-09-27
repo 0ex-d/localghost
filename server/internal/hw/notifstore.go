@@ -1054,6 +1054,61 @@ type MemoryRow struct {
 	Meta      json.RawMessage `json:"meta,omitempty"` // kind='outing': the structured detail synthd computed
 }
 
+// DayRow is one prebuilt day summary (ghost.synthd's day_summaries) as the app reads it.
+type DayRow struct {
+	Day       string          `json:"day"`
+	Title     string          `json:"title"`
+	Summary   string          `json:"summary"`
+	WrittenBy string          `json:"writtenBy"`
+	BuiltAt   int64           `json:"builtAt"`
+	Facts     json.RawMessage `json:"facts,omitempty"` // the sheet: photos, covers, places, tags, the route, health, notes
+}
+
+// DaysList returns day summaries newest first, before a day (exclusive; "" = the newest), up to limit.
+func (s *NotifStore) DaysList(slot int, before string, limit int) ([]DayRow, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > 400 {
+		limit = 60
+	}
+	q := "SELECT day, title, summary, written_by, built_at, facts::text FROM day_summaries WHERE summary <> ''"
+	args := []any{}
+	if before != "" {
+		q += " AND day < $1"
+		args = append(args, before)
+	}
+	rows, err := c.Query(q+" ORDER BY day DESC LIMIT "+strconv.Itoa(limit), args...)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]DayRow, 0, len(rows.Vals))
+	for _, v := range rows.Vals {
+		if len(v) < 6 || v[0] == nil {
+			continue
+		}
+		d := DayRow{Day: *v[0]}
+		if v[1] != nil {
+			d.Title = *v[1]
+		}
+		if v[2] != nil {
+			d.Summary = *v[2]
+		}
+		if v[3] != nil {
+			d.WrittenBy = *v[3]
+		}
+		if v[4] != nil {
+			d.BuiltAt, _ = strconv.ParseInt(*v[4], 10, 64)
+		}
+		if v[5] != nil && json.Valid([]byte(*v[5])) {
+			d.Facts = json.RawMessage(*v[5])
+		}
+		out = append(out, d)
+	}
+	return out, nil
+}
+
 // MemoriesList returns live (non-tombstoned) memories, newest first.
 func (s *NotifStore) MemoriesList(slot int, limit int) ([]MemoryRow, error) {
 	c, err := s.pg(slot)

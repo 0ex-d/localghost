@@ -60,6 +60,11 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			Lat float64 `json:"lat"`
 			Lon float64 `json:"lon"`
 		} `json:"here,omitempty"`
+		// The smarter search's fields (synthd websmart.go): what the model said the question
+		// needs, which round this is, the plan's searches not run yet. Bounded, forwarded.
+		Need  string   `json:"need,omitempty"`
+		Round int      `json:"round,omitempty"`
+		Spare []string `json:"spare,omitempty"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 16<<20)).Decode(&req); err != nil || req.Prompt == "" {
 		s.appearsDown(w)
@@ -76,8 +81,26 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if len(req.History) > 0 && len(req.History) <= 64<<10 {
 		fwd["history"] = req.History
 	}
-	if len(req.Web) > 0 && len(req.Web) <= 32<<10 {
+	// the phone sends each read page's paragraphs now, not one excerpt: a few pages of prose
+	if len(req.Web) > 0 && len(req.Web) <= 256<<10 {
 		fwd["web"] = req.Web
+	}
+	if len(req.Need) > 0 && len(req.Need) <= 400 {
+		fwd["need"] = req.Need
+	}
+	if req.Round > 0 && req.Round <= 3 {
+		fwd["round"] = req.Round
+	}
+	if n := len(req.Spare); n > 0 && n <= 3 {
+		ok := true
+		for _, q := range req.Spare {
+			if len(q) > 160 {
+				ok = false
+			}
+		}
+		if ok {
+			fwd["spare"] = req.Spare
+		}
 	}
 	if h := req.Here; h != nil && h.Lat >= -90 && h.Lat <= 90 && h.Lon >= -180 && h.Lon <= 180 {
 		fwd["here"] = map[string]float64{"lat": h.Lat, "lon": h.Lon}
@@ -128,4 +151,55 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	secdLog.Info("chat streamed", "fn", "handleChat", "took", time.Since(t0).Round(time.Millisecond).String())
+}
+
+// handleChatPlan , POST /v1/chat/plan {prompt, history} → {ok, search, need, shape, fresh,
+// queries}: the model's statement of what a question needs from the web, so the phone searches
+// for the right thing. A plain JSON answer, not a stream; {"ok":false} tells the phone to plan by
+// itself. Same session rule and appears-down as /v1/chat.
+func (s *Server) handleChatPlan(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodPost {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	var req struct {
+		Prompt  string          `json:"prompt"`
+		History json.RawMessage `json:"history,omitempty"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 256<<10)).Decode(&req); err != nil || req.Prompt == "" || len(req.Prompt) > 4000 {
+		s.appearsDown(w)
+		return
+	}
+	fwd := map[string]any{"prompt": req.Prompt}
+	if len(req.History) > 0 && len(req.History) <= 64<<10 {
+		fwd["history"] = req.History
+	}
+	body, _ := json.Marshal(fwd)
+	runDir := fmt.Sprintf("%s/mnt/slot%d/run", s.cfg.StateDir, mounted)
+	up, err := http.NewRequestWithContext(r.Context(), http.MethodPost, "http://ghost/plan", bytes.NewReader(body))
+	if err != nil {
+		s.appearsDown(w)
+		return
+	}
+	up.Header.Set("Content-Type", "application/json")
+	resp, err := streamsock.Client("ghost.synthd", runDir).Do(up)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		// no plan is not "down": the phone plans by itself
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":false}`))
+		if resp != nil {
+			resp.Body.Close()
+		}
+		return
+	}
+	defer resp.Body.Close()
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = io.Copy(w, io.LimitReader(resp.Body, 64<<10))
 }

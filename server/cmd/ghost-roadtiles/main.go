@@ -24,6 +24,7 @@ func main() {
 	work := flag.String("work", "", "scratch directory (default <out>.work)")
 	workers := flag.Int("workers", 0, "PBF decoding goroutines (0 = CPUs)")
 	bufMB := flag.Int("buffer-mb", 512, "cell buffers held in memory before flushing")
+	noGraph := flag.Bool("no-graph", false, "tiles only, no routing graph (the day route then draws chords)")
 	flag.Parse()
 	files := flag.Args()
 	if *in != "" {
@@ -34,7 +35,7 @@ func main() {
 		os.Exit(2)
 	}
 	st, err := roadtiles.Build(files, *out, roadtiles.Options{
-		Workers: *workers, Work: *work, BufferMB: *bufMB,
+		Workers: *workers, Work: *work, BufferMB: *bufMB, NoGraph: *noGraph,
 		Progress: func(s string) { fmt.Fprintf(os.Stderr, "  %s roads: %s\n", time.Now().Format("15:04:05"), s) },
 	})
 	if err != nil {

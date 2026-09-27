@@ -221,6 +221,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/frames/newest", s.handleFramesNewest)        // map's opening view
 	mux.HandleFunc("/v1/geo/days", s.handleGeoDays)                  // which day tracks exist
 	mux.HandleFunc("/v1/geo/tracks", s.handleGeoTracks)              // newest N day tracks in one answer
+	mux.HandleFunc("/v1/geo/route", s.handleGeoRoute)                // one day as stays and moves along the streets (?d=)
 	mux.HandleFunc("/v1/geo/day", s.handleGeoDay)                    // one day's track, as framed wrote it          // operator-provided base-map GeoJSON
 	mux.HandleFunc("/v1/memories", s.handleMemories)                 // the distilled corpus, live rows
 	mux.HandleFunc("/v1/memories/delete", s.handleMemoryDelete)      // tombstone: deletion outranks the model
@@ -229,7 +230,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/taste", s.handleTaste)                       // what the photos say you like (synthd's outing pass)
 	mux.HandleFunc("/v1/nearby", s.handleNearby)                     // places around you that fit the taste, from the box's own geo data
 	mux.HandleFunc("/v1/notes", s.handleNoteAdd)                     // app -> noted inbox -> journal
-	mux.HandleFunc("/v1/onthisday", s.handleOnThisDay)               // synthd's retrospective, cached per day
+	mux.HandleFunc("/v1/onthisday", s.handleOnThisDay)               // synthd's retrospective, from the prebuilt days
+	mux.HandleFunc("/v1/days", s.handleDays)                         // the prebuilt day summaries, newest first (?before&limit)
 	mux.HandleFunc("/v1/devices/name", s.handleDeviceName)           // a device names itself
 	mux.HandleFunc("/v1/devices", s.handleDevices)                   // enrolled phones, honest stats
 	mux.HandleFunc("/v1/sync/reset", s.handleSyncReset)              // rewind this device's cursors
@@ -241,6 +243,7 @@ func (s *Server) Handler() http.Handler {
 	// grep before you claim one.
 	mux.HandleFunc("/v1/health/stats", s.handleHealthStats) // daily series per metric
 	mux.HandleFunc("/v1/chat", s.handleChat)                // ask the box's model (via synthd's retrieval seam)
+	mux.HandleFunc("/v1/chat/plan", s.handleChatPlan)       // what the question needs from the web, from the model, before the phone searches
 	mux.HandleFunc("/v1/locations", s.handleLocations)
 	mux.HandleFunc("/v1/models", s.handleModels)
 	mux.HandleFunc("/v1/models/", s.handleModelBytes) // /v1/models/{id}

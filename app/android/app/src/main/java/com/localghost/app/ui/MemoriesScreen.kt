@@ -332,6 +332,13 @@ private fun OtdYearCard(y: BoxClient.OtdYear) {
     Column(Modifier.fillMaxWidth().animateContentSize().border(1.dp, GhostBorder, RectangleShape).background(Void).padding(12.dp)) {
         Text("${y.year} , ${if (y.yearsAgo == 1) "1 year" else "${y.yearsAgo} years"} ago",
             color = TerminalGreen, style = MaterialTheme.typography.bodyMedium)
+        // the day's title as the box built it (weekday, date, the places), then its route in a line
+        if (y.title.isNotBlank()) {
+            Text(y.title, color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+        }
+        if (y.line.isNotBlank()) {
+            Text(y.line, color = TerminalDim, style = MaterialTheme.typography.labelMedium)
+        }
         if (y.narrative.isNotBlank()) {
             Spacer(Modifier.height(4.dp))
             Text(y.narrative, color = GhostText, style = MaterialTheme.typography.bodySmall)
@@ -393,8 +400,8 @@ private fun MemoryRowCard(m: BoxClient.MemRow, onEdit: (String, String) -> Unit,
                         modifier = Modifier.clickable { confirmDel = true })
                 }
             }
-            // AN OUTING carries its photos: the cover frames synthd picked, spread across the days.
-            if (m.kind == "outing" && m.covers.isNotEmpty()) {
+            // AN OUTING (or a DAY) carries its photos: the cover frames synthd picked, spread across it.
+            if ((m.kind == "outing" || m.kind == "day") && m.covers.isNotEmpty()) {
                 Spacer(Modifier.height(8.dp))
                 CoverStrip(m.covers)
             }
@@ -407,6 +414,7 @@ private fun MemoryRowCard(m: BoxClient.MemRow, onEdit: (String, String) -> Unit,
             val origin = when (m.kind) {
                 "user" -> "yours"
                 "outing" -> if (line != null) "from your photos · $line" else "from your photos"
+                "day" -> m.meta?.optString("line")?.takeIf { it.isNotBlank() }?.let { "a day, from your trail and photos · $it" } ?: "a day, from your trail and photos"
                 "episode" -> "a day"
                 else -> "distilled"
             }
