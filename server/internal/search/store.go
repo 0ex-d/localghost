@@ -462,6 +462,45 @@ func (s *Store) CompleteJob(id int64) error {
 	return s.db.Exec("DELETE FROM search.jobs WHERE id = $1", id)
 }
 
+// EnqueueReembed queues embed jobs for every chunk whose vector came from another model than
+// modelID, in batches of 64 chunk ids (the embed job's shape). It does nothing while embed jobs are
+// still queued (a re-embed in progress survives a restart without being queued twice) and returns
+// how many chunks it queued.
+func (s *Store) EnqueueReembed(modelID string) (int, error) {
+	if !validModelID(modelID) {
+		return 0, fmt.Errorf("bad model id %q", modelID)
+	}
+	rows, err := s.db.Query("SELECT count(*) FROM search.jobs WHERE kind = 'embed_text' AND attempts < 5")
+	if err != nil {
+		return 0, err
+	}
+	if len(rows.Vals) > 0 && rows.Vals[0][0] != nil && *rows.Vals[0][0] != "0" {
+		return 0, nil
+	}
+	rows, err = s.db.Query("SELECT id FROM search.chunks WHERE emb IS NOT NULL AND emb_model IS DISTINCT FROM $1 AND NOT stale ORDER BY id", modelID)
+	if err != nil {
+		return 0, err
+	}
+	ids := make([]int64, 0, len(rows.Vals))
+	for _, v := range rows.Vals {
+		if len(v) > 0 && v[0] != nil {
+			if id, perr := strconv.ParseInt(*v[0], 10, 64); perr == nil {
+				ids = append(ids, id)
+			}
+		}
+	}
+	for start := 0; start < len(ids); start += 64 {
+		end := start + 64
+		if end > len(ids) {
+			end = len(ids)
+		}
+		if err := s.EnqueueJob("embed_text", map[string]any{"chunkIds": ids[start:end]}); err != nil {
+			return start, err
+		}
+	}
+	return len(ids), nil
+}
+
 // UnparkJobs resets PARKED jobs (attempts >= 5, permanently dead to ClaimJob) so the worker claims
 // them again. The parking rule protects the queue from a poison job retrying forever; it has no
 // answer for the OTHER cause of five failures , an environment that was broken and is now fixed (a

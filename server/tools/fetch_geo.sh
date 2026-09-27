@@ -2,7 +2,8 @@
 # fetch_geo.sh <dest-dir> , downloads the public geodata the box geocodes and draws maps with:
 # GeoNames (CC-BY: allCountries + admin1/admin2 code names + countryInfo), the Natural Earth
 # countries GeoJSON (public domain) and OpenStreetMap's coastline (ODbL), from the localghost.ai
-# mirror when it answers and from each upstream otherwise. ~400MB compressed, one-time, at SETUP , before any
+# mirror and nowhere else (GHOST_MIRROR_UPSTREAM=1: each upstream, on the operator's own authority).
+# ~400MB compressed, one-time, at SETUP , before any
 # personal data exists, so the only thing revealed is "this IP provisioned a box once", the same
 # class of disclosure as the apt installs setup already performs. NEVER run this against personal
 # coordinates or from a running box's context; the whole point of on-box geocoding is that photo
@@ -38,9 +39,25 @@ get() { # get <url> <outfile>
 # manifest signed by the site key. tools/mirror_fetch.sh checks the signature against
 # tools/mirror-key.asc (committed in this repo, pinned by fingerprint), then every file's hash, before
 # anything lands here: a web host that was broken into can make it fail, never make it install
-# something else. Whatever the mirror does not deliver, the upstream downloads below still fetch.
-# GHOST_MIRROR=<url> points at another copy (a LAN mirror); GHOST_MIRROR=off skips it.
+# something else. What the mirror does not deliver (unreachable, or a set not published yet) is SAID
+# and left out: a box never takes a file that was not in a signed manifest. The upstream downloads
+# below run only with GHOST_MIRROR_UPSTREAM=1, the operator's explicit, loud exception. Each set
+# (geo, landpolygons, roads) stands alone: one missing does not stop the others.
+# GHOST_MIRROR=<url> points at another copy (a LAN mirror, or file:///media/usb/mirror).
 HERE="$(cd "$(dirname "$0")" && pwd)"
+UPSTREAM="${GHOST_MIRROR_UPSTREAM:-}"
+# why_not <rc> <set> , the one line that says why a set did not come from the mirror
+why_not() {
+    case "$1" in
+        3) echo "  geo: set $2 is not on the mirror (not published yet, or GHOST_MIRROR=off; the line above says which)" ;;
+        *) echo "  geo: set $2 could not be taken from the mirror (the lines above say why; a rerun resumes)" ;;
+    esac
+    if [ "$UPSTREAM" = 1 ]; then
+        echo "  geo: !! GHOST_MIRROR_UPSTREAM=1: taking $2 from its upstream instead , NOT checked against a signed manifest"
+    else
+        echo "        nothing taken from the upstreams (GHOST_MIRROR_UPSTREAM=1 would, on your own authority)"
+    fi
+}
 FETCH="$HERE/mirror_fetch.sh"
 TILES="${GHOST_TILES_DIR:-$(dirname "$DEST")/landtiles}"
 CUT="${GHOST_LANDTILES:-$HERE/../bin/ghost-landtiles}"
@@ -52,10 +69,7 @@ geo_missing() {
     return 1
 }
 rc=0
-if [ "${GHOST_MIRROR:-}" = off ]; then
-    echo "  geo: mirror off (GHOST_MIRROR=off) , straight to the upstreams"
-    rc=3
-elif [ -n "$FORCE" ] || geo_missing; then
+if [ -n "$FORCE" ] || geo_missing; then
     STAGE="$DEST/.mirror-dl"
     sh "$FETCH" geo "$STAGE"
     rc=$?
@@ -71,13 +85,14 @@ elif [ -n "$FORCE" ] || geo_missing; then
         0) MIRROR_GEO=1
            rm -rf "$STAGE"
            echo "  geo: GeoNames + Natural Earth from the mirror, signature and hashes checked (terms beside them)" ;;
-        3) rm -rf "$STAGE"
-           echo "  geo: the mirror has nothing for this box (the line above says why) , straight to the upstreams" ;;
-        *) echo "  geo: the mirror did not deliver all of it , the upstreams below fetch what is missing" ;;
+        3) rm -rf "$STAGE"; why_not 3 geo ;;
+        *) why_not "$rc" geo ;;
     esac
+else
+    MIRROR_GEO=1   # all here already
 fi
 
-if [ "$MIRROR_GEO" = 0 ]; then
+if [ "$MIRROR_GEO" = 0 ] && [ "$UPSTREAM" = 1 ]; then
     for f in admin1CodesASCII.txt admin2Codes.txt countryInfo.txt; do
         if [ -s "$DEST/$f" ] && [ -z "$FORCE" ]; then
             echo "  geo: $f already present (GHOST_GEO_REFRESH=1 to re-fetch)"
@@ -123,10 +138,11 @@ if [ "$MIRROR_GEO" = 0 ]; then
     done
 fi
 
-# THE ROADS. OpenStreetMap's roads, from Geofabrik's continent extracts (set `roads` on the mirror,
-# Geofabrik itself as the fallback; ODbL), cut on the box into the map's road tiles , major roads in
+# THE ROADS. OpenStreetMap's roads, Geofabrik's continent extracts (set `roads` on the mirror; ODbL), cut on the box into the map's road tiles , major roads in
 # one-degree cells, every road with its name in tenth-of-a-degree cells , by bin/ghost-roadtiles
-# here, or by ghost.framed at its next start (also: ghost-cli ghost.framed road-tiles). The whole
+# here, or by ghost.framed at its next start (also: ghost-cli ghost.framed road-tiles). The mirror
+# carries the continents it was asked to (roads are published by hand); Geofabrik only with
+# GHOST_MIRROR_UPSTREAM=1. The whole
 # world is about 70 GB of PBF and hours of cutting, so it is ASKED FOR, not assumed:
 #   GHOST_GEO_ROADS=all                                        every continent
 #   GHOST_GEO_ROADS="europe-latest.osm.pbf asia-latest.osm.pbf"   these files
@@ -153,12 +169,16 @@ else
             got=$((got + 1))
             continue
         fi
-        if [ "$rc" != 3 ] && sh "$FETCH" roads "$ROADS" "$f" && [ -s "$ROADS/$f" ]; then
+        frc=0; sh "$FETCH" roads "$ROADS" "$f" || frc=$?
+        if [ "$frc" = 0 ] && [ -s "$ROADS/$f" ]; then
             got=$((got + 1))
             echo "  geo: $f from the mirror, signature and hash checked"
-        elif curl -fL --retry 3 --retry-delay 5 -C - --progress-bar -o "$ROADS/.$f.part" "$GEOFABRIK/$f" && mv -f "$ROADS/.$f.part" "$ROADS/$f"; then
+            continue
+        fi
+        why_not "$frc" "roads ($f)"
+        if [ "$UPSTREAM" = 1 ] && curl -fL --proto-redir =https --retry 3 --retry-delay 5 -C - --progress-bar -o "$ROADS/.$f.part" "$GEOFABRIK/$f" && mv -f "$ROADS/.$f.part" "$ROADS/$f"; then
             got=$((got + 1))
-            echo "  geo: $f from Geofabrik"
+            echo "  geo: $f from Geofabrik (GHOST_MIRROR_UPSTREAM=1)"
         else
             missing="$missing $f"
         fi
@@ -183,8 +203,8 @@ fi
 
 # THE COASTLINE AT FULL DETAIL. Natural Earth's 10m file is the base for the world and the
 # continents; zoomed in on an island it is a smudge (Paxos is a handful of vertices). OpenStreetMap's
-# land polygons draw every cove. The mirror carries OpenStreetMap's zip as it is (set landpolygons),
-# upstream is the fallback, and the BOX cuts it into one-degree tiles the phone fetches only under its
+# land polygons draw every cove. The mirror carries OpenStreetMap's zip as it is (set landpolygons;
+# osmdata.openstreetmap.de only with GHOST_MIRROR_UPSTREAM=1), and the BOX cuts it into one-degree tiles the phone fetches only under its
 # viewport: here, with bin/ghost-landtiles (make box builds it), or else ghost.framed at its next
 # start (it cuts whenever the shapefile is newer than the tiles; `ghost-cli ghost.framed geo-tiles`
 # asks now). Several hundred MB, a few minutes and a couple of GB of RAM, once. ODbL: the map credits
@@ -202,7 +222,9 @@ else
     else
         got=0
         LST="$DEST/.mirror-lp"
-        if [ "$rc" != 3 ] && command -v unzip >/dev/null 2>&1 && sh "$FETCH" landpolygons "$LST" &&
+        command -v unzip >/dev/null 2>&1 || echo "  note: unzip is not installed (apt-get install unzip) , the land polygons cannot be unpacked"
+        lrc=0; sh "$FETCH" landpolygons "$LST" || lrc=$?
+        if [ "$lrc" = 0 ] && command -v unzip >/dev/null 2>&1 &&
            [ -s "$LST/land-polygons-complete-4326.zip" ] &&
            unzip -q -o "$LST/land-polygons-complete-4326.zip" -d "$DEST"; then
             cp "$LST"/TERMS-*.txt "$LST"/NOTICE.txt "$SHPDIR/" 2>/dev/null || true
@@ -210,7 +232,8 @@ else
             got=1
             echo "  geo: OpenStreetMap land polygons from the mirror, signature and hash checked ($(du -sh "$SHPDIR" 2>/dev/null | cut -f1))"
         fi
-        if [ "$got" = 0 ]; then
+        [ "$got" = 0 ] && [ "$lrc" != 0 ] && why_not "$lrc" landpolygons
+        if [ "$got" = 0 ] && [ "$UPSTREAM" = 1 ]; then
             if command -v unzip >/dev/null 2>&1 && get "$OSM" "$DEST/land-polygons-complete-4326.zip"; then
                 unzip -q -o "$DEST/land-polygons-complete-4326.zip" -d "$DEST" && rm -f "$DEST/land-polygons-complete-4326.zip"
                 rm -rf "$LST"

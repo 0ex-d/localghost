@@ -111,6 +111,14 @@ for svc in $CHECK; do
                 sp=$(echo "$m" | sed -n 's/.*"speed":"\([^"]*\)".*/\1/p' | head -1)
                 [ -n "$v" ] && printf '  model %s\n' "$v"
                 [ -n "$sp" ] && printf '  %s\n' "$sp"
+                # Which llama.cpp the engine was built from (setup_llama.sh records the mirror's
+                # tarball; a git checkout here means a box set up before the mirror , rerun setup_llama.sh)
+                ld=/opt/localghost/llama.cpp
+                if [ -f "$ld/.mirror-src" ]; then
+                    printf '  engine: %s (commit %.12s, from the mirror)\n' "$(cat "$ld/.mirror-src")" "$(cat "$ld/.mirror-commit" 2>/dev/null)"
+                elif [ -d "$ld/.git" ]; then
+                    printf '  engine: a git checkout of llama.cpp, not the mirror'\''s pinned source (sudo ./tools/setup_llama.sh --build-only)\n'
+                fi
                 # The model the box offers PHONES (tools/phone_model.sh): read from the system area,
                 # which is on the host, not in the volume.
                 pm="${GHOST_STATE_DIR:-/var/lib/ghost}/models/catalog.json"

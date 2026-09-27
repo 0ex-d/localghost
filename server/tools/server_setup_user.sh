@@ -116,8 +116,8 @@ if have go; then
     GO_HAVE="$(go version 2>/dev/null | grep -oE 'go[0-9.]+' | head -1 | sed 's/^go//')"
     if [ "$(printf '%s\n%s\n' "$GO_WANT" "$GO_HAVE" | sort -V | head -1)" = "$GO_WANT" ]; then
         ok "go" "(go$GO_HAVE >= go$GO_WANT)"
-    else bad "go" "(go$GO_HAVE < go$GO_WANT , install official tarball into \$HOME, no root)"; fi
-else bad "go" "(not installed , fetch go$GO_WANT from https://go.dev/dl/ into \$HOME, no root)"; fi
+    else bad "go" "(go$GO_HAVE < go$GO_WANT , sudo ./tools/setup.sh installs the mirror's system-wide)"; fi
+else bad "go" "(not installed , sudo ./tools/setup.sh installs go$GO_WANT from the mirror)"; fi
 
 echo
 echo "==================================================================="

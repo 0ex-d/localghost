@@ -10,10 +10,10 @@
 # Why: a model file can be the right size with the wrong bytes , Unsloth's mmproj-F16.gguf was
 # re-uploaded under the same name after their F32 patch_embd fix, and a box that fetched the earlier
 # one runs a slightly wrong projector for every caption. --fix downloads the pinned file (the mirror,
-# checked by its signed manifest and by the pin; the upstream URL in the pin when the mirror has
-# nothing), swaps it in beside the old one (the old file is kept as <name>.replaced until you delete
+# checked by its signed manifest and by the pin), swaps it in beside the old one (the old file is kept as <name>.replaced until you delete
 # it), and restarts ghost.oracled so llama-server loads the new file. A restart on the GPU is about
-# ten seconds of no model; captions in flight are retried by searchd.
+# ten seconds of no model; captions in flight are retried by searchd. The mirror only: a file it
+# does not list is said and left (GHOST_MIRROR_UPSTREAM=1: the pin's upstream, checked by the pin).
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 . "$HERE/model_pins.sh"
@@ -54,12 +54,17 @@ STAGE="$DIR/.pins-fetch"
 mkdir -p "$STAGE"
 fetched=""
 for n in $bad; do
-    if sh "$HERE/mirror_fetch.sh" models "$STAGE" "$n" && [ -s "$STAGE/$n" ]; then
+    rc=0; sh "$HERE/mirror_fetch.sh" models "$STAGE" "$n" || rc=$?
+    if [ "$rc" = 0 ] && [ -s "$STAGE/$n" ]; then
         echo "-- $n from the mirror"
-    else
+    elif [ "${GHOST_MIRROR_UPSTREAM:-}" = 1 ]; then
         url="$(pin_url "$n")"
-        echo "-- fetching $n from $url (resumable)"
-        curl -fL --retry 3 --retry-delay 5 -C - --progress-bar -o "$STAGE/$n" "$url" || { echo "!! download failed: $url" >&2; exit 3; }
+        echo "-- !! GHOST_MIRROR_UPSTREAM=1: fetching $n from $url (resumable) , checked by the pin only, NOT a signed manifest"
+        curl -fL --proto-redir =https --retry 3 --retry-delay 5 -C - --progress-bar -o "$STAGE/$n" "$url" || { echo "!! download failed: $url" >&2; exit 3; }
+    else
+        [ "$rc" = 3 ] && echo "!! $n is not on the mirror (set models; not published in this build) , left as it is" >&2 ||
+            echo "!! could not take $n from the mirror (above; a rerun resumes) , left as it is" >&2
+        exit 3
     fi
     pin_check "$STAGE/$n" || { rm -f "$STAGE/$n"; echo "!! the fetched $n is not the pinned file either , stopping" >&2; exit 3; }
     fetched="$fetched $n"
@@ -73,7 +78,10 @@ for n in $fetched; do
     chmod 600 "$DIR/$n"
     echo "-- $n in place (the old file is $n.replaced)"
 done
-rmdir "$STAGE" 2>/dev/null || true
+# the set's notice and terms go beside the weights, as setup left them
+[ -f "$STAGE/NOTICE.txt" ] && mv -f "$STAGE/NOTICE.txt" "$DIR/NOTICE-models.txt"
+for f in "$STAGE"/TERMS-*.txt; do [ -f "$f" ] && mv -f "$f" "$DIR/"; done
+rm -rf "$STAGE"
 echo "> restarting ghost.oracled so llama-server loads the pinned files"
 if "$HERE/../bin/ghost-ctl" restart-daemon ghost.oracled >/dev/null 2>&1 || /opt/localghost/bin/ghost-ctl restart-daemon ghost.oracled >/dev/null 2>&1; then
     echo "> done. Check: sudo ./tools/health.sh ghost.oracled ; then delete the .replaced files when happy:"

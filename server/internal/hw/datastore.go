@@ -392,7 +392,6 @@ CREATE TABLE IF NOT EXISTS journal_entries (
 CREATE INDEX IF NOT EXISTS journal_ts ON journal_entries (ts);
 -- synthd polls WHERE NOT distilled every 10 minutes forever; the partial index keeps that poll
 -- O(undistilled), not O(everything ever journaled).
-CREATE INDEX IF NOT EXISTS frame_tags_hash ON frame_tags (hash);
 CREATE INDEX IF NOT EXISTS journal_undistilled ON journal_entries (ts DESC) WHERE NOT distilled;
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS source_ref TEXT NOT NULL DEFAULT '';
 -- meta: structured detail beside the prose for machine-assembled memories (kind='outing': the
@@ -443,6 +442,9 @@ CREATE TABLE IF NOT EXISTS frame_tags (
     PRIMARY KEY (hash, tag)
 );
 CREATE INDEX IF NOT EXISTS frame_tags_tag ON frame_tags (tag);
+-- (after the table: this line once sat above it, and on a NEW box the whole blob , one psql
+-- transaction , failed on it, so provisioning stopped at "relation frame_tags does not exist")
+CREATE INDEX IF NOT EXISTS frame_tags_hash ON frame_tags (hash);
 CREATE INDEX IF NOT EXISTS frames_taken_at ON frames (taken_at);
 CREATE INDEX IF NOT EXISTS frames_kind ON frames (kind);
 -- location_points: watch/phone position samples, the raw material for the daily GeoJSON path. The

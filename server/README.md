@@ -107,10 +107,12 @@ the rest. Validated: dry-run touches nothing, apply refuses a dirty dry run, des
 run in preview, apply stops at first failure, and the systemd units are hardened and correctly
 ordered (daemons require ghost.secd; only ghost.secd gets TPM access).
 
-Setup's one-time downloads (map and place data, the OpenStreetMap coastline, the Go toolchain) come
-from the LocalGhost mirror first, https://www.localghost.ai/mirror , signed by the site key pinned in
-`tools/mirror-key.asc`, every file checked by hash , and from each upstream when the mirror cannot
-deliver. What a box verifies, step by step: `tools/README.md` section 0b.
+Setup's one-time downloads (the Go toolchain, llama.cpp's source, the weights, the phone's model, map
+and place data, the OpenStreetMap coastline and roads) come from the LocalGhost mirror,
+https://www.localghost.ai/mirror , signed by the site key pinned in `tools/mirror-key.asc`, every
+file checked by hash , and from nowhere else: a mirror that cannot deliver is said, and that step
+stops (`GHOST_MIRROR_UPSTREAM=1` is the operator's explicit exception). What a box verifies, step by
+step: `tools/README.md` section 0b.
 
 ## Certificates , the box is its own CA (no Let's Encrypt)
 

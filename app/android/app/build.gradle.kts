@@ -41,20 +41,19 @@ val catalog = extensions.getByType<VersionCatalogsExtension>().named("libs")
 val agpVersion: String = catalog.findVersion("agp").map { it.toString() }.orElse("unknown")
 val kotlinVersion: String = catalog.findVersion("kotlin").map { it.toString() }.orElse("unknown")
 
-// THE PHONE'S MODEL (llama.cpp, src/main/cpp). Built only when CMakeLists.txt pins llama.cpp to a
-// real 40-character commit: until then the APK builds without it and the app says so (Settings ›
-// PHONE MODEL), rather than a placeholder breaking every build. Pin it to the commit the box runs,
-// so the phone and the box read the same GGUF the same way:
-//     ssh box 'git -C /opt/localghost/llama.cpp rev-parse HEAD'
-// The source is fetched at configure time (git + network on the build machine), or taken from a
-// local checkout with -PllamaSrc=/path/to/llama.cpp (verified against the pin all the same).
+// THE PHONE'S MODEL (llama.cpp, src/main/cpp). The phone builds the same llama.cpp source the box
+// builds from: the tarball on the LocalGhost mirror, pinned by SHA-256 in CMakeLists.txt. Until the
+// pin is set the APK builds without the runtime and the app says so (MODELS in the menu), rather
+// than breaking every build. Set it with app/android/tools/pin_llama.sh. The tarball is fetched from
+// the mirror at configure time, or taken from a local copy: -PllamaTarball=/path/to/<tarball>
+// (on the box: /opt/localghost/llama.cpp.mirror-dl/), checked against the pin either way.
 val llamaCmake = file("src/main/cpp/CMakeLists.txt")
-val llamaPin: String = if (llamaCmake.exists())
-    Regex("""set\(LLAMA_CPP_COMMIT\s+"([0-9a-f]*)"""").find(llamaCmake.readText())?.groupValues?.get(1).orEmpty() else ""
-val buildPhoneModel = Regex("^[0-9a-f]{40}$").matches(llamaPin)
-val llamaSrc: String = (findProperty("llamaSrc") as String?).orEmpty()
-// dotprod+fp16 runs on every arm64 phone that has Android 15; i8mm (Snapdragon 8 Gen 1 and later,
-// Tensor G3 and later) is faster for the quantised matmuls: -PllamaArch=armv8.6-a+dotprod+i8mm+fp16
+fun cmakeVar(name: String): String = if (llamaCmake.exists())
+    Regex("""set\($name\s+"([^"]*)"""").find(llamaCmake.readText())?.groupValues?.get(1).orEmpty() else ""
+val llamaSha: String = cmakeVar("LLAMA_CPP_SHA256")
+val llamaPin: String = cmakeVar("LLAMA_CPP_TAG") + "-" + cmakeVar("LLAMA_CPP_COMMIT")
+val buildPhoneModel = Regex("^[0-9a-f]{64}$").matches(llamaSha)
+val llamaTarball: String = (findProperty("llamaTarball") as String?).orEmpty()
 val llamaArch: String = (findProperty("llamaArch") as String?) ?: "armv8.2-a+dotprod+fp16"
 
 android {
@@ -105,7 +104,7 @@ android {
             externalNativeBuild {
                 cmake {
                     arguments += listOf("-DANDROID_STL=c++_static", "-DLG_CPU_ARCH=$llamaArch") +
-                        (if (llamaSrc.isNotEmpty()) listOf("-DFETCHCONTENT_SOURCE_DIR_LLAMA_CPP=$llamaSrc") else emptyList())
+                        (if (llamaTarball.isNotEmpty()) listOf("-DLLAMA_CPP_TARBALL_PATH=$llamaTarball") else emptyList())
                     cppFlags += "-std=c++17"
                 }
             }
@@ -204,8 +203,10 @@ tasks.register("writeBuildEnv") {
                 val txt = cmake.readText()
                 val tag = Regex("""LLAMA_CPP_TAG[^"]*"([^"]+)"""").find(txt)?.groupValues?.get(1) ?: "unknown"
                 val commit = Regex("""LLAMA_CPP_COMMIT[^"]*"([^"]+)"""").find(txt)?.groupValues?.get(1) ?: "unknown"
+                val sha = Regex("""LLAMA_CPP_SHA256[^"]*"([^"]+)"""").find(txt)?.groupValues?.get(1) ?: "unset"
                 appendLine("llama.cpp.tag    $tag")
                 appendLine("llama.cpp.commit $commit")
+                appendLine("llama.cpp.sha256 $sha  (the mirror tarball the phone builds from)")
             }
         })
         println("wrote ${out.relativeTo(rootProject.projectDir)}")

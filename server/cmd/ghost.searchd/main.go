@@ -51,15 +51,32 @@ type conf struct {
 	EmbedExternalURL string `json:"embedExternalURL"` // set = use this server, do not spawn
 }
 
+// embedFiles are the embedding models a box may hold, preferred first: the mirror's pinned build
+// (set `embeddings`) and the name boxes were set up with before the mirror carried one.
+var embedFiles = []string{"embeddinggemma-300m-qat-Q8_0.gguf", "embeddinggemma-300m-q8.gguf"}
+
+// pickEmbedModel is the first of embedFiles present under dir, and its model ID (the file's stem,
+// recorded on every vector so a query never meets a vector from another model). The first name
+// when none is present, so the "no weights" message names the file to provide.
+func pickEmbedModel(dir string) (path, id string) {
+	for _, f := range embedFiles {
+		if fi, err := os.Stat(filepath.Join(dir, f)); err == nil && fi.Size() > 0 {
+			return filepath.Join(dir, f), strings.TrimSuffix(f, ".gguf")
+		}
+	}
+	return filepath.Join(dir, embedFiles[0]), strings.TrimSuffix(embedFiles[0], ".gguf")
+}
+
 func defaultConf(mount string) conf {
+	path, id := pickEmbedModel(filepath.Join(mount, "ai-models"))
 	return conf{
 		Base:           svcconf.DefaultBase(),
 		PollSeconds:    5,
 		EfSearch:       80,
 		EmbedPort:      18081,
 		EmbedBin:       "/usr/local/bin/llama-server",
-		EmbedModelPath: filepath.Join(mount, "ai-models", "embeddinggemma-300m-q8.gguf"),
-		EmbedModelID:   "embeddinggemma-300m-q8",
+		EmbedModelPath: path,
+		EmbedModelID:   id,
 	}
 }
 
@@ -133,6 +150,18 @@ func main() {
 		} else {
 			defer es.Stop()
 			embedder = search.NewEmbedder(es.BaseURL(), cfg.EmbedModelID)
+		}
+	}
+
+	// THE EMBEDDING MODEL CHANGED (a box moving to the mirror's pinned embedder, or any swap):
+	// vectors written by the old model are invisible to queries from the new one (the emb_model
+	// predicate), so search would quietly lose everything indexed so far. Queue them to be embedded
+	// again, once , not while a previous re-embed is still running.
+	if embedder != nil {
+		if n, err := storeW.EnqueueReembed(embedder.ModelID); err != nil {
+			lg.Warn("re-embed check failed", "fn", "main", "err", err)
+		} else if n > 0 {
+			lg.Info("embedding model changed: chunks queued to be embedded again", "fn", "main", "model", embedder.ModelID, "chunks", n)
 		}
 	}
 

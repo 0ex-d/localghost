@@ -331,8 +331,8 @@ func main() {
 	ctl.Handle("road-tiles", func(json.RawMessage) (ctlsock.Response, error) {
 		return ctlsock.Response{OK: true, Text: buildRoads("asked")}, nil
 	})
-	if pbfs := roadtiles.FindPBFs(roadsIn); len(pbfs) > 0 && roadtiles.Stale(pbfs, roadsOut) {
-		buildRoads("a road file is newer than the tiles")
+	if why := roadtiles.StaleWhy(roadtiles.FindPBFs(roadsIn), roadsOut); why != "" {
+		buildRoads(why)
 	}
 	// reprocess: converge the archive's derived state , frame records, previews (force=true also
 	// re-derives EXISTING previews, the orientation-fix case), search notifies, day paths. Runs in

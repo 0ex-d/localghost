@@ -1,16 +1,18 @@
 #!/bin/sh
 # phone_model.sh , put the phone's model where secd offers it to phones.
 #
-#   sudo ./tools/phone_model.sh                 fetch the pinned model (mirror first, then upstream), check it,
-#                                               install it, write the catalogue
+#   sudo ./tools/phone_model.sh                 fetch the pinned model from the mirror, check it,
+#                                               install it, write the catalogue (setup_llama.sh runs this)
 #   sudo ./tools/phone_model.sh --file <gguf>   the same from a file you copied over (checked against the pin)
 #   sudo ./tools/phone_model.sh --check         what the catalogue offers, and whether each file matches it
 #
 # The phone never downloads from the internet: it pulls the model from its own box over the same
 # mutually-authenticated link as everything else (GET /v1/models, /v1/models/<id>, resumable), and
-# checks the SHA-256 the catalogue states. The box gets it once, here: from the LocalGhost mirror's
-# signed `phone` set, else from the pin's upstream (Hugging Face, no account), checked against
-# tools/phone_model.pins either way. The directory is the box's unencrypted system area
+# checks the SHA-256 the catalogue states. The box gets it once, at setup, here: from the LocalGhost
+# mirror's signed `phone` set and checked against tools/phone_model.pins as well. Not on the mirror
+# yet, or the mirror unreachable: said, and nothing installed (GHOST_MIRROR_UPSTREAM=1 takes the
+# pin's upstream, Hugging Face without an account, on the operator's own authority, checked by the
+# pin alone). The directory is the box's unencrypted system area
 # (<state dir>/models, default /var/lib/ghost/models): a phone model is not anyone's data, and
 # secd serves it without an unlocked volume.
 set -eu
@@ -66,10 +68,20 @@ else
     rc=0; sh "$FETCH" phone "$DL" "$NAME" || rc=$?
     if [ "$rc" = 0 ] && [ -s "$OUT" ]; then
         echo "-- $NAME from the mirror (signed manifest checked)"
-    else
+    elif [ "${GHOST_MIRROR_UPSTREAM:-}" = 1 ]; then
         URL="$(pin_url "$NAME")"
-        echo "-- fetching $NAME from $URL (2.2 GB, resumable; a rerun continues)"
+        echo "-- !! GHOST_MIRROR_UPSTREAM=1: fetching $NAME from $URL (2.2 GB, resumable) , checked by"
+        echo "      tools/phone_model.pins only, NOT a signed manifest"
         curl -fL --proto-redir =https --retry 3 --retry-delay 5 -C - --progress-bar -o "$OUT" "$URL" || { echo "!! download failed: $URL" >&2; exit 3; }
+    else
+        if [ "$rc" = 3 ]; then
+            echo "!! $NAME is not on the mirror yet (set phone; not published in this build) , not installed" >&2
+        else
+            echo "!! could not take $NAME from the mirror (the lines above say why; a rerun resumes) , not installed" >&2
+        fi
+        echo "   phones read with the box's model meanwhile. Re-run when the mirror has it, or --file <copy>." >&2
+        rmdir "$DL" "$DIR" 2>/dev/null || true   # only when nothing is there (a half download stays, to resume)
+        exit "$rc"
     fi
 fi
 pin_check "$OUT" || { echo "!! $NAME does not match tools/phone_model.pins , not installed" >&2; rm -f "$OUT"; exit 4; }
@@ -77,7 +89,7 @@ if [ "$OUT" != "$DIR/$NAME" ]; then
     mv -f "$OUT" "$DIR/$NAME"
 fi
 chmod 0644 "$DIR/$NAME"
-cp "$DL"/TERMS-*.txt "$DIR/" 2>/dev/null || true
+cp "$DL"/NOTICE.txt "$DL"/TERMS-*.txt "$DIR/" 2>/dev/null || true
 
 # the catalogue secd serves (internal/models: id, name, detail, sizeBytes, sha256, file)
 SHA="$(pin_sha "$NAME")"

@@ -13,5 +13,9 @@
 # name  sha256  bytes  upstream
 gemma-4-12b-it-Q4_K_M.gguf  0a270ec9fe6b34f4a0d33992b6135117b484ebc4766ab76b51d4ae8c457e4c42  7121861440  https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/gemma-4-12b-it-Q4_K_M.gguf
 mmproj-F16.gguf             91f086971e56d7a7d8d39e271873fccdb49541bd259d6e02c401a4f1cb7a219e  175115840   https://huggingface.co/unsloth/gemma-4-12b-it-GGUF/resolve/main/mmproj-F16.gguf
-# embeddinggemma-300m-q8.gguf: not pinned yet (its source is being settled; the Gemma Terms of Use
-# go with it). Until then it is accepted from any source, unchecked, and the mirror does not carry it.
+# The embedder, EmbeddingGemma 300M QAT Q8_0 (Gemma Terms of Use, which travel with it): the mirror
+# carries it in set `embeddings` under its signed manifest. Its pin line goes here, from the manifest:
+#   curl -s https://www.localghost.ai/mirror/MANIFEST.txt | grep /embeddings/
+# as: embeddinggemma-300m-qat-Q8_0.gguf  <sha256>  <bytes>  <upstream url>
+# Until then it is accepted from the mirror (signed) or a file you provide, and the older
+# embeddinggemma-300m-q8.gguf a box already has keeps working.

@@ -360,20 +360,26 @@ func pct(say func(string), what string) func(read, total int64) {
 
 // Stale reports whether the tiles under outDir are missing, older than any of the PBF files, or
 // from before the routing graph was written beside them.
-func Stale(pbfs []string, outDir string) bool {
+func Stale(pbfs []string, outDir string) bool { return StaleWhy(pbfs, outDir) != "" }
+
+// StaleWhy says why the tiles need cutting again ("" when they do not), for the log line.
+func StaleWhy(pbfs []string, outDir string) string {
+	if len(pbfs) == 0 {
+		return ""
+	}
 	ii, err := os.Stat(filepath.Join(outDir, "index.bin"))
 	if err != nil {
-		return len(pbfs) > 0
+		return "no road tiles yet"
 	}
 	if _, err := os.Stat(filepath.Join(outDir, "graph")); err != nil {
-		return len(pbfs) > 0
+		return "the tiles have no street graph yet (the day routes walk on it): cut once more"
 	}
 	for _, p := range pbfs {
 		if fi, err := os.Stat(p); err == nil && fi.ModTime().After(ii.ModTime()) {
-			return true
+			return "a road file is newer than the tiles"
 		}
 	}
-	return false
+	return ""
 }
 
 // FindPBFs lists the .osm.pbf files under dir, sorted.

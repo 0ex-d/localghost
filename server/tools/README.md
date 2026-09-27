@@ -28,12 +28,35 @@ flow is scan-immediately-and-clear-the-screen, not leave-it-on-screen-while-grad
 
 ## 0b. Where setup downloads from , https://www.localghost.ai/mirror
 
-Setup-time downloads come from the LocalGhost mirror first, https://www.localghost.ai/mirror (that
-page says what it carries and what a box promises), and from each upstream when the mirror cannot
-deliver. Today it carries GeoNames and Natural Earth (`geo`), OpenStreetMap's land polygon zip
-(`landpolygons`, which the box cuts into map tiles itself with `bin/ghost-landtiles`) and the Go
-toolchain (`go`); the roads extracts (`roads`, 1b''') are the next set to publish; llama.cpp and
-the model weights are not published yet, so those still come from upstream. The rule that matters is unchanged: the box reaches the network at SETUP only.
+Setup-time downloads come from the LocalGhost mirror, https://www.localghost.ai/mirror (that page
+says what it carries and what a box promises), and from nowhere else. It carries the Go toolchain
+(`go`), llama.cpp's source at the commit the publisher pinned (`llama`), the weights (`models`), the
+embedder (`embeddings`), GeoNames and Natural Earth (`geo`), OpenStreetMap's land polygon zip
+(`landpolygons`, cut on the box by `bin/ghost-landtiles`), the continents' roads extracts that were
+asked for (`roads`, 1b''') and the phone's model (`phone`, 7d). If the mirror cannot be reached, or
+a build does not list a set yet, setup SAYS so and stops that step: a box never takes a file that
+was not in a signed manifest. Which step stops what:
+
+- Go (setup.sh) and llama.cpp (setup_llama.sh) stop setup. llama.cpp is built from the mirror's
+  tarball only, never a git clone of master; a box that has the mirror's source already builds that
+  copy when the mirror is away. A box with an old git checkout gets the mirror's source (one rebuild).
+- The weights stop setup_llama.sh; files you copied over (`--models`, `--model`) are still taken,
+  checked against `tools/model.pins`.
+- The embedder, the phone's model and the geo sets are each said and skipped: the box works without
+  them (search FTS-only, phones read with the box's model, the map without that layer), and a rerun
+  of the same script fetches what is missing.
+
+`GHOST_MIRROR_UPSTREAM=1` is the operator's explicit exception: each script then takes what the
+mirror did not deliver from its upstream (go.dev with its checksum list, Hugging Face checked by the
+pins, GeoNames, Natural Earth, osmdata, Geofabrik), loudly, on the operator's own authority. llama.cpp
+has no such exception. A box with no internet at all: a copy of the mirror on a disk,
+`GHOST_MIRROR=file:///media/usb/mirror` (MANIFEST.txt, its .asc and the build folders as the site
+has them); the signature and every hash are checked the same way. The rule underneath is unchanged:
+the box reaches the network at SETUP only.
+
+There is no separate `ghost update` yet: running the same scripts again is the update. Each file
+whose recorded hash (`<dir>/.<name>.sha256`, written when it was verified) equals the manifest's is
+kept without downloading or reading it again, so a rerun costs a manifest and a signature.
 
 Files are published exactly as upstream publishes them, under `MANIFEST.txt`, a sha256sum list
 detach-signed by the site key (the one that signs the site deploys). `tools/mirror_fetch.sh`:
@@ -48,12 +71,23 @@ detach-signed by the site key (the one that signs the site deploys). `tools/mirr
 - downloads each file to a hidden `.part` with resume, and names it only when its SHA-256 matches;
 - follows redirects (localghost.ai answers 301 to www) but never down to plain http; a plain-http
   mirror is accepted only on loopback or with `GHOST_MIRROR_ALLOW_HTTP=1`;
-- exits 3 when there is nothing to offer (off, key missing, gpg missing, set not published) and 1 on
-  any failure; every caller then falls back to upstream, except the model weights, which have no
-  unattended upstream (Hugging Face gates them): `setup_llama.sh --models` or `--model-url` as before.
+- reads the manifest three times, a few seconds apart, before it gives up on a signature that does
+  not verify (a publish writes the manifest and its signature one after the other);
+- takes the set's `NOTICE.txt` and `TERMS-<name>.txt` with any file of it, and the callers keep them
+  beside the files (the ODbL and the Gemma Terms of Use require it);
+- keeps a file whose recorded hash equals the manifest's; hashes a file that has no record; deletes a
+  download that does not match and fetches it once more, and fails that file on a second mismatch;
+- re-reads the manifest when a path answers 404 (the last two builds are kept; an older path is gone)
+  and carries on from the new build;
+- exits 0 when everything came, 1 on any failure (the mirror unreachable, a bad signature, a file
+  that would not match, the key file not the site key), 3 when there is nothing to fetch
+  (`GHOST_MIRROR=off`, or the set or file is not published in this build). Neither 1 nor 3 is a
+  success; the callers say which it was and stop that step.
 
-`GHOST_MIRROR=off` turns it off, `GHOST_MIRROR=<url>` points at another copy. Debian 13 does not
-always ship gpg; setup installs it before it verifies anything. The key, once, by hand:
+`GHOST_MIRROR=<url>` points at another copy (https, loopback http, or `file://`). Debian 13 does not
+always ship gpg; setup installs it before it verifies anything. The key must be in the repo before
+setup runs (without it every mirror step fails, and with them setup); once, by hand, comparing the
+fingerprint with the one printed here and on the site:
 
     curl -s https://www.localghost.ai/.well-known/pgp-key.asc -o tools/mirror-key.asc
     gpg --show-keys --with-fingerprint tools/mirror-key.asc   # must show DCE9 A3D1 4EB4 6197 1DD5  F393 706E 4194 F08A 09A0
@@ -107,12 +141,13 @@ unseal the hardware-sealed key anyway.
 
 ## 3. Build + install the app , before any QR exists
 
-One blocker first: the llama.cpp pin in `app/src/main/cpp/CMakeLists.txt` is a placeholder and
-CMake refuses to configure until it is filled. On any trusted machine:
+The phone's own model runtime is llama.cpp built from the same mirror tarball the box builds, pinned
+by its SHA-256 in `app/src/main/cpp/CMakeLists.txt`; until the pin is set gradle builds the app
+without it (the chat then always asks the box). To set it, on the dev machine (7d):
 
-    git ls-remote https://github.com/ggml-org/llama.cpp refs/tags/b9788
+    app/android/tools/pin_llama.sh        # reads the signed manifest, checks it against the site key
 
-Paste the full 40-char SHA into LLAMA_CPP_COMMIT. Then build per COMPILE.md , on your dev machine
+Then build per COMPILE.md , on your dev machine
 with Android Studio/gradle, or on this box after `app/tools/debian_setup.sh`. For bring-up:
 
     ./gradlew assembleDebug        # first native build compiles ggml for arm64; it takes a while
@@ -174,23 +209,26 @@ under those names , not from the mirror, not from Hugging Face, not from a USB s
 upload that changed under the same name (Unsloth's mmproj did, before their F32 patch_embd fix) is
 refused, not staged. No Python, no huggingface-cli anywhere: curl and sha256sum.
 
-Before the first unlock, `tools/setup_llama.sh` gets them (the mirror, then Hugging Face, each file
-checked against its pin) and stages them; the unlock ingests them onto the volume. Files you already
-have go in by path, checked the same way:
+Before the first unlock, `tools/setup_llama.sh` gets them (from the mirror, checked by its signed
+manifest and again against the pin) and stages them with the set's notice and terms; the unlock
+ingests them onto the volume. Not on the mirror, or the mirror away: said, and setup stops there
+(0b). Files you already have go in by path, checked against the pin:
 
-    sudo ./tools/setup_llama.sh                                    # mirror, then Hugging Face, by pin
+    sudo ./tools/setup_llama.sh                                    # the mirror, by pin
     sudo ./tools/setup_llama.sh --models /media/usb/ggufs          # a directory of them
     sudo ./tools/setup_llama.sh --model /media/usb/gemma-4-12b-it-Q4_K_M.gguf --mmproj /media/usb/mmproj-F16.gguf
 
-A box that is already running: is what it has the pinned build, and if not, replace it (the mirror
-or the pin's upstream, checked, swapped in, ghost.oracled restarted , ten seconds without a model):
+A box that is already running: is what it has the pinned build, and if not, replace it (from the
+mirror, checked, swapped in, ghost.oracled restarted , ten seconds without a model):
 
     sudo ./tools/ns.sh ./tools/models_check.sh
     sudo ./tools/ns.sh ./tools/models_check.sh --fix
 
-`embeddinggemma-300m-q8.gguf` (search's embedder) is not pinned yet and not on the mirror; it is
-accepted from any source. Missing weights are a named degraded mode, not a crash: oracled reports no
-model, searchd falls back to FTS-only, both say so in health.
+The embedder, `embeddinggemma-300m-qat-Q8_0.gguf`, comes from the mirror's `embeddings` set (the
+Gemma Terms of Use travel with it onto the volume); its pin line joins `tools/model.pins` from the
+manifest. A box that has the older `embeddinggemma-300m-q8.gguf` keeps it until the new one arrives,
+then embeds its archive again by itself. Missing weights are a named degraded mode, not a crash:
+oracled reports no model, searchd falls back to FTS-only, both say so in health.
 
 ## 7c. Move the database binaries onto the volume , service user, after first unlock
 
@@ -205,18 +243,26 @@ of the loop. On VERIFIED, remove the OS packages , ghost.secd prefers the volume
 automatically from the next unlock, and falls back to PATH only if the bundle is absent. From then
 on the databases are version-pinned to their own data and an apt upgrade cannot touch them.
 
-## 7d. The phone's model , root, once (optional, 2.2 GB)
+## 7d. The phone's model , at setup (2.2 GB; GHOST_PHONE_MODEL=0 skips it)
 
 The app can run a small model on the phone: it reads web pages into notes when the box's model is on
 its CPU, and answers by itself when the box cannot be reached. The box offers it; the phone pulls it
-from the box, never from the internet:
+from the box, never from the internet. `setup_llama.sh` fetches it as its last step, from the
+mirror's `phone` set; a miss is said and setup carries on (phones then read with the box's model).
+By hand:
 
-    sudo ./tools/phone_model.sh            # Gemma 4 E2B QAT, pinned in tools/phone_model.pins; mirror first
+    sudo ./tools/phone_model.sh            # Gemma 4 E2B QAT, pinned in tools/phone_model.pins; the mirror
     sudo ./tools/phone_model.sh --check    # what phones are offered, and whether the file matches
 
-The APK carries the model runtime only when app/android/app/src/main/cpp/CMakeLists.txt pins llama.cpp;
-pin it to the box's commit (`git -C /opt/localghost/llama.cpp rev-parse HEAD`) and rebuild the app.
-Then MODELS in the app's menu → DOWNLOAD.
+The APK carries the model runtime only when app/android/app/src/main/cpp/CMakeLists.txt pins the
+llama.cpp source tarball the mirror carries (set `llama`, the same bytes the box builds from) by its
+SHA-256. On the machine that builds the app, once, and again whenever the mirror moves llama.cpp:
+
+    app/android/tools/pin_llama.sh --key server/tools/mirror-key.asc   # reads the signed manifest, writes the pin
+    app/android/tools/pin_llama.sh --tarball <copy of /opt/localghost/llama.cpp.mirror-dl/llama.cpp-*.tar.gz>
+
+then rebuild the app (the build fetches the tarball from the mirror and checks it against the pin;
+-PllamaTarball=<file> builds from a local copy). Then MODELS in the app's menu → DOWNLOAD.
 
 ## 1b. The watchdog , root, once, before the box is ever left alone
 
@@ -231,7 +277,7 @@ smart plug on the mains with the BIOS set to "power on after AC loss" is the oth
 ## 1b'. The coastline at full detail , root, once (optional, several hundred MB)
 
 The map's base is Natural Earth: right for a continent, a smudge for an island. OpenStreetMap's land
-polygons draw every cove; `tools/fetch_geo.sh` fetches them at setup (mirror first, 0b) and cuts
+polygons draw every cove; `tools/fetch_geo.sh` fetches them at setup (from the mirror, 0b) and cuts
 them into one-degree tiles with `bin/ghost-landtiles`. On a box that is already running, the same,
 straight onto the unlocked volume (it fetches only what is missing, here the polygons, then cuts;
 the cut takes a couple of GB of RAM for a few minutes beside whatever the model is using):
@@ -239,7 +285,8 @@ the cut takes a couple of GB of RAM for a few minutes beside whatever the model 
     sudo ./tools/ns.sh ./tools/fetch_geo.sh /var/lib/ghost/mnt/slot0/geo
     sudo ./tools/ns.sh chown -R coder:coder /var/lib/ghost/mnt/slot0/landtiles /var/lib/ghost/mnt/slot0/geo
 
-Without the mirror, fetch the shapefile and copy it in, then ask framed to cut it into one-degree tiles:
+Without the mirror, on your own authority (this file is not checked against a signed manifest), fetch
+the shapefile and copy it in, then ask framed to cut it into one-degree tiles:
 
     cd /tmp && curl -fLO https://osmdata.openstreetmap.de/download/land-polygons-complete-4326.zip
     unzip -q land-polygons-complete-4326.zip
@@ -266,7 +313,8 @@ ODbL) under `<geo>/roads` and cuts them once into `<volume>/roadtiles` with `bin
 the phone fetches one cell at a time as it moves (`/v1/geo/roadtiles/index`, `/v1/geo/roadtile`).
 Opt-in, because of the size: Europe 33 GB, North America 18, Asia 15, Africa 7, the rest 6 ,
 about 80 GB of PBF, kept on the volume beside the tiles so a newer extract can be cut without a
-second download. Mirror first (set `roads`), Geofabrik itself when the mirror has no copy.
+second download. From the mirror (set `roads`: the continents it was asked to carry); Geofabrik only
+with `GHOST_MIRROR_UPSTREAM=1`.
 
     sudo GHOST_GEO_ROADS=europe-latest.osm.pbf ./tools/ns.sh ./tools/fetch_geo.sh /var/lib/ghost/mnt/slot0/geo   # one continent first
     sudo GHOST_GEO_ROADS=all ./tools/ns.sh ./tools/fetch_geo.sh /var/lib/ghost/mnt/slot0/geo                     # the eight continents

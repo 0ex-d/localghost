@@ -320,7 +320,9 @@ object BoxClient {
                         o.optString("note").takeIf { it.isNotBlank() }?.let { channel.trySendBlocking(ChatChunk.Status(it)) }
                         true
                     }
-                    o.has("more") -> {
+                    // {"more":{"queries":[...]}} asks for a second search; the closing
+                    // {"done":true,"more":true} is not that (its "more" is a flag) and ends the stream below
+                    o.optJSONObject("more") != null -> {
                         val m = o.optJSONObject("more")
                         val qs = m?.optJSONArray("queries")?.let { a -> (0 until a.length()).map { a.optString(it) }.filter { it.isNotBlank() } } ?: emptyList()
                         if (qs.isNotEmpty()) channel.trySendBlocking(ChatChunk.More(qs, m?.optString("why") ?: ""))

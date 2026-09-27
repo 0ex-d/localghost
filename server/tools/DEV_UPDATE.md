@@ -2047,3 +2047,155 @@ verifies, --check, a rerun is a no-op); the JNI compiled against the upstream de
 -Wall -Wextra. NOT RUN: anything on a phone , the native build (no NDK here), the model's notes,
 its speed on Vlad's phone, Gemma 4 E2B's real turn tokens in the vocabulary (the probe falls back
 if they are not what the Hugging Face template says).
+
+## The phone builds llama.cpp from the mirror's tarball; the embedder under the mirror's name
+
+Vlad, with the mirror's publish log: the mirror already carries `llama/llama.cpp-v0.5.0-7fe450e.tar.gz`
+(its SHA-256 pinned on the web side), and now `embeddings/embeddinggemma-300m-qat-Q8_0.gguf`.
+
+- THE PHONE'S llama.cpp is those bytes, not a git fetch from GitHub by commit. CMakeLists.txt pins
+  LLAMA_CPP_TARBALL and LLAMA_CPP_SHA256 (tag and commit kept for humans); at configure time CMake
+  reads the mirror's MANIFEST.txt only to find WHERE the file is (builds are pruned, so the path is
+  looked up, never written down) and FetchContent downloads it with URL_HASH SHA256=<pin>, so any
+  other bytes are refused. -PllamaTarball=<file> builds from a local copy (the box keeps its
+  verified one in /opt/localghost/llama.cpp.mirror-dl/). gradle builds the runtime when the SHA-256
+  pin is set; the provenance file records it. No GitHub, no git at build time; the phone and the
+  box run the same llama.cpp. (My first version pinned a git commit and told you to read it with
+  `git rev-parse` on the box: a box built from the mirror has no .git, so that would have failed.)
+- app/android/tools/pin_llama.sh writes the pin: from the mirror's manifest (its signature checked
+  against the site key by fingerprint when gpg and tools/mirror-key.asc are at hand, the way
+  mirror_fetch.sh does; refused on a bad signature), or from a tarball you copied (--tarball),
+  optionally cross-checked against the box's own hash (--box-sha). The manifest is disallowed to
+  crawlers, so I could not read the hash from here; the script does it on your machine.
+- Tested here against a local fake mirror: no key (pins, says the signature was not checked), a key
+  that did not sign (refused), a good signature (pinned), a box hash that differs (refused), a local
+  tarball (pinned; gradle's own regex reads it as buildable); and the CMake file end to end on the
+  host: the manifest lookup, the download, the hash check, the configure, and a build of
+  liblocalghost_llm.so from a fake llama source against the stub header; a tampered tarball fails
+  URL_HASH; a manifest without the pinned hash stops with what to do.
+- THE EMBEDDER: nothing asked for the mirror's name. setup_llama.sh now fetches set `embeddings`,
+  `embeddinggemma-300m-qat-Q8_0.gguf` (pin_check when model.pins has its line; the manifest's
+  signature otherwise), keeps an existing embeddinggemma-300m-q8.gguf when the mirror has none;
+  --embed <file> keeps a known name. stage_models.sh stages either. searchd picks the QAT build when
+  present, else the old q8, and takes the model ID from the file's name.
+- A CHANGED EMBEDDER re-embeds the archive: vectors from the old model are invisible to queries
+  from the new one (search's emb_model predicate), so moving a box to the QAT build would have
+  quietly emptied semantic search. At start, searchd queues every chunk whose vector came from
+  another model (embed jobs, 64 ids each), once, not while a previous re-embed is still queued, and
+  logs "embedding model changed: chunks queued to be embedded again".
+- model.pins says how to add the embedder's pin line from the manifest.
+
+Tests: pickEmbedModel (none, old only, an empty file ignored, both: the QAT build wins,
+defaultConf). Not run: EnqueueReembed against Postgres (none here; the SQL is read against the
+schema), the phone build with the NDK.
+
+## Setup takes from the mirror and nowhere else; llama.cpp only from its tarball; the phone's model at setup
+
+Vlad, with the web side's full mirror contract: "If the mirror is unreachable, say so and stop. Do
+not fall back to the upstream URLs; the point of the mirror is that a box never trusts a file that
+wasn't in a signed manifest." Until now every setup script tried the mirror and then went upstream.
+
+- tools/mirror_fetch.sh follows the contract end to end. The manifest is read up to three times, a
+  few seconds apart, before a signature that does not verify is a failure (a publish writes the two
+  one after the other). A single file comes with its set's NOTICE.txt and TERMS-*.txt, which every
+  caller keeps beside it. A verified file gets a record, `<dir>/.<name>.sha256` (hash, size,
+  mtime): a rerun with the record matching the manifest neither downloads nor re-reads it (the
+  33 GB Europe extract is not hashed on every run); a file without a record is hashed once. A
+  download that does not match is deleted and fetched once more; a second mismatch fails that
+  file. A 404 means the build was pruned: the manifest is read again (twice at most) and the fetch
+  carries on from the new build. A half download of an older build's version of a file is removed.
+  Exit codes: 0 fetched, 1 failed (mirror unreachable, bad signature, a file that would not match,
+  the key file not the site key , these used to be 3), 3 nothing to fetch (the set or file is not in
+  this build, or GHOST_MIRROR=off). GHOST_MIRROR=file:///<dir> reads a copy of the mirror on a disk
+  (a box with no internet), signature and hashes checked the same way.
+- NO UPSTREAM unless the operator says GHOST_MIRROR_UPSTREAM=1, and then loudly, each line saying
+  the file is not from a signed manifest. setup.sh (Go: go.dev), setup_llama.sh and
+  models_check.sh --fix (weights: Hugging Face, still checked by the pins), fetch_geo.sh (GeoNames,
+  Natural Earth, osmdata, Geofabrik), phone_model.sh (Hugging Face). Each says whether the set is
+  not published yet or the mirror failed, and stops that step: Go and llama.cpp stop setup, the
+  weights stop setup_llama.sh, the embedder, the phone's model and each geo set are said and
+  skipped (the box works without them; a rerun fetches them). Files copied over by hand (--models,
+  --model, phone_model.sh --file) are still taken, checked against the pins.
+- LLAMA.CPP: "Build this, never clone master." setup_llama.sh no longer pulls or clones. The source
+  is the mirror's set llama, one tarball; the folder inside must be named after the commit in the
+  tarball's name or it is not built. It unpacks into /opt/localghost/llama.cpp with its notice and
+  terms, and .mirror-src / .mirror-commit / .mirror-sha256 beside it; a new name replaces the folder
+  and rebuilds. cmake gets -DLLAMA_BUILD_COMMIT=<commit> (and the build number for a bNNNN tag) so
+  `llama-server --version` names what it is instead of "unknown", and -DLLAMA_CURL=OFF (the engine
+  downloads nothing, ever; libcurl is no longer installed for it). A box whose llama.cpp is still a
+  git checkout (xyntai) gets the mirror's source on its next setup_llama.sh run: one CUDA rebuild,
+  the old binary runs until the new one is installed. Mirror away and the mirror's source already
+  here: that copy is built. Mirror away and only a git checkout: said, and it stops.
+  --llama-tarball <file> takes a copy you brought, still only when its hash is the manifest's (a
+  copy that is not it is replaced by the mirror's, and said).
+- THE PHONE'S MODEL AT SETUP ("if in doubt, setup"): setup_llama.sh's last step runs
+  phone_model.sh (GHOST_PHONE_MODEL=0 skips it). A miss is said and setup completes; the summary
+  line says whether phones are offered it.
+- NOTICES AND TERMS travel: the weights' and the embedder's go onto the volume with them
+  (NOTICE-models.txt, NOTICE-embeddings.txt, TERMS-*.txt, staged by stage_models.sh and ingested at
+  unlock like the weights), llama.cpp's into its folder, Go's into /usr/local/go as MIRROR-*.txt,
+  the phone model's beside it in the system area, the geo sets' beside their files (as before).
+- setup.sh's Go minimum is now go.mod's version (1.25.4), not 1.25: an older system Go passed the
+  check and then the go command fetched the newer toolchain from the internet by itself.
+- health.sh prints the engine's provenance under oracled ("engine: llama.cpp-v0.5.0-7fe450e.tar.gz
+  (commit …, from the mirror)", or that it is still a git checkout).
+- READMEs: 0b rewritten for the mirror-only rule, what stops what, GHOST_MIRROR_UPSTREAM, the disk
+  copy, and that rerunning the scripts is the update (there is no `ghost update` command yet); 7b
+  and 7d updated; section 3's stale "paste the git SHA" paragraph now points at pin_llama.sh.
+
+Tested here against a local signed fake mirror (a throwaway key, two builds): one file with its
+notice and terms; a rerun that neither downloads nor hashes (a file changed under the same size and
+mtime is trusted by its record, by design; a changed mtime is hashed, found wrong, and replaced); a
+set and a file not published (exit 3, said); a whole set; a first download wrong then right; two
+wrong (fails, nothing installed); a manifest whose build was pruned (404, re-read, done from the
+newer build); a replayed older manifest (refused); a tampered manifest (three reads, refused); the
+mirror unreachable (exit 1); the wrong key file (exit 1); file:// (works). setup_llama.sh's llama
+step with apt-get and cmake stubbed: fresh from the mirror (commit checked, provenance written,
+cmake given the commit), a rerun (no rebuild), the mirror away with its source here (builds it),
+the mirror away with a git checkout (stops), a git checkout with the mirror up (replaced), a wrong
+--llama-tarball (replaced and said). phone_model.sh: from the mirror, rerun, unreachable (nothing
+installed, exit 1), upstream with the flag. fetch_geo.sh: geo from the mirror, roads and land
+polygons not published (said, nothing from upstream). Not run: a real CUDA build of the tarball;
+whether this llama.cpp's CMake honours LLAMA_BUILD_COMMIT (if --version still says unknown, the
+provenance files are the record); setup.sh's Go step (read, and the same pattern as the others).
+
+## Before the redeploy: the whole drop checked end to end, four fixes
+
+Vlad, before redeploying the server and reinstalling the app.
+
+What was run: the whole server built, vetted and tested (31 packages, all pass) from a clean copy
+of the tree; then against a real Postgres (16, no pgvector) with the schema a box converges to at
+unlock; the app's 113 unit tests (every test file, the pure sources with small Android stubs); a
+structural compile of all 101 app sources compared with the original tree; every endpoint the app
+calls matched against secd's routes (58, all present) and the JSON of the new ones (route, plan,
+chat, tracks, on this day, models) field by field on both sides.
+
+Found and fixed:
+- A NEW BOX COULD NOT BE PROVISIONED. The app schema blob (datastore.go, one psql transaction at
+  provision and at every unlock) created the frame_tags_hash index above the frame_tags table, so on
+  an empty database the whole blob failed: "relation frame_tags does not exist". Existing boxes never
+  saw it (the table was already there). The index now follows its table.
+- The embedder switch: chunks whose model was never recorded would not have been queued for the
+  re-embed (emb_model <> $1 is not true for NULL); IS DISTINCT FROM now.
+- The app's chat stream read the closing {"done":true,"more":true} of a second-search round as a
+  "more" event (its "more" is a flag, not the object); harmless (the stream ended at EOF) but it
+  swallowed the done. Only the object form is a "more" event now.
+- framed's log said "a road file is newer than the tiles" when it was re-cutting because the tiles
+  had no street graph yet; it now says which (roadtiles.StaleWhy).
+
+New tests, both skipped unless GHOST_PG_SOCKET_DIR points at a Postgres:
+- internal/hw/sqlprepare_pg_test.go PREPAREs every SQL statement written as a literal anywhere in
+  the server (246 of them) against the full schema: every table, column and parameter type is
+  resolved by Postgres itself, the way poltergres's Parse asks at run time. Fragments completed at
+  run time, pgvector queries (no extension here) and Sprintf templates are skipped (9).
+- cmd/ghost.synthd/days_pg_test.go runs the day pipeline on real rows: photos with places, tags,
+  trail points, steps, a check-in, a note, a chat; the summary row and the day memory are written,
+  an unchanged day is left alone, a late sync rebuilds it, and "on this day" tells it.
+
+    GHOST_PG_SOCKET_DIR=/tmp GHOST_PG_PORT=5432 GHOST_PG_USER=postgres go test ./internal/hw/ ./cmd/ghost.synthd/
+
+Still not verifiable here: the Android build itself (no SDK or Maven in this sandbox; the structural
+check finds no syntax errors, redeclarations or calls to our own functions that do not exist, and
+nothing new beyond missing-SDK noise), the native llama.cpp build, and a live box. One app unit test
+fails, QrSamplerTest.recoversRotated10Degrees (a synthetic 10-degree QR read as version 37 instead of
+25); it fails the same way on the original sources, so it is not from this work.

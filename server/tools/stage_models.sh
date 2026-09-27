@@ -9,7 +9,8 @@
 #   sudo ./tools/stage_models.sh /path/to/dir-with-ggufs [/path/to/llama-server]
 #
 # The source dir should contain the gguf files (main model, mmproj, embedding model , whatever the
-# conf expects; defaults are gemma-4-12b-it-Q4_K_M.gguf, mmproj-F16.gguf, embeddinggemma-300m-q8.gguf).
+# conf expects; defaults are gemma-4-12b-it-Q4_K_M.gguf, mmproj-F16.gguf, and the embedder,
+# embeddinggemma-300m-qat-Q8_0.gguf or the older embeddinggemma-300m-q8.gguf).
 # The optional second argument installs the llama-server binary to /usr/local/bin (it is not secret).
 #
 # NOTE ON PLAINTEXT: staged files sit on the UNENCRYPTED disk until the next unlock ingests them.
@@ -68,7 +69,9 @@ fi
 #    hold a person's whole model zoo (a 19GB DeepSeek staged onto a 19GB /var partition filled it to
 #    100% and broke journald , learned the hard way). Files are matched by the conf-default names;
 #    override the list with GHOST_MODEL_FILES="a.gguf b.gguf" for non-default conf.
-WANTED="${GHOST_MODEL_FILES:-gemma-4-12b-it-Q4_K_M.gguf mmproj-F16.gguf embeddinggemma-300m-q8.gguf}"
+# (both embedder names: the mirror's QAT build, and the one older boxes were set up with; whichever is
+# present is staged, and searchd prefers the QAT build when both are)
+WANTED="${GHOST_MODEL_FILES:-gemma-4-12b-it-Q4_K_M.gguf mmproj-F16.gguf embeddinggemma-300m-qat-Q8_0.gguf embeddinggemma-300m-q8.gguf}"
 
 # Free-space preflight on the staging filesystem , /var is often a small separate partition, and
 # filling it takes the whole system's logging and databases down with it.
@@ -108,6 +111,14 @@ for name in $WANTED; do
     COUNT=$((COUNT + 1))
 done
 chmod 600 "$STAGING"/*.gguf 2>/dev/null || true
+# the mirror's notices and licence terms travel with the weights onto the volume (the Gemma Terms of
+# Use require it for the embedder); setup_llama.sh leaves them beside the files as NOTICE-<set>.txt
+# and TERMS-<name>.txt
+if [ "$COUNT" -gt 0 ]; then
+    for f in "$SRC"/NOTICE*.txt "$SRC"/TERMS-*.txt; do
+        [ -f "$f" ] && cp "$f" "$STAGING/"
+    done
+fi
 
 if [ "$COUNT" -eq 0 ]; then
     echo "!! no gguf files staged from $SRC" >&2
