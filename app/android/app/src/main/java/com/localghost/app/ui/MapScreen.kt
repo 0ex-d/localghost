@@ -1,5 +1,6 @@
 package com.localghost.app.ui
 
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -493,7 +494,9 @@ fun MapScreen() {
     // warm, primaries pale, streets a shade above the land, paths dashed.
     class RoadPaint(val fill: androidx.compose.ui.graphics.Color, val casing: androidx.compose.ui.graphics.Color, val width: Float, val dashed: Boolean)
     val roadPaints = remember {
-        val c = androidx.compose.ui.graphics.Color
+        // Color(0xAARRGGBB) is Compose's top-level factory function, not the Color companion; a
+        // local alias of the class name cannot be called
+        val c = { argb: Long -> androidx.compose.ui.graphics.Color(argb) }
         arrayOf(
             null,
             RoadPaint(c(0xFFE8A24A), c(0xFF6B4A1A), 4.5f, false), // 1 motorway
