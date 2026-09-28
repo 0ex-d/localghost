@@ -54,9 +54,31 @@ has no such exception. A box with no internet at all: a copy of the mirror on a 
 has them); the signature and every hash are checked the same way. The rule underneath is unchanged:
 the box reaches the network at SETUP only.
 
-There is no separate `ghost update` yet: running the same scripts again is the update. Each file
-whose recorded hash (`<dir>/.<name>.sha256`, written when it was verified) equals the manifest's is
-kept without downloading or reading it again, so a rerun costs a manifest and a signature.
+A running box is brought current with one command, unlocked (`redeploy.sh` ships code and reaches
+no network; this ships data):
+
+    sudo ./tools/update.sh                  # maps, embedder, weights, phone model, engine
+    sudo ./tools/update.sh maps embedder    # only these
+    sudo GHOST_GEO_ROADS=europe-latest.osm.pbf ./tools/update.sh maps   # add a continent's streets
+
+It reads the mirror first and stops if it cannot. Then, set by set, it fetches only what the mirror
+lists differently from what the box has, and hands the result to the daemon that uses it:
+- **Maps.** It fetches straight onto the volume. ghost.framed then imports the place names and cuts
+  the coastline and street tiles in the background, and serves the old ones until the new set is
+  whole.
+- **Embedder.** It goes into `ai-models`. ghost.searchd is restarted and embeds the archive again.
+- **Weights.** They are checked against `model.pins`, and any that differ are replaced;
+  ghost.oracled is restarted.
+- **Phone model.** It goes into the system area.
+- **Engine.** It is rebuilt only when the mirror's llama.cpp tarball changed. The new
+  `llama-server` goes onto the volume and ghost.oracled is restarted. A CPU-only build never
+  replaces a CUDA one.
+
+A set installed from the mirror leaves a record: `<dir>/.<name>.sha256`, `<geo>/.mirror-geo`, and
+`.mirror-landpolygons` beside the shapefile. When everything is current, a rerun costs a few
+manifest reads. A set installed before records existed, or from an upstream, is kept as it is and
+the output says so (`GHOST_GEO_REFRESH=1` takes the mirror's). `mirror_fetch.sh --list <set>`
+prints what the current build lists.
 
 Files are published exactly as upstream publishes them, under `MANIFEST.txt`, a sha256sum list
 detach-signed by the site key (the one that signs the site deploys). `tools/mirror_fetch.sh`:

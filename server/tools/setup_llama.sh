@@ -162,6 +162,13 @@ if [ ! -x "$LLAMA_DIR/build/bin/llama-server" ]; then
     # which is exactly the bug this line fixes (the first static build here made that mistake).
     # Preflight nvcc: no CUDA toolkit = loud CPU-only warning, not a cryptic cmake failure.
     CUDA_FLAGS=""
+    # the CUDA toolkit installs nvcc under /usr/local/cuda*/bin, which root's PATH (sudo, a
+    # scripted run) usually lacks: look there before concluding there is none
+    if ! command -v nvcc >/dev/null 2>&1; then
+        for d in /usr/local/cuda/bin /usr/local/cuda-*/bin; do
+            [ -x "$d/nvcc" ] && { PATH="$d:$PATH"; export PATH; break; }
+        done
+    fi
     if command -v nvcc >/dev/null 2>&1; then
         CUDA_FLAGS="-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89"
         echo "[setup_llama] nvcc found , building WITH CUDA (SM 8.9 for the 4070)"

@@ -10,6 +10,9 @@
 #   4. systemctl restart ghost.secd
 #   5. print next-step: the restart LOCKED the box, so re-unlock from the app, then run health.sh
 #
+# CODE only: nothing here reaches the network. The data a box takes from the LocalGhost mirror (maps,
+# weights, embedder, the phone's model, the engine's source) is tools/update.sh, run unlocked.
+#
 # It deliberately does NOT try to unlock (that needs the PIN from the app) and does NOT touch the
 # volume's DB runtime (that is bundle_db_runtime.sh, a separate deliberate act).
 #
@@ -264,6 +267,10 @@ Next:
   2. Verify everything came up:
        sudo ./tools/health.sh
      (run it AFTER unlocking , the cohort daemons only exist while unlocked.)
+  3. The DATA is not part of a redeploy (this script reaches no network). To bring the maps,
+     the embedder, the weights, the phone's model and the engine current with the mirror:
+       sudo ./tools/update.sh
+     (unlocked; a rerun when everything is current costs a few manifest reads)
 
 App side (separate, on your dev machine):
   cd app/android && ./gradlew installDebug

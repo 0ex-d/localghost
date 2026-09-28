@@ -1,5 +1,5 @@
 #!/bin/sh
-# mirror_fetch.sh <set> <dir> [file] , fetch one set (or one file of it) from the LocalGhost mirror
+# mirror_fetch.sh <set> <dir> [file] | --list <set> , fetch one set (or one file of it) from the LocalGhost mirror
 # (https://www.localghost.ai/mirror, what it is and what it promises) into <dir>, every byte checked:
 # the manifest's gpg signature against tools/mirror-key.asc, the site key committed in this repo and
 # pinned here by fingerprint (never fetched at verify time: a key from the same server as the
@@ -29,6 +29,13 @@
 # is not published in this build). Either way the caller says so and stops; neither is a success.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# mirror_fetch.sh --list <set> , the set's files in the current build, "<sha256>  <name>" a line,
+# the signature checked the same way, nothing downloaded (an update compares it with what it has)
+LIST=0
+if [ "${1:-}" = "--list" ]; then
+    LIST=1; shift
+    set -- "${1:-}" "-" ""
+fi
 SET="${1:-}"
 DIR="${2:-}"
 ONLY="${3:-}"
@@ -125,6 +132,10 @@ read_manifest() {
     [ -s "$T/files" ] || na "build $BUILD has no set '$SET' (not published there yet)"
 }
 read_manifest
+if [ "$LIST" = 1 ]; then
+    awk '{ n = $2; sub(".*/", "", n); print $1 "  " n }' "$T/files"
+    exit 0
+fi
 mkdir -p "$DIR" || exit 1
 
 get() { # get <url> <part> , resumes <part>; a server that will not resume starts it over. The HTTP

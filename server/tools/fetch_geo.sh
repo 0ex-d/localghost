@@ -12,12 +12,21 @@
 # Best-effort per file: a miss is a loud note, not a failure , the box works without geo data, and
 # `ghost-cli ghost.framed geo-import` picks up whatever the operator drops in later.
 set -u
-# GHOST_GEO_REFRESH=1 re-downloads everything even if present , the UPDATE path: GeoNames ships
-# daily dumps; refresh then `ghost-cli ghost.framed geo-import` (upserts) then `reprocess` if you
-# want existing frames re-resolved against the newer names.
+# UPDATES (tools/update.sh runs this on a running box): a set installed from the mirror leaves a
+# record (<geo>/.mirror-geo, <shapefile dir>/.mirror-landpolygons, <geo>/roads/.<file>.sha256), and
+# when the mirror's current build lists other bytes the set is fetched again. A set installed
+# before records existed (or from an upstream) is kept as it is and said so; GHOST_GEO_REFRESH=1
+# re-downloads everything regardless. What changed is listed in <geo>/.fetch-geo-changed for the
+# caller: geo, landpolygons, roads (fetched), landtiles, roadtiles (want cutting); new names want
+# `ghost-cli ghost.framed geo-import` (upserts), the tiles geo-tiles / road-tiles. GHOST_GEO_NO_CUT=1 leaves the cutting to ghost.framed (geo-tiles,
+# road-tiles, in the background on a running box) instead of doing it here.
 DEST="${1:?usage: fetch_geo.sh <dest-dir>}"
 FORCE="${GHOST_GEO_REFRESH:-}"
+NOCUT="${GHOST_GEO_NO_CUT:-}"
 mkdir -p "$DEST"
+CHANGED="$DEST/.fetch-geo-changed"
+: > "$CHANGED"
+changed() { echo "$1" >> "$CHANGED"; }
 GN="https://download.geonames.org/export/dump"
 # 10m, not 110m: at 110m Vancouver Island is a twelve-vertex cartoon and photo dots sit "in the
 # ocean" next to a coastline that is the thing that is wrong. 24MB buys real fjords.
@@ -68,8 +77,19 @@ geo_missing() {
     done
     return 1
 }
+# behind: installed from the mirror (a record) and the mirror now lists other bytes. The mirror not
+# answering is not "behind": what is here stays.
+listed() { sh "$FETCH" --list "$1" 2>/dev/null; }
+behind() { # behind <set> <record file>
+    [ -s "$2" ] || return 1
+    _l="$(listed "$1")" || return 1
+    [ -n "$_l" ] && [ "$_l" != "$(cat "$2")" ]
+}
 rc=0
-if [ -n "$FORCE" ] || geo_missing; then
+if [ -z "$FORCE" ] && ! geo_missing && [ ! -s "$DEST/.mirror-geo" ]; then
+    echo "  geo: present, not from a recorded mirror build , kept (GHOST_GEO_REFRESH=1 takes the mirror's)"
+fi
+if [ -n "$FORCE" ] || geo_missing || behind geo "$DEST/.mirror-geo"; then
     STAGE="$DEST/.mirror-dl"
     sh "$FETCH" geo "$STAGE"
     rc=$?
@@ -84,6 +104,8 @@ if [ -n "$FORCE" ] || geo_missing; then
     case "$rc" in
         0) MIRROR_GEO=1
            rm -rf "$STAGE"
+           listed geo > "$DEST/.mirror-geo.tmp" && mv -f "$DEST/.mirror-geo.tmp" "$DEST/.mirror-geo"
+           changed geo
            echo "  geo: GeoNames + Natural Earth from the mirror, signature and hashes checked (terms beside them)" ;;
         3) rm -rf "$STAGE"; why_not 3 geo ;;
         *) why_not "$rc" geo ;;
@@ -155,6 +177,14 @@ GEOFABRIK="https://download.geofabrik.de"
 ALLROADS="africa-latest.osm.pbf antarctica-latest.osm.pbf asia-latest.osm.pbf australia-oceania-latest.osm.pbf central-america-latest.osm.pbf europe-latest.osm.pbf north-america-latest.osm.pbf south-america-latest.osm.pbf"
 ROADFILES="${GHOST_GEO_ROADS:-}"
 [ "$ROADFILES" = all ] && ROADFILES="$ALLROADS"
+# not asked: the extracts this box already took from the mirror are kept current (a new extract on
+# the mirror is fetched and cut again); nothing new is added without asking
+if [ -z "$ROADFILES" ] && [ -d "$ROADS" ]; then
+    for p in "$ROADS"/*.osm.pbf; do
+        [ -f "$p" ] && [ -f "$ROADS/.$(basename "$p").sha256" ] && ROADFILES="$ROADFILES $(basename "$p")"
+    done
+    ROADFILES="${ROADFILES# }"
+fi
 if [ -z "$ROADFILES" ]; then
     if [ -s "$RTILES/index.bin" ]; then
         echo "  geo: road tiles present in $RTILES (GHOST_GEO_ROADS=all to refresh the extracts)"
@@ -165,14 +195,28 @@ else
     mkdir -p "$ROADS"
     got=0; missing=""
     for f in $ROADFILES; do
-        if [ -s "$ROADS/$f" ] && [ -z "$FORCE" ]; then
+        if [ -s "$ROADS/$f" ] && [ -z "$FORCE" ] && [ ! -f "$ROADS/.$f.sha256" ]; then
+            echo "  geo: $f present, not from a recorded mirror build , kept (GHOST_GEO_REFRESH=1 takes the mirror's)"
             got=$((got + 1))
             continue
         fi
+        # from the mirror: a file whose record matches the current build costs one manifest read
+        before="$(cat "$ROADS/.$f.sha256" 2>/dev/null)"
         frc=0; sh "$FETCH" roads "$ROADS" "$f" || frc=$?
         if [ "$frc" = 0 ] && [ -s "$ROADS/$f" ]; then
             got=$((got + 1))
-            echo "  geo: $f from the mirror, signature and hash checked"
+            if [ "$(cat "$ROADS/.$f.sha256" 2>/dev/null)" != "$before" ]; then
+                changed roads
+                echo "  geo: $f from the mirror, signature and hash checked"
+            else
+                echo "  geo: $f current with the mirror"
+            fi
+            continue
+        fi
+        if [ -s "$ROADS/$f" ]; then
+            why_not "$frc" "roads ($f)"
+            echo "        the $f already here is kept"
+            got=$((got + 1))
             continue
         fi
         why_not "$frc" "roads ($f)"
@@ -185,8 +229,11 @@ else
     done
     [ -n "$missing" ] && echo "  note: not fetched:$missing , those regions will have no streets until they are"
     if [ "$got" -gt 0 ]; then
-        if [ -z "$FORCE" ] && [ -s "$RTILES/index.bin" ] && [ "$(find "$ROADS" -name '*.osm.pbf' -newer "$RTILES/index.bin" | wc -l)" = 0 ]; then
+        if [ -z "$FORCE" ] && [ -s "$RTILES/index.bin" ] && [ -d "$RTILES/graph" ] && [ "$(find "$ROADS" -name '*.osm.pbf' -newer "$RTILES/index.bin" | wc -l)" = 0 ]; then
             echo "  geo: the road tiles are already here ($RTILES)"
+        elif [ -n "$NOCUT" ]; then
+            changed roadtiles
+            echo "  geo: the road tiles want cutting , left to ghost.framed (road-tiles, in the background)"
         elif [ -x "$RCUT" ]; then
             echo "  geo: cutting the roads into tiles (hours for the world; ~2 GB of RAM plus the page cache)"
             if "$RCUT" -out "$RTILES" -work "$RTILES.work" -in "$ROADS"; then
@@ -214,10 +261,14 @@ SHPDIR="$DEST/land-polygons-complete-4326"
 SHP="$SHPDIR/land_polygons.shp"
 if [ -n "${GHOST_GEO_NO_OSM:-}" ]; then
     echo "  geo: OpenStreetMap land polygons skipped (GHOST_GEO_NO_OSM set) , the map keeps the 10m coast"
-elif [ -z "$FORCE" ] && [ -s "$TILES/index.bin" ]; then
-    echo "  geo: the coastline tiles are already here ($TILES)"
+elif [ -z "$FORCE" ] && [ -s "$TILES/index.bin" ] && ! behind landpolygons "$SHPDIR/.mirror-landpolygons"; then
+    if [ -s "$SHPDIR/.mirror-landpolygons" ]; then
+        echo "  geo: the coastline tiles are here and current with the mirror ($TILES)"
+    else
+        echo "  geo: the coastline tiles are here, not from a recorded mirror build , kept (GHOST_GEO_REFRESH=1 takes the mirror's)"
+    fi
 else
-    if [ -s "$SHP" ] && [ -z "$FORCE" ]; then
+    if [ -s "$SHP" ] && [ -z "$FORCE" ] && ! behind landpolygons "$SHPDIR/.mirror-landpolygons"; then
         echo "  geo: OpenStreetMap land polygons already present"
     else
         got=0
@@ -229,6 +280,8 @@ else
            unzip -q -o "$LST/land-polygons-complete-4326.zip" -d "$DEST"; then
             cp "$LST"/TERMS-*.txt "$LST"/NOTICE.txt "$SHPDIR/" 2>/dev/null || true
             rm -rf "$LST"
+            listed landpolygons > "$SHPDIR/.mirror-landpolygons.tmp" && mv -f "$SHPDIR/.mirror-landpolygons.tmp" "$SHPDIR/.mirror-landpolygons"
+            changed landpolygons
             got=1
             echo "  geo: OpenStreetMap land polygons from the mirror, signature and hash checked ($(du -sh "$SHPDIR" 2>/dev/null | cut -f1))"
         fi
@@ -244,7 +297,10 @@ else
         fi
     fi
     if [ -s "$SHP" ]; then
-        if [ -x "$CUT" ]; then
+        if [ -n "$NOCUT" ]; then
+            changed landtiles
+            echo "  geo: the coastline tiles want cutting , left to ghost.framed (geo-tiles, in the background)"
+        elif [ -x "$CUT" ]; then
             echo "  geo: cutting the coastline into tiles (a few minutes, a couple of GB of RAM)"
             if "$CUT" "$SHP" "$TILES"; then
                 cp "$SHPDIR"/TERMS-*.txt "$SHPDIR"/NOTICE.txt "$TILES/" 2>/dev/null || true

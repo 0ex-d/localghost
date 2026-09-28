@@ -2199,3 +2199,53 @@ check finds no syntax errors, redeclarations or calls to our own functions that 
 nothing new beyond missing-SDK noise), the native llama.cpp build, and a live box. One app unit test
 fails, QrSamplerTest.recoversRotated10Degrees (a synthetic 10-degree QR read as version 37 instead of
 25); it fails the same way on the original sources, so it is not from this work.
+
+## tools/update.sh: the box's data from the mirror, in one command
+
+Vlad, after the redeploy: "the redeploy did not pull the maps and everything else". It never did.
+redeploy.sh ships code (build, stage, restart) and reaches no network. The data came only from the
+setup scripts, one by one, and on a running box they had to be run through ns.sh by hand. The
+contract's "ghost update does the same walk" had nothing behind it.
+
+**What update.sh does.** `sudo ./tools/update.sh` runs on an unlocked box. It reads the mirror
+first and stops if it cannot. Then it walks five steps: maps, embedder, weights, phone, engine.
+Naming steps runs only those. Each step fetches only what the mirror lists differently from what
+is there, and hands the result to the daemon that uses it:
+
+- **maps.** `fetch_geo.sh` runs through ns.sh's host-side door onto `<mount>/geo`. It no longer
+  cuts tiles itself (`GHOST_GEO_NO_CUT=1`). Afterwards the step chowns to the volume's owner and
+  asks ghost.framed for `geo-import` when place names changed, `geo-tiles` when the coastline
+  changed or its tiles are missing, and `road-tiles` for new streets. framed does these in the
+  background and serves the old tiles meanwhile.
+- **embedder.** EmbeddingGemma QAT goes into `ai-models` with its notice and terms, and
+  ghost.searchd is restarted. It picks the QAT build and queues the archive to be embedded again.
+- **weights.** `models_check.sh --fix`.
+- **phone.** `phone_model.sh`.
+- **engine.** `setup_llama.sh --build-only`. It rebuilds only when the mirror's tarball changed,
+  or when this box still has a git checkout (xyntai does, so the first run is one CUDA rebuild).
+  The new `llama-server` is installed onto the volume beside the old one, renamed over it, and
+  ghost.oracled is restarted. It refuses to put a CPU-only build over a CUDA one.
+- **setup_llama.sh** now finds nvcc under `/usr/local/cuda*/bin`. Root's PATH, and anything run
+  from a script, usually lacks it, and that is how a box ends up with a CPU-only engine.
+
+**How fetch_geo.sh knows what is current.** A set installed from the mirror leaves a record:
+`.mirror-geo`, `.mirror-landpolygons`, and the roads files' `.<name>.sha256`. When the mirror's
+current build lists other bytes, the set is fetched again. A set installed before records existed
+is kept, and the output says so (`GHOST_GEO_REFRESH=1` takes the mirror's). Roads that were never
+asked for are not added. Continents the box already took from the mirror are kept current.
+`mirror_fetch.sh --list <set>` prints the current build's files, with the signature checked and
+nothing downloaded.
+
+**redeploy.sh** says in its header and its closing lines that data is update.sh's job.
+
+**Tested here** against the signed fake mirror and a fake unlocked box: a stand-in ghost.secd
+process, so ns.sh's `/proc/<pid>/root` door is real, and stub ghost-cli and ghost-ctl.
+- A first run fetches geo, the coastline, the embedder and the phone model, and builds the
+  engine. It asks framed for geo-import and geo-tiles, and asks watchd to restart searchd and
+  oracled.
+- A rerun reports everything current and asks for nothing.
+- A newly published countryInfo and coastline are fetched again, re-imported and re-cut.
+- `GHOST_GEO_ROADS=europe…` fetches the extract and asks for road-tiles. A rerun without it keeps
+  the extract current and asks for nothing.
+
+**Not run here:** a real box, ns.sh against a real namespace, CUDA.
