@@ -2249,3 +2249,19 @@ process, so ns.sh's `/proc/<pid>/root` door is real, and stub ghost-cli and ghos
   the extract current and asks for nothing.
 
 **Not run here:** a real box, ns.sh against a real namespace, CUDA.
+
+**First real run on xyntai (2026-09-28).**
+- **Engine refused, and the check was wrong.** The mirror's tarball unpacks into
+  `llama.cpp-7fe450e19305b828c199d602c23a8337aaa1f03b/`. I had required the folder to start with
+  the commit. It now takes the full 40-hex commit from anywhere in the folder name, requires it to
+  match the short one in the file name, and requires exactly one top folder. I tested it on five
+  layouts: `llama.cpp-<full>` and `<full>` are built; `llama.cpp-master`, two folders, and another
+  commit are refused. `.mirror-commit` now holds the full commit. The stop message no longer
+  assumes the mirror was away.
+- **Weights.** The volume's `gemma-4-12b-it-Q4_K_M.gguf` was 1,440 bytes short of the pinned
+  build, a different upload under the same name. It was replaced from the mirror and oracled
+  restarted.
+- **models_check.sh cleanup hint.** It printed `ns.sh rm /proc/<pid>/root/...*.replaced`. The
+  host shell expands that glob where the volume is not mounted, so the hint did nothing. It now
+  names each file by its path inside the namespace.
+- **Embedder and phone model** came from the mirror as designed.

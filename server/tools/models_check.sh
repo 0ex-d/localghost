@@ -84,8 +84,11 @@ for f in "$STAGE"/TERMS-*.txt; do [ -f "$f" ] && mv -f "$f" "$DIR/"; done
 rm -rf "$STAGE"
 echo "> restarting ghost.oracled so llama-server loads the pinned files"
 if "$HERE/../bin/ghost-ctl" restart-daemon ghost.oracled >/dev/null 2>&1 || /opt/localghost/bin/ghost-ctl restart-daemon ghost.oracled >/dev/null 2>&1; then
-    echo "> done. Check: sudo ./tools/health.sh ghost.oracled ; then delete the .replaced files when happy:"
-    echo "    sudo ./tools/ns.sh rm $DIR/*.replaced"
+    # the paths as the namespace sees them (through ns.sh this script sees /proc/<pid>/root/...), and
+    # each file by name: a glob would be expanded by the host shell, where the volume is not mounted
+    nat="${DIR#/proc/*/root}"
+    echo "> done. Check: sudo ./tools/health.sh ghost.oracled ; then delete the old file(s) when happy:"
+    for n in $fetched; do echo "    sudo ./tools/ns.sh rm $nat/$n.replaced"; done
 else
     echo "!! could not ask watchd to restart ghost.oracled , do it by hand: sudo ./tools/ns.sh ./bin/ghost-ctl restart-daemon ghost.oracled" >&2
     exit 4

@@ -107,22 +107,30 @@ from_mirror() {
     # llama.cpp-<tag>-<commit>.tar.gz: the folder inside must be that commit, in full
     _base="${TB%.tar.gz}"; _base="${_base#llama.cpp-}"
     _short="${_base##*-}"
-    _top="$(tar -tzf "$TBP" | head -1 | cut -d/ -f1)"
-    case "$_top" in
+    # the one folder inside carries the full commit (the mirror's is llama.cpp-<40 hex>/; a bare
+    # <40 hex>/ is fine too): it must be the commit the file is named for, and everything must sit
+    # under it, or --strip-components=1 would scatter it
+    tar -tzf "$TBP" | cut -d/ -f1 | grep -vx 'pax_global_header' | sort -u > "$SRC_DL/.top"
+    _top="$(head -1 "$SRC_DL/.top")"
+    _full="$(printf '%s\n' "$_top" | grep -oE '[0-9a-f]{40}' | head -1)"
+    if [ "$(wc -l < "$SRC_DL/.top")" != 1 ]; then
+        echo "!! $TB holds more than one folder ($(tr '\n' ' ' < "$SRC_DL/.top")) , not built" >&2; return 1
+    fi
+    case "$_full" in
         "$_short"*) ;;
-        *) echo "!! $TB unpacks into '$_top', not a folder named after commit $_short , not built" >&2; return 1 ;;
+        *) echo "!! $TB unpacks into '$_top', which does not name commit $_short in full , not built" >&2; return 1 ;;
     esac
     rm -rf "$LLAMA_DIR.new" && mkdir -p "$LLAMA_DIR.new"
     tar -xzf "$TBP" -C "$LLAMA_DIR.new" --strip-components=1 || { rm -rf "$LLAMA_DIR.new"; return 1; }
     # provenance, read by the build below and by health.sh
     echo "$TB" > "$LLAMA_DIR.new/.mirror-src"
-    echo "$_top" > "$LLAMA_DIR.new/.mirror-commit"
+    echo "$_full" > "$LLAMA_DIR.new/.mirror-commit"
     sha256sum "$TBP" | cut -d' ' -f1 > "$LLAMA_DIR.new/.mirror-sha256"
     cp "$SRC_DL"/NOTICE.txt "$SRC_DL"/TERMS-*.txt "$LLAMA_DIR.new/" 2>/dev/null || true
     rm -rf "$LLAMA_DIR.old"
     [ -d "$LLAMA_DIR" ] && mv "$LLAMA_DIR" "$LLAMA_DIR.old"
     mv "$LLAMA_DIR.new" "$LLAMA_DIR" && rm -rf "$LLAMA_DIR.old"
-    echo "-- llama.cpp source from the mirror: $TB (commit $_top), signature and hash checked"
+    echo "-- llama.cpp source from the mirror: $TB (commit $_full), signature and hash checked"
 }
 
 echo "=== 2/5  llama.cpp , the mirror's source, built in its own folder ==="
@@ -143,7 +151,7 @@ else
         echo "   $LLAMA_DIR is a git checkout: it is not built any more (every box builds the mirror's" >&2
         echo "   pinned source, never master). The llama-server already installed keeps running." >&2
     fi
-    echo "   Stopping. Re-run when the mirror answers, or bring the mirror's tarball:" >&2
+    echo "   Stopping (the line above says why). When it was the mirror not answering: re-run, or bring its tarball:" >&2
     echo "     --llama-tarball <llama.cpp-*.tar.gz>   (checked against the signed manifest all the same)" >&2
     echo "     GHOST_MIRROR=file:///<a copy of the mirror on a disk>" >&2
     exit 1
