@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/LocalGhostDao/localghost/server/internal/hw"
@@ -34,6 +35,49 @@ type Server struct {
 	session        *sessionManager // the one live session token (foreground + poller share it)
 	mute           *hw.MuteStore   // notification mute read/write (in-volume Postgres/Redis), per scope
 	notif          *hw.NotifStore  // notification produce/read/seen/delete (in-volume Postgres/Redis)
+	// closing: a lock, halt or shutdown is tearing the volume down. Uploads are refused from the
+	// first moment and the ones already streaming are cut (spoolBody reads through a gate that
+	// fails once this is set), so no open file on the volume keeps it from unmounting. On 29 Sep
+	// 2026 a phone re-sending its camera roll held a .part open through every restart: umount
+	// "target is busy" for 75 s, then secd gave up with the LUKS mapping still open.
+	closing atomic.Bool
+	// uploads: the request bodies streaming into the volume right now. closeDoors sets each one's
+	// read deadline to now, so even a body read that is blocked on a stalled phone returns at once.
+	upMu    sync.Mutex
+	uploads map[*http.ResponseController]struct{}
+}
+
+// closeDoors is the first step of every teardown: no new session-authenticated call from here
+// on, and every upload still streaming into the volume stops, whether it is mid-read (the gate)
+// or waiting on the network (the read deadline).
+func (s *Server) closeDoors() {
+	s.closing.Store(true)
+	s.session.Revoke()
+	s.upMu.Lock()
+	for rc := range s.uploads {
+		_ = rc.SetReadDeadline(time.Now())
+	}
+	s.upMu.Unlock()
+}
+
+// streaming registers an upload for closeDoors to cut; the handler defers the release. An upload
+// that registers just as the doors close sees the flag here and is cut the same way.
+func (s *Server) streaming(w http.ResponseWriter) (release func()) {
+	rc := http.NewResponseController(w)
+	s.upMu.Lock()
+	if s.uploads == nil {
+		s.uploads = map[*http.ResponseController]struct{}{}
+	}
+	s.uploads[rc] = struct{}{}
+	s.upMu.Unlock()
+	if s.closing.Load() {
+		_ = rc.SetReadDeadline(time.Now())
+	}
+	return func() {
+		s.upMu.Lock()
+		delete(s.uploads, rc)
+		s.upMu.Unlock()
+	}
 }
 
 type Config struct {
@@ -98,6 +142,8 @@ func (s *Server) Halt(pin string) {
 	if mounted < 0 {
 		return // cold box: nothing to halt, and nothing to learn from the silence
 	}
+	s.closeDoors()
+	defer s.closing.Store(false) // the volume stays mounted; the next unlock opens the doors again
 	if err := s.unlock.Halt(mounted); err != nil {
 		secdLog.Warn("halt: teardown reported trouble (volume still mounted)", "fn", "Halt", "err", err)
 	}
@@ -115,6 +161,8 @@ func (s *Server) Off(pin string) {
 		s.session.Revoke() // already cold; kill any stray token too
 		return
 	}
+	s.closeDoors()
+	defer s.closing.Store(false)
 	if _, err := s.unlock.Lock(mounted); err != nil {
 		// The volume did not fully close. Stay honest about mounted state (it is still up); the caller
 		// gets no detail either way. Log locally for the operator; the socket reply is opaque.
@@ -294,6 +342,8 @@ func (s *Server) handleLock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.closeDoors()
+	defer s.closing.Store(false)
 	steps, err := s.unlock.Lock(mounted)
 	if err != nil {
 		// The volume did not fully close. Do NOT claim locked, but DO return the steps so the app can
@@ -323,6 +373,7 @@ func (s *Server) Shutdown() error {
 	if mounted < 0 {
 		return nil // already locked; nothing to tear down
 	}
+	s.closeDoors() // stays closed: the process is ending
 	_, err := s.unlock.Lock(mounted)
 	s.mu.Lock()
 	s.mounted = -1

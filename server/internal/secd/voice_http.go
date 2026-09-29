@@ -50,6 +50,11 @@ func (s *Server) handleVoiceUpload(w http.ResponseWriter, r *http.Request) {
 		s.appearsDown(w)
 		return
 	}
+	if s.closing.Load() {
+		s.appearsDown(w) // locking: nothing new goes into the volume
+		return
+	}
+	defer s.streaming(w)()
 	id := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Ghost-Voice-Id")))
 	if !voiced.IDRE.MatchString(id) {
 		secdLog.Warn("voice upload rejected: bad id", "fn", "handleVoiceUpload")
@@ -96,7 +101,7 @@ func (s *Server) handleVoiceUpload(w http.ResponseWriter, r *http.Request) {
 		s.appearsDown(w)
 		return
 	}
-	n, err := io.Copy(f, http.MaxBytesReader(w, r.Body, voiceMaxBytes))
+	n, err := io.Copy(f, gateReader{r: http.MaxBytesReader(w, r.Body, voiceMaxBytes), stop: &s.closing})
 	if err == nil {
 		err = f.Sync()
 	}
@@ -108,6 +113,10 @@ func (s *Server) handleVoiceUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		_ = os.Remove(part)
+		if s.closing.Load() {
+			s.appearsDown(w) // cut by a lock: the phone keeps the note and sends it again
+			return
+		}
 		secdLog.Warn("voice upload failed", "fn", "handleVoiceUpload", "id", id[:8], "bytes", n, "err", err)
 		http.Error(w, "upload failed", http.StatusBadRequest)
 		return

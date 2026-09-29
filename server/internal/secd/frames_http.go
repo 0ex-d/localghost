@@ -14,6 +14,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/LocalGhostDao/localghost/server/internal/ctlsock"
 	"github.com/LocalGhostDao/localghost/server/internal/gpu"
@@ -26,6 +27,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -67,8 +69,18 @@ func (s *Server) handleFrameUpload(w http.ResponseWriter, r *http.Request) {
 	dir := filepath.Join(s.cfg.StateDir, "mnt", fmt.Sprintf("slot%d", mounted), "frames", "incoming")
 	t0 := time.Now()
 	uid, gid := s.spoolCred()
-	n, err := spoolBody(dir, r, uploadMaxBytes, uid, gid)
+	if s.closing.Load() {
+		s.appearsDown(w) // locking: nothing new goes into the volume
+		return
+	}
+	defer s.streaming(w)()
+	n, err := spoolBody(dir, r, uploadMaxBytes, uid, gid, &s.closing)
 	if err != nil {
+		if s.closing.Load() {
+			secdLog.Info("frame upload cut: the box is locking", "fn", "handleFrameUpload")
+			s.appearsDown(w) // the phone keeps it and sends it after the next unlock
+			return
+		}
 		secdLog.Warn("frame upload spool failed", "fn", "handleFrameUpload", "dir", dir, "err", err)
 		http.Error(w, "upload failed", http.StatusInsufficientStorage)
 		return
@@ -526,8 +538,17 @@ func (s *Server) handleLocations(w http.ResponseWriter, r *http.Request) {
 	}
 	dir := filepath.Join(s.cfg.StateDir, "mnt", fmt.Sprintf("slot%d", mounted), "frames", "incoming-locations")
 	uid, gid := s.spoolCred()
-	n, err := spoolBody(dir, r, locationsMaxBytes, uid, gid)
+	if s.closing.Load() {
+		s.appearsDown(w)
+		return
+	}
+	defer s.streaming(w)()
+	n, err := spoolBody(dir, r, locationsMaxBytes, uid, gid, &s.closing)
 	if err != nil {
+		if s.closing.Load() {
+			s.appearsDown(w)
+			return
+		}
 		secdLog.Warn("location spool failed", "fn", "handleLocations", "dir", dir, "err", err)
 		http.Error(w, "upload failed", http.StatusInsufficientStorage)
 		return
@@ -536,9 +557,27 @@ func (s *Server) handleLocations(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 }
 
+// errClosing: the volume is being locked; an upload still streaming stops here, its .part removed.
+var errClosing = errors.New("the box is locking: upload stopped")
+
+// gateReader fails every read once the box starts closing (Server.closeDoors), so an upload in
+// flight lets go of its file within one read instead of pinning the volume open.
+type gateReader struct {
+	r    io.Reader
+	stop *atomic.Bool
+}
+
+func (g gateReader) Read(p []byte) (int, error) {
+	if g.stop != nil && g.stop.Load() {
+		return 0, errClosing
+	}
+	return g.r.Read(p)
+}
+
 // spoolBody streams the request body to a fresh .part file in dir, fsyncs, and renames it live. The
 // name is arrival-ordered (nanosecond timestamp) plus random hex so concurrent uploads never collide.
-func spoolBody(dir string, r *http.Request, maxBytes int64, uid, gid int) (int64, error) {
+// stop is the box's closing flag: once it is set the copy fails and the .part is removed.
+func spoolBody(dir string, r *http.Request, maxBytes int64, uid, gid int, stop *atomic.Bool) (int64, error) {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return 0, fmt.Errorf("create spool dir: %w", err)
 	}
@@ -573,7 +612,7 @@ func spoolBody(dir string, r *http.Request, maxBytes int64, uid, gid int) (int64
 	if err != nil {
 		return 0, fmt.Errorf("create .part: %w", err)
 	}
-	body := http.MaxBytesReader(nil, r.Body, maxBytes)
+	body := gateReader{r: http.MaxBytesReader(nil, r.Body, maxBytes), stop: stop}
 	n, err := io.Copy(f, body)
 	if err != nil {
 		_ = f.Close()
@@ -920,9 +959,9 @@ func (s *Server) handleGeoTracks(w http.ResponseWriter, r *http.Request) {
 			}
 			if rb, err := os.ReadFile(filepath.Join(dir, d+".route.json")); err == nil {
 				var rt struct {
-					Line  string  `json:"line"`
-					WalkM float64 `json:"walkM"`
-					RideM float64 `json:"rideM"`
+					Line  string            `json:"line"`
+					WalkM float64           `json:"walkM"`
+					RideM float64           `json:"rideM"`
 					Stays []json.RawMessage `json:"stays"`
 				}
 				if json.Unmarshal(rb, &rt) == nil {

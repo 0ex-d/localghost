@@ -2535,3 +2535,30 @@ Now:
   box saying so (src "none": a new device, or after a reset) means the beginning.
 - **An existence check the box didn't answer stops the run.** Nothing is skipped, because the
   cursor never passes an unconfirmed photo, and nothing is uploaded blind.
+
+## A lock that couldn't unmount under the phone's uploads (secd)
+
+At 20:47 the redeploy restarted secd while the phone (still the old app) was re-sending its camera
+roll. secd's shutdown lock stopped the cohort and the databases, then `umount` said "target is
+busy" for 75 s. The holder was secd itself: the upload handlers were still streaming bodies into
+`.part` files on the volume (one "frame spooled took=23s"). After 75 s the lock gave up ("clean
+lock on shutdown reported: umount slot 0: exit status 32 … target is busy") and left the LUKS
+mapping open. The next unlock repairs that state (it finds the mapping open and the volume
+mounted), so nothing is lost, but each restart took 76 s and ended half-locked.
+
+Now every teardown (lock from the app, halt, off, and the shutdown lock) starts by closing the
+doors:
+- **New uploads are refused** (frames, locations, voice notes) with the usual appears-down before a
+  file is made, and the session is revoked at once rather than at the end.
+- **Uploads already streaming are cut.** A body still arriving fails at its next read (a gate on the
+  reader). A body stalled on the network is cut by setting its connection's read deadline to now.
+  Either way the `.part` is removed, the handler answers appears-down, and the phone keeps the photo
+  or note for after the next unlock.
+- A halt, or a lock that fails, opens the doors again, because the volume stays mounted.
+
+Tested: a streaming upload and a stalled upload are both cut in under 2 s with no file left, and a
+new upload while closing is refused (`internal/secd/closing_test.go`). With the read deadline taken
+out, the stalled case still holds the volume after 5 s, so the test catches it.
+
+Deploy this when the phone's sync is paused or the new app is installed. A redeploy restarts secd,
+which locks the box.
