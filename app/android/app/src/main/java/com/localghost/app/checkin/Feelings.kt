@@ -1,0 +1,114 @@
+package com.localghost.app.checkin
+
+/**
+ * The DAILY CHECK-IN's vocabulary and its small rules, kept apart from the screen so they can be
+ * tested. Pure Kotlin: no Android.
+ *
+ * The feelings come in the four quadrants of the usual mood meter (pleasant or not, lots of energy
+ * or little) plus a row for where your head is. The card shows a QUICK ROW first (the box's guesses
+ * from the day, then your own usual ones, then a few common ones) and the full grouped list behind
+ * "more", so a check-in is two taps on most days and still has the word for the odd one.
+ *
+ * PRESELECTED: the box's first two guesses (short sleep, a long walk, a day by the sea...) are
+ * ticked before you look, marked as the box's, one tap to untick. The check-in text records them
+ * ("Preselected: tired") so a later look at the moods can tell a guess left standing from a
+ * feeling picked.
+ */
+object Feelings {
+    data class Group(val label: String, val hint: String, val feelings: List<String>)
+
+    val groups = listOf(
+        Group("bright", "pleasant, lots of energy",
+            listOf("happy", "excited", "energised", "proud", "inspired", "playful", "confident", "hopeful")),
+        Group("easy", "pleasant, not much energy",
+            listOf("calm", "content", "grateful", "relaxed", "rested", "loved", "connected", "peaceful")),
+        Group("tense", "unpleasant, lots of energy",
+            listOf("stressed", "anxious", "frustrated", "irritable", "restless", "overwhelmed", "angry", "worried")),
+        Group("heavy", "unpleasant, not much energy",
+            listOf("tired", "low", "sad", "lonely", "bored", "drained", "disappointed", "unwell")),
+        Group("mind", "where your head is",
+            listOf("focused", "curious", "reflective", "nostalgic", "distracted", "unsure")),
+    )
+
+    val all: List<String> = groups.flatMap { it.feelings }
+
+    /** Up to this many feelings a day: enough for a mixed day, few enough to mean something. */
+    const val MAX_PICKS = 4
+
+    /** How many of the box's guesses are ticked before the person looks. */
+    const val PRESELECT = 2
+
+    /** The quick row's length, and what fills it when the box and the history say little. */
+    const val QUICK = 8
+    val common = listOf("calm", "happy", "tired", "stressed", "focused", "grateful", "anxious", "low")
+
+    /** The person's own usual feelings, most picked first, from past check-ins ("a, b, c" each). */
+    fun usual(history: List<String>): List<String> {
+        val count = LinkedHashMap<String, Int>()
+        for (line in history) {
+            for (raw in line.split(',')) {
+                val f = raw.trim().lowercase()
+                if (f.isEmpty() || f.startsWith("(")) continue // "(unspecified)"
+                count[f] = (count[f] ?: 0) + 1
+            }
+        }
+        return count.entries.sortedByDescending { it.value }.map { it.key }
+    }
+
+    /** The quick row: the box's guesses, then the usual ones, then the common ones; no repeats. */
+    fun quick(suggested: List<String>, usual: List<String>, n: Int = QUICK): List<String> {
+        val out = ArrayList<String>()
+        for (f in suggested + usual + common) {
+            if (out.size >= n) break
+            if (f !in out) out.add(f)
+        }
+        return out
+    }
+
+    /** What is ticked before the person looks: the box's first guesses. */
+    fun preselect(suggested: List<String>): List<String> = suggested.distinct().take(PRESELECT)
+
+    /** Tap on a feeling: untick it, or tick it if there is room. Returns the new list. */
+    fun toggle(picked: List<String>, f: String): List<String> = when {
+        f in picked -> picked - f
+        picked.size >= MAX_PICKS -> picked
+        else -> picked + f
+    }
+
+    /** Chips into rows that fit a phone's width: at most [maxChars] of text a row (a chip is its
+     *  word plus two for its brackets), and never more than [maxPer]. */
+    fun rows(words: List<String>, maxChars: Int = 30, maxPer: Int = 4): List<List<String>> {
+        val out = ArrayList<List<String>>()
+        var row = ArrayList<String>()
+        var len = 0
+        for (w in words) {
+            val add = w.length + 3
+            if (row.isNotEmpty() && (len + add > maxChars || row.size >= maxPer)) {
+                out.add(row); row = ArrayList(); len = 0
+            }
+            row.add(w); len += add
+        }
+        if (row.isNotEmpty()) out.add(row)
+        return out
+    }
+
+    /** m:ss for a voice note's length. */
+    fun clock(ms: Long): String {
+        val s = (ms + 500) / 1000
+        return "%d:%02d".format(s / 60, s % 60)
+    }
+
+    /**
+     * The check-in as the journal keeps it (POST /v1/notes). The box parses these lines back
+     * (CheckinHistory) and synthd reads "Feeling:" into the day's summary; keep the line names.
+     */
+    fun checkinText(day: String, picked: List<String>, preselected: List<String>, why: String,
+                    voiceId: String?, voiceMs: Long): String {
+        val b = StringBuilder("Daily check-in ").append(day)
+        b.append("\nFeeling: ").append(if (picked.isEmpty()) "(unspecified)" else picked.joinToString(", "))
+        if (preselected.isNotEmpty()) b.append("\nPreselected: ").append(preselected.joinToString(", "))
+        if (why.isNotBlank()) b.append("\nWhy: ").append(why.trim())
+        if (!voiceId.isNullOrBlank()) b.append("\nVoice: ").append(voiceId).append(' ').append(clock(voiceMs))
+        return b.toString()
+    }
+}
