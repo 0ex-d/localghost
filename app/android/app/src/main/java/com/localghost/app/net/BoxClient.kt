@@ -570,20 +570,30 @@ object BoxClient {
         BoxHttp.postJson(ctx, "/v1/sync/reset", org.json.JSONObject()).optBoolean("reset", false)
     } catch (_: Exception) { false }
 
-    /** The box's authoritative cursor per kind , the ONLY cursor. (0,0) on any failure: the run
-     *  then re-offers from the beginning and the hash dedup absorbs it , slow but never wrong. */
-    suspend fun getCursor(ctx: Context, kind: MediaKind): com.localghost.app.sync.Cursor = try {
+    /** The box's authoritative cursor per kind , the ONLY cursor. NULL when the box did not give
+     *  one: unreachable, locked, its database busy, or any answer without the cursor in it. The run
+     *  then does not start. It used to be (0,0) "on any failure": on 29 Sep 2026 the box answered
+     *  503 for a few minutes during a stuck unlock, every phone run started from the beginning of
+     *  the camera roll, and (the existence check failing too) uploaded all of it again. Only the
+     *  box saying "none" (src "none", a new device or after a reset) means the beginning. */
+    suspend fun getCursor(ctx: Context, kind: MediaKind): com.localghost.app.sync.Cursor? = try {
         val r = BoxHttp.getJson(ctx, "/v1/sync/cursor")
         val o = r.optJSONObject(kind.wire)
-        val src = o?.optString("src") ?: "?"
-        val ts = o?.optLong("ts") ?: 0L
-        // The src is the visible proof of the box's datastore roundtrip: "redis" = the mirror fast
-        // path answered, "postgres" = the durable fallback, "frames" = content-derived only.
-        android.util.Log.i("LocalGhost", "resume ${kind.wire}: ts=$ts id=${o?.optLong("id") ?: 0L} via $src")
-        com.localghost.app.sync.Cursor(ts, o?.optLong("id") ?: 0L)
+        if (o == null || !o.has("src") || !o.has("ts")) {
+            android.util.Log.w("LocalGhost", "cursor: the box gave no cursor for ${kind.wire} (down, locked or busy); not syncing this run")
+            null
+        } else {
+            val src = o.optString("src")
+            val ts = o.optLong("ts")
+            // The src is the visible proof of the box's datastore roundtrip: "redis" = the mirror fast
+            // path answered, "postgres" = the durable fallback, "frames" = content-derived only,
+            // "none" = the box has nothing for this device (the one honest reason to start at 0).
+            android.util.Log.i("LocalGhost", "resume ${kind.wire}: ts=$ts id=${o.optLong("id")} via $src")
+            com.localghost.app.sync.Cursor(ts, o.optLong("id"))
+        }
     } catch (e: Exception) {
-        android.util.Log.w("LocalGhost", "cursor fetch failed, starting from 0 (dedup will skip): ${e.message}")
-        com.localghost.app.sync.Cursor(0L, 0L)
+        android.util.Log.w("LocalGhost", "cursor fetch failed, not syncing this run: ${e.message}")
+        null
     }
 
     /** Report the confirmed sync position , the box's per-device memory of where we got to. */
@@ -596,18 +606,24 @@ object BoxClient {
         }
     }
 
-    /** Which of these content hashes the box already has. EMPTY on any failure , the caller then
-     *  uploads everything, because skipping on uncertainty is how photos get silently lost, while
-     *  uploading a duplicate costs only bandwidth (the box dedups by the same hash). */
-    suspend fun framesHave(ctx: Context, hashes: List<String>): Set<String> = try {
+    /** Which of these content hashes the box already has. NULL when the box did not answer the
+     *  question (unreachable, 503, an answer without "have"): the run stops there and tries again
+     *  later. Nothing is skipped on uncertainty (the cursor never passes an unconfirmed photo) and
+     *  nothing is uploaded blind: "upload everything on failure" re-sent a whole camera roll to a
+     *  box that was only busy (29 Sep 2026). */
+    suspend fun framesHave(ctx: Context, hashes: List<String>): Set<String>? = try {
         if (hashes.isEmpty()) return emptySet() // nothing to ask , skip the round trip entirely
         val body = org.json.JSONObject().put("hashes", org.json.JSONArray(hashes))
         val r = BoxHttp.postJson(ctx, "/v1/frames/exists", body)
+        if (!r.has("have")) {
+            android.util.Log.w("LocalGhost", "frames/exists: no answer from the box; stopping this sync run")
+            return null
+        }
         val arr = r.optJSONArray("have") ?: return emptySet()
         (0 until arr.length()).mapNotNull { arr.optString(it).takeIf { h -> h.isNotBlank() } }.toSet()
     } catch (e: Exception) {
-        android.util.Log.w("LocalGhost", "frames/exists failed (will upload everything): ${e.message}")
-        emptySet()
+        android.util.Log.w("LocalGhost", "frames/exists failed; stopping this sync run: ${e.message}")
+        null
     }
 
     /** One gallery entry from the box's archive. */
@@ -1360,9 +1376,12 @@ object BoxClient {
 
     /** What to sync next. The cursor is LOCAL (SyncCursor prefs): the box does not yet track per-device
      *  positions, so the phone remembers where it got to and never re-sends the whole camera roll. */
-    suspend fun nextCameraCommand(ctx: Context, kind: MediaKind): Command =
+    suspend fun nextCameraCommand(ctx: Context, kind: MediaKind): Command {
         // The cursor comes FROM THE BOX , the phone persists nothing. One authority, no split brain.
-        Command.SyncCamera(kind, getCursor(ctx, kind))
+        // No cursor = no run (Idle): the next run asks again. Never "from the beginning" on a guess.
+        val c = getCursor(ctx, kind) ?: return Command.Idle
+        return Command.SyncCamera(kind, c)
+    }
 
     /** REAL upload: stream the photo bytes to secd's spool endpoint over the pinned mTLS channel.
      *  202 Accepted = spooled for ghost.framed. The box ignores the name on purpose (it trusts only

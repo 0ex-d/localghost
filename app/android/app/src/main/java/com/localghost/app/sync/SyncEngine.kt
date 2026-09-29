@@ -63,7 +63,8 @@ class SyncEngine(private val ctx: Context) {
                         !NetGuard.uploadsAllowed(ctx)
                 },
                 checkHave = { hashes ->
-                    // One round trip per group of 40. Empty set on ANY failure , uncertainty uploads.
+                    // One round trip per group of 40. Null when the box did not answer: the run
+                    // stops (CameraReader), never uploads the group blind.
                     kotlinx.coroutines.runBlocking { BoxClient.framesHave(ctx, hashes) }
                 },
                 onSkipExisting = { item -> confirm(item) },

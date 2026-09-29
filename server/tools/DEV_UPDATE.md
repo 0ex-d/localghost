@@ -2516,3 +2516,22 @@ served. Nothing else was wrong with the engine.
   and starts again at once. It logs a warning naming the flag and telling you to take it out of the
   conf. oracled's own arguments are never dropped. Also, update.sh now keeps the previous engine and
   puts it back when the model doesn't come up.
+
+## The full re-upload, and why it happened (app)
+
+While the box answered 503 (the stuck and failed unlocks), the phone started a sync, and did two
+things wrong:
+- **`getCursor` returned (0,0) "on any failure".** A 503, or an answer without the cursor in it,
+  became "start from the beginning of the camera roll".
+- **`framesHave` returned an empty set "on any failure"**, so every photo counted as missing and was
+  uploaded again.
+
+Nothing was stored twice, because the box dedups by content hash, and the box's cursor was never
+pushed back (its upsert is monotonic, GREATEST). But the phone re-read and re-sent ~30,000 photos
+into a box that was only busy, and everything crawled.
+
+Now:
+- **No cursor from the box means no run** (`Command.Idle`), and the next run asks again. Only the
+  box saying so (src "none": a new device, or after a reset) means the beginning.
+- **An existence check the box didn't answer stops the run.** Nothing is skipped, because the
+  cursor never passes an unconfirmed photo, and nothing is uploaded blind.

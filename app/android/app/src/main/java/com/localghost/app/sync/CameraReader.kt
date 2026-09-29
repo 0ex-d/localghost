@@ -46,7 +46,7 @@ object CameraReader {
         kind: MediaKind,
         after: Cursor,
         send: (Item, InputStream) -> Boolean,
-        checkHave: (List<String>) -> Set<String>,
+        checkHave: (List<String>) -> Set<String>?,
         onSkipExisting: (Item) -> Unit,
         shouldAbort: () -> Boolean,
         onItemStart: (Item) -> Unit,
@@ -92,7 +92,13 @@ object CameraReader {
                     }
                     hashOf(ctx, item)?.let { hashes[item.id] = it }
                 }
+                // No answer from the box: stop the run here. Nothing is skipped (the cursor never
+                // passes an unconfirmed item) and nothing is uploaded blind; the next run asks again.
                 val have = checkHave(hashes.values.toList())
+                if (have == null) {
+                    android.util.Log.w("LocalGhost", "sync $kind stopped after $sent items: the box did not answer the existence check")
+                    return CommandResult(Stream.CAMERA, kind, sent, bytes)
+                }
                 for (item in group) {
 
                     // Cooperative pause between items , resume continues from the cursor exactly.
