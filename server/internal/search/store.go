@@ -335,27 +335,31 @@ func (s *Store) EnqueueCategorize(limit int) (int, error) {
 	if limit <= 0 {
 		limit = 2000
 	}
+	// jobs parked by an earlier build's parser (five failures, never retried) are given back:
+	// their frames would otherwise never be queued again
+	if err := s.db.Exec(`DELETE FROM search.jobs WHERE kind = 'categorize' AND attempts >= 5`); err != nil {
+		return 0, err
+	}
+	// one statement for the lot: a whole archive's backlog is tens of thousands of jobs, and one
+	// INSERT per frame was a round trip each inside the stock-take's control call
 	rows, err := s.db.Query(`
-		SELECT t.hash, string_agg(t.tag, ',' ORDER BY t.tag)
-		FROM frame_tags t
-		WHERE t.category = '' AND t.source <> 'user_removed'
-		  AND NOT EXISTS (SELECT 1 FROM search.jobs j WHERE j.kind = 'categorize' AND j.payload->>'hash' = t.hash)
-		GROUP BY t.hash
-		LIMIT $1`, limit)
+		WITH q AS (
+			INSERT INTO search.jobs (kind, payload)
+			SELECT 'categorize', jsonb_build_object('hash', t.hash, 'tags', jsonb_agg(t.tag ORDER BY t.tag))
+			FROM frame_tags t
+			WHERE t.category = '' AND t.source <> 'user_removed'
+			  AND NOT EXISTS (SELECT 1 FROM search.jobs j WHERE j.kind = 'categorize' AND j.payload->>'hash' = t.hash)
+			GROUP BY t.hash
+			LIMIT $1
+			RETURNING 1)
+		SELECT count(*) FROM q`, limit)
 	if err != nil {
 		return 0, err
 	}
-	n := 0
-	for _, r := range rows.Vals {
-		if len(r) < 2 || r[0] == nil || r[1] == nil {
-			continue
-		}
-		tags := strings.Split(*r[1], ",")
-		if err := s.EnqueueJob("categorize", map[string]any{"hash": *r[0], "tags": tags}); err != nil {
-			return n, err
-		}
-		n++
+	if len(rows.Vals) == 0 || len(rows.Vals[0]) == 0 || rows.Vals[0][0] == nil {
+		return 0, nil
 	}
+	n, _ := strconv.Atoi(*rows.Vals[0][0])
 	return n, nil
 }
 

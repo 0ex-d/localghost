@@ -44,9 +44,18 @@ const TagPrompt = `From this photo description, output 6-12 short lowercase tags
 
 // CategorizePrompt assigns categories to tags that already exist (the backfill for tags written
 // before categories did).
-const CategorizePrompt = `Assign each of these photo tags one category from exactly this list: people, place, object, activity, food, animal, vehicle, nature, event, text, style. Reply with ONLY comma-separated category:tag pairs, one per tag, in the same order.
+const CategorizePrompt = `Assign each of these photo tags one category from exactly this list: people, place, object, activity, food, animal, vehicle, nature, event, text, style. Reply with ONLY comma-separated category:tag pairs on one line, one pair per tag, in the same order, copying each tag exactly. If no category fits a tag, write other:tag.
 
 Tags: `
+
+// OtherCategory is what a tag gets once the model has been asked and placed it nowhere: the
+// display bucket (an empty category shows as "other" too), stored so the tag is not asked about again. It is not
+// one of the closed set the model chooses from (IsCategory is false), only a verdict.
+const OtherCategory = "other"
+
+// categorizeChunk is how many tags one categorize call asks about: a longer list is where a model
+// starts dropping or reordering, and ParseTags keeps twelve.
+const categorizeChunk = 10
 
 // ParseTags normalises the model's comma list into tags: lowercase, trimmed, 2..24 chars, deduped,
 // capped at 12; "category:tag" carries its category when the category is in the closed set, and a
@@ -55,7 +64,7 @@ Tags: `
 func ParseTags(raw string) []Tag {
 	seen := map[string]bool{}
 	var out []Tag
-	for _, part := range strings.Split(raw, ",") {
+	for _, part := range splitTagList(raw) {
 		cat, name := "", strings.ToLower(strings.TrimSpace(part))
 		if i := strings.IndexByte(name, ':'); i > 0 {
 			c := strings.TrimSpace(name[:i])
@@ -63,7 +72,7 @@ func ParseTags(raw string) []Tag {
 				cat, name = c, strings.TrimSpace(name[i+1:])
 			}
 		}
-		name = strings.Trim(name, ".:;\"'`")
+		name = strings.Trim(name, ".:;\"'`*")
 		if len(name) < 2 || len(name) > 24 || strings.ContainsAny(name, "\n\t") || seen[name] {
 			continue
 		}
@@ -220,4 +229,90 @@ func SortedCategories(m map[string][]string) []string {
 	}
 	sort.SliceStable(keys, func(i, j int) bool { return rank(keys[i]) < rank(keys[j]) })
 	return keys
+}
+
+// splitTagList splits a model's list on commas and on new lines (asked for one line, a model
+// sometimes writes one pair per line, and a comma-only split then read the whole answer as one
+// bad tag), and drops what makes a line a list item: "1.", "2)", "-", "*", "•" and markdown bold.
+func splitTagList(raw string) []string {
+	parts := strings.FieldsFunc(raw, func(r rune) bool { return r == ',' || r == '\n' || r == '\r' })
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(strings.ReplaceAll(p, "**", ""))
+		p = strings.TrimLeft(p, "-*•· ")
+		i := 0
+		for i < len(p) && p[i] >= '0' && p[i] <= '9' {
+			i++
+		}
+		if i > 0 && i < len(p) && (p[i] == '.' || p[i] == ')') {
+			p = p[i+1:]
+		}
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// normTag is a tag as compared with the model's copy of it: lowercase, hyphens and underscores
+// as spaces, spaces collapsed, a trailing plural s dropped.
+func normTag(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.NewReplacer("-", " ", "_", " ").Replace(s)
+	s = strings.Join(strings.Fields(s), " ")
+	s = strings.Trim(s, ".:;\"'`*")
+	if len(s) > 3 && strings.HasSuffix(s, "s") && !strings.HasSuffix(s, "ss") {
+		s = s[:len(s)-1]
+	}
+	return s
+}
+
+// AssignCategories reads the model's answer to CategorizePrompt for the tags asked. Each asked tag
+// gets the category the answer gives it: matched by name (forgiving case, hyphens, a plural s),
+// else by position when the answer has exactly one pair per tag asked. A tag the answer, having
+// followed the format, places nowhere (or places as "other") gets OtherCategory , a verdict, so it
+// is not asked about forever. ok is false when the answer has no category:tag pair at all: that is
+// a failed call to retry, not a verdict on the tags.
+func AssignCategories(asked []string, raw string) (out []Tag, ok bool) {
+	type pair struct{ cat, name string }
+	var pairs []pair
+	for _, part := range splitTagList(raw) {
+		part = strings.ToLower(part)
+		var a, b string
+		if i := strings.IndexByte(part, ':'); i > 0 {
+			a, b = strings.TrimSpace(part[:i]), strings.TrimSpace(part[i+1:])
+		} else if j := strings.LastIndexByte(part, '('); j > 0 && strings.HasSuffix(part, ")") {
+			a, b = strings.TrimSpace(part[j+1:len(part)-1]), strings.TrimSpace(part[:j]) // "beach (place)"
+		} else {
+			continue
+		}
+		isCat := func(c string) bool { return IsCategory(c) || c == OtherCategory }
+		switch {
+		case isCat(a):
+			pairs = append(pairs, pair{a, b})
+		case isCat(b): // "beach: place", the other way round
+			pairs = append(pairs, pair{b, a})
+		}
+	}
+	if len(pairs) == 0 {
+		return nil, false
+	}
+	byName := make(map[string]string, len(pairs))
+	for _, p := range pairs {
+		if _, seen := byName[normTag(p.name)]; !seen {
+			byName[normTag(p.name)] = p.cat
+		}
+	}
+	out = make([]Tag, 0, len(asked))
+	for i, t := range asked {
+		c, found := byName[normTag(t)]
+		if !found && len(pairs) == len(asked) {
+			c, found = pairs[i].cat, true
+		}
+		if !found || c == "" {
+			c = OtherCategory
+		}
+		out = append(out, Tag{Name: t, Category: c})
+	}
+	return out, true
 }

@@ -12,6 +12,7 @@ package search
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"time"
@@ -171,38 +172,41 @@ func (t *TagOracle) Tags(ctx context.Context, caption string) ([]Tag, error) {
 	return ParseTags(resp.Output), nil
 }
 
+// Categorize asks the model for the categories of tags that have none, ten at a time. Every tag
+// asked about comes back with a category (OtherCategory when the model placed it nowhere); an
+// answer with no category:tag pair in it is an error, with the start of the answer in it, so the
+// job's failure line in the log shows what the model said.
 func (t *TagOracle) Categorize(ctx context.Context, tags []string) ([]Tag, error) {
 	_ = ctx
 	if t.Client == nil {
 		return nil, ErrNoVision
 	}
-	if len(tags) == 0 {
-		return nil, nil
-	}
-	resp, err := t.Client.Infer(oracle.Request{
-		Capability: "tags",
-		Class:      oracle.ClassLocalSmall,
-		Priority:   oracle.PriorityBackground,
-		Input:      CategorizePrompt + strings.Join(tags, ", "),
-		MaxTokens:  160,
-		DeadlineMS: int(t.deadline().Milliseconds()),
-	})
-	if err != nil {
-		return nil, err
-	}
-	if resp.Err != "" {
-		return nil, errors.New(resp.Err)
-	}
-	// Only the tags we asked about, whatever the model volunteered.
-	asked := map[string]bool{}
-	for _, tg := range tags {
-		asked[tg] = true
-	}
 	var out []Tag
-	for _, tg := range ParseTags(resp.Output) {
-		if asked[tg.Name] && tg.Category != "" {
-			out = append(out, tg)
+	for start := 0; start < len(tags); start += categorizeChunk {
+		end := start + categorizeChunk
+		if end > len(tags) {
+			end = len(tags)
 		}
+		chunk := tags[start:end]
+		resp, err := t.Client.Infer(oracle.Request{
+			Capability: "tags",
+			Class:      oracle.ClassLocalSmall,
+			Priority:   oracle.PriorityBackground,
+			Input:      CategorizePrompt + strings.Join(chunk, ", "),
+			MaxTokens:  24 * len(chunk),
+			DeadlineMS: int(t.deadline().Milliseconds()),
+		})
+		if err != nil {
+			return nil, err
+		}
+		if resp.Err != "" {
+			return nil, errors.New(resp.Err)
+		}
+		got, ok := AssignCategories(chunk, resp.Output)
+		if !ok {
+			return nil, fmt.Errorf("the model's answer has no category:tag pair: %q", clipRunes(resp.Output, 160))
+		}
+		out = append(out, got...)
 	}
 	return out, nil
 }
@@ -216,4 +220,13 @@ func (t *TagOracle) deadline() time.Duration {
 		slow = 8 * time.Minute
 	}
 	return t.Pace.pick(fast, slow)
+}
+
+// clipRunes is s cut to at most n runes, for a log line.
+func clipRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }

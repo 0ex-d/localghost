@@ -38,6 +38,9 @@ func (w *Worker) Run(ctx context.Context) {
 	}
 }
 
+// categorizePerTick bounds the category backfill per tick (see tick).
+const categorizePerTick = 30
+
 func (w *Worker) tick(ctx context.Context) {
 	// Drain greedily per tick but one job at a time per kind , the single-conn store serialises anyway.
 	if w.Embed != nil {
@@ -54,7 +57,9 @@ func (w *Worker) tick(ctx context.Context) {
 	}
 	for w.one(ctx, "tag", w.doTags) {
 	}
-	for w.one(ctx, "categorize", w.doCategorize) {
+	// the category backfill is thousands of jobs: a few per tick, so a photo that arrives while it
+	// runs is captioned and tagged within a tick, not after the whole backlog
+	for n := 0; n < categorizePerTick && w.one(ctx, "categorize", w.doCategorize); n++ {
 	}
 	for w.one(ctx, "reconsolidate", w.doReconsolidate) {
 	}
@@ -238,8 +243,11 @@ func (w *Worker) doTags(ctx context.Context, job *Job) error {
 }
 
 // doCategorize is the backfill for tags written before categories existed, and for whatever the
-// tag pass left at ''. Lexicon first (free); the model only for the remainder; a tag the model
-// cannot place stays '' and is counted, not guessed. Payload: {"hash": ..., "tags": [...]}.
+// tag pass left at ''. Lexicon first (free); the model only for the remainder. A tag the model
+// places nowhere gets OtherCategory, not a guess: before, it stayed empty and the frame was queued
+// again at every stock-take, the same frames asked the same question forever while the rest of the
+// backlog never came up (24k frames "without category" moved by ten in a night).
+// Payload: {"hash": ..., "tags": [...]}.
 func (w *Worker) doCategorize(ctx context.Context, job *Job) error {
 	var p struct {
 		Hash string   `json:"hash"`

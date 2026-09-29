@@ -44,11 +44,11 @@ import org.json.JSONObject
  * so a phone without a box for a year does not grow it without bound.
  *
  * A fix comes with its error radius, and the radius is what tells a cell-tower guess from a GPS
- * position: a COARSE fix (radius over [COARSE_M]) whose circle still contains the last point is
- * not evidence the phone moved , it confirms where it was , so it is not written as a new place;
- * past the hourly gap it is written with the LAST point's coordinates ("still here, as far as the
- * phone can tell"), never its own, or a parked phone on a tower fix wanders two kilometres every
- * hour. A HOPELESS fix (radius over [HOPELESS_M]) is never a position, only such a confirmation.
+ * position: a COARSE fix (radius over [COARSE_M]) never moves the trail. It is not evidence the
+ * phone moved, only that it is somewhere; past the hourly gap it is written with the LAST point's
+ * coordinates ("still here, as far as the phone can tell"), never its own. (Until 2026-09-29 a
+ * coarse fix whose circle did not hold the last point was taken as a move: on Paxos the phone
+ * latched onto the mainland's towers and the map drew ferry crossings that never happened.)
  * What still gets through (a wrong fix with an honest-looking radius) the trail's rules catch at
  * draw time, on the phone and on the box alike (TrailClean, framed/clean.go).
  */
@@ -110,12 +110,13 @@ object LocationLog {
                 Location.distanceBetween(prev.lat, prev.lon, pt.lat, pt.lon, it)
             }[0]
             val coarse = pt.acc > COARSE_M
-            if (coarse && (moved < pt.acc || pt.acc > HOPELESS_M)) {
-                // The circle still holds the last point (or is too wide to say): not a move.
+            if (coarse) {
+                // A tower's or a wifi guess never moves the trail: on an island a phone hops to the
+                // mainland's towers, 25 km across the sea and back, and each hop was drawn as a
+                // journey. It only says the phone is still somewhere: past the hourly gap, a
+                // heartbeat at the LAST place. A real move shows up with the next proper fix.
                 if (pt.ts - prev.ts < MIN_GAP_S) return false
                 pt = Point(pt.ts, prev.lat, prev.lon, pt.acc) // still here, as far as the phone can tell
-            } else if (pt.acc > HOPELESS_M) {
-                return false // beyond the last point's reach, but "somewhere in a 5 km circle" is not a place
             } else if (moved < MIN_MOVE_M && pt.ts - prev.ts < MIN_GAP_S) {
                 return false
             }

@@ -14,6 +14,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -178,6 +179,104 @@ func (s *Store) InsertPoints(source string, pts []TrackPoint) error {
 	}
 	sql += " ON CONFLICT (ts, source) DO NOTHING"
 	return s.db.Exec(sql, args...)
+}
+
+// TrailRow is one stored location point and where it came from (the phone, a watch, a Google
+// Timeline import), for the trail diagnostic.
+type TrailRow struct {
+	TrackPoint
+	Source string
+}
+
+// TrailRows returns the stored points in [from, to) with their source, time-ordered.
+func (s *Store) TrailRows(from, to int64) ([]TrailRow, error) {
+	rows, err := s.db.Query("SELECT ts, lat, lon, source FROM location_points WHERE ts >= $1 AND ts < $2 ORDER BY ts", from, to)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]TrailRow, 0, len(rows.Vals))
+	for _, r := range rows.Vals {
+		if len(r) != 4 || r[0] == nil || r[1] == nil || r[2] == nil {
+			continue
+		}
+		tr := TrailRow{TrackPoint: TrackPoint{TS: atoi64(*r[0]), Lat: atof(*r[1]), Lon: atof(*r[2])}}
+		if r[3] != nil {
+			tr.Source = *r[3]
+		}
+		out = append(out, tr)
+	}
+	return out, nil
+}
+
+// TrailReport is the trail diagnostic for one day: every stored point that makes a long hop (at
+// least minHopM from the last point the rules kept) or that the glitch rules drop, with its time, place, source
+// and the hop's length and speed, under a line of counts. What `ghost-cli ghost.framed trail
+// day=YYYY-MM-DD` prints: the way to see which points draw a line across the map and why they
+// were kept.
+func TrailReport(day time.Time, rows []TrailRow, minHopM float64) string {
+	dayStart := time.Date(day.UTC().Year(), day.UTC().Month(), day.UTC().Day(), 0, 0, 0, 0, time.UTC).Unix()
+	dayEnd := dayStart + 86400
+	pts := make([]TrackPoint, len(rows))
+	for i, r := range rows {
+		pts[i] = r.TrackPoint
+	}
+	kept, _ := CleanTrack(pts)
+	keptN := map[TrackPoint]int{}
+	for _, k := range kept {
+		keptN[k]++
+	}
+	bySource := map[string]int{}
+	var b strings.Builder
+	var lines []string
+	var prev *TrackPoint
+	inDay, dropped := 0, 0
+	for i := range rows {
+		r := rows[i]
+		ok := keptN[r.TrackPoint] > 0
+		if ok {
+			keptN[r.TrackPoint]--
+		}
+		if r.TS >= dayStart && r.TS < dayEnd {
+			inDay++
+			bySource[r.Source]++
+			if !ok {
+				dropped++
+			}
+			hop, kmh := 0.0, 0.0
+			if prev != nil {
+				hop = HaversineM(*prev, r.TrackPoint)
+				if dt := r.TS - prev.TS; dt > 0 {
+					kmh = hop / float64(dt) * 3.6
+				}
+			}
+			if !ok || hop >= minHopM {
+				verdict := "kept"
+				if !ok {
+					verdict = "DROPPED"
+				}
+				lines = append(lines, fmt.Sprintf("  %s  %.5f,%.5f  %-16s hop %6.1f km at %5.0f km/h  %s",
+					time.Unix(r.TS, 0).UTC().Format("15:04:05"), r.Lat, r.Lon, r.Source, hop/1000, kmh, verdict))
+			}
+		}
+		p := r.TrackPoint
+		if ok {
+			prev = &p
+		}
+	}
+	srcs := make([]string, 0, len(bySource))
+	for s, n := range bySource {
+		srcs = append(srcs, fmt.Sprintf("%s %d", s, n))
+	}
+	sort.Strings(srcs)
+	fmt.Fprintf(&b, "%s: %d points (%s), %d dropped by the glitch rules; hops of %.0f km or more, and every dropped point (UTC):\n",
+		day.Format("2006-01-02"), inDay, strings.Join(srcs, ", "), dropped, minHopM/1000)
+	if len(lines) == 0 {
+		b.WriteString("  none\n")
+	}
+	for _, l := range lines {
+		b.WriteString(l + "\n")
+	}
+	return b.String()
 }
 
 // DayPoints returns the day's track points (UTC bounds), time-ordered.

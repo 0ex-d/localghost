@@ -19,6 +19,9 @@ import kotlin.math.sqrt
  *     short time is a spike; the points out there are dropped. A flight is a fast hop that does
  *     not come back.
  *  3. a LONE point reached and left at car speed or better between walking pace is a spike too.
+ *  4. a PARKED EXCURSION , two or three fixes far away and close together (one distant cell
+ *     tower), reached and left at car speed or better between still fixes, back within the window ,
+ *     is the phone on that tower for a while, not a trip.
  *
  * Hops under [MIN_JUMP_M] are never judged.
  */
@@ -31,6 +34,9 @@ object TrailClean {
     private const val RETURN_FRAC = 0.34
     private const val RETURN_MAX_POINTS = 8
     private const val RETURN_MAX_S = 5400L
+    private const val EXCURSION_MIN_M = 3000.0
+    private const val EXCURSION_SPREAD_M = 2000.0
+    private const val EXCURSION_MAX_PTS = 3
 
     class Cleaned(val kept: List<LocationLog.Point>, val dropped: Int)
 
@@ -60,10 +66,30 @@ object TrailClean {
                     dropped++; i++; continue
                 }
             }
+            if (v > LONE_LEG_MS && d >= EXCURSION_MIN_M && slowBefore(kept)) { // rule 4
+                val j = parkedExcursion(sorted, i, a, d)
+                if (j > 0) { dropped += j - i; i = j; continue }
+            }
             kept.add(p)
             i++
         }
         return Cleaned(kept, dropped)
+    }
+
+    private fun parkedExcursion(pts: List<LocationLog.Point>, i: Int, a: LocationLog.Point, d: Double): Int {
+        var k = i + 1
+        while (k < pts.size && k <= i + EXCURSION_MAX_PTS) {
+            val q = pts[k]
+            if (q.ts - a.ts > RETURN_MAX_S) return 0
+            if (haversineM(a, q) <= d * RETURN_FRAC) {
+                val back = haversineM(pts[k - 1], q)
+                if (back < EXCURSION_MIN_M || speedMS(pts[k - 1], q, back) <= LONE_LEG_MS || !slowAfter(pts, k)) return 0
+                return k
+            }
+            if (haversineM(pts[i], q) > EXCURSION_SPREAD_M) return 0 // it moved out there: travel, not a tower
+            k++
+        }
+        return 0
     }
 
     private fun returnsTo(pts: List<LocationLog.Point>, i: Int, a: LocationLog.Point, d: Double): Int {

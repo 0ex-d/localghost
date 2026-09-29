@@ -2265,3 +2265,70 @@ process, so ns.sh's `/proc/<pid>/root` door is real, and stub ghost-cli and ghos
   host shell expands that glob where the volume is not mounted, so the hint did nothing. It now
   names each file by its path inside the namespace.
 - **Embedder and phone model** came from the mirror as designed.
+
+## The map shows one day at a time; lines that never happened; the category backlog that never moved
+
+Vlad sent two reports. The map: "some of the travel lines are too much, and they are off, I only
+have 1 line coming from the continent, the other are made up… we should just have the last day
+plotted on the map and have the others just go back in time". The image processing: "stuck again",
+with Box Status at 25% of frames at the latest stage and 24,420 left, while the GPU sat at 0%.
+
+**The map (app).** It draws one day: the newest (today when there is one). `‹` and `›` in the
+trail row step to older and newer days, and a step frames that day. The strip picks a day, and an
+"all days" chip lays the last sixty over the map as before. The day shown when the map opens does
+not move the camera; it still opens where you are. The scrubber's ring is drawn only while the
+trail panel is open.
+
+**Lines that never happened.**
+- **Phone, `LocationLog.record`.** A coarse fix (radius over 200 m, a tower's or wifi's guess)
+  never moves the trail now. Before, a coarse fix whose circle did not hold the last point was
+  taken as a move. On an island a phone latches onto the mainland's towers, and each latch was
+  drawn as a crossing. A coarse fix is now only a heartbeat at the last place.
+- **Box and phone, rule 4 in `clean.go` and `TrailClean.kt`.** A parked excursion is dropped: two
+  or three fixes far away (each hop at least 3 km), within 2 km of each other, reached and left at
+  car speed or better, between still fixes, and back within 90 minutes. That is a phone on a
+  distant tower for a while. Rule 3 already did this for a lone point.
+- **The price.** A drive shorter than one sampling gap each way, with a short stop at the far end,
+  is not drawn. The raw points stay in the database.
+- **Fixture.** It gains `tower_lock`, `tower_lock_three`, `errand_with_route` (kept) and
+  `long_visit` (kept). Both tests fail with the rule switched off and pass with it.
+- **Day route.** The photos now go through the same rules as the fixes. A photo from a camera with
+  a wrong clock sits at the right place at the wrong time, and made a trip there and back in the
+  route. It stays a dot on the map.
+- **Diagnostic.** `ghost-cli ghost.framed trail day=YYYY-MM-DD [km=2]` lists every stored point
+  that makes a long hop or that the rules drop. Each line gives the time, the place, the source
+  (phone, watch, google-timeline), the hop and its speed, and kept or dropped. Use it to see which
+  points still draw a line and where they came from.
+
+**The category backlog (searchd), the "stuck" pipeline.** "At the latest stage" requires every tag
+of a frame to have a category. 24,339 frames had a tag without one, and a night of backfill moved
+that by ten. There were two reasons.
+
+1. **The parse.** The categorize prompt asked for "one per tag, in the same order". A model that
+   answers one pair per line, or numbers them, gave `ParseTags` a newline-joined blob, which a
+   comma split reads as one bad tag. Every tag in the job stayed empty and the job still
+   "succeeded".
+2. **The retry loop.** A tag the model did place nowhere stayed empty by design, so the stock-take
+   queued the same frames again every pass, 5,000 at a time. The same frames were asked the same
+   question forever and the rest of the backlog never came up.
+
+The fixes:
+- `splitTagList` splits on commas and new lines and drops list markers ("1.", "-", "**").
+  `ParseTags` uses it too.
+- `AssignCategories` matches by name, forgiving case, hyphens and a plural s. When the answer has
+  exactly one pair per tag, it matches by position. It reads "beach: place" and "beach (place)"
+  too.
+- A tag the model, having followed the format, places nowhere gets `other`, the display bucket, so
+  it is never asked about again. An answer with no pair at all is a failed call, retried, and the
+  failure line in the log carries the start of the model's answer.
+- Categorize asks ten tags per call.
+- The backlog is queued whole: framed asks for up to 40,000 in one INSERT…SELECT instead of 5,000
+  inserts. Categorize jobs parked by the old parser are given back.
+- The worker takes at most 30 categorize jobs per tick, so new photos are captioned and tagged
+  within a tick, not after the backlog.
+
+**Tested.** New unit tests cover `AssignCategories` in seven shapes of answer (and three
+non-answers) and `ParseTags` on numbered lines. On Postgres: the queue (limit, no frame twice,
+"other" counts as done, a parked job is given back), and the SQL prepare test still resolves every
+statement. On the phone: TrailClean on the shared fixture and all 113 app tests (the one
+pre-existing QR failure is unchanged).

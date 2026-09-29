@@ -18,6 +18,12 @@ package framed
 //   3. a LONE point reached and left at car speed or better (loneLegMS both ways) between walking
 //      pace is a spike too: you do not go from a stroll to a forty-kilometre round trip with no fix
 //      at the far end and back to a stroll, all inside two sampling gaps.
+//   4. a PARKED EXCURSION , two or three fixes far away (each hop at least excursionMinM), all within
+//      excursionSpreadM of each other, reached and left at car speed or better, between still or
+//      walking fixes, and back within returnMaxS , is the phone on a distant cell tower for a
+//      while, not a trip: a tower does not move, and a real trip that far has a fix on the way.
+//      The price: a drive of a few kilometres shorter than one sampling gap each way, with a short
+//      stop at the far end, is drawn as not having happened (the points stay in the database).
 //
 // Hops under minJumpM are never judged (jitter, sitting still). Everything else , a slow wander, a
 // real errand with time spent at the far end, a whole day of travel , is left alone.
@@ -28,14 +34,17 @@ import (
 )
 
 const (
-	minJumpM        = 300.0 // shorter hops are jitter or a walk; never judged
-	maxSpeedMS      = 350.0 // faster than an airliner over the ground: impossible, dropped alone
-	fastSpeedMS     = 90.0  // faster than road or rail (~320 km/h): a spike if the trail comes back
-	loneLegMS       = 12.0  // ~43 km/h averaged over a leg: a lone point in and out at this pace between slow movement
-	slowMS          = 4.0   // the pace before and after a lone point that makes it implausible (a brisk walk)
-	returnFrac      = 0.34  // "came back": within this fraction of the hop's length from where it left
-	returnMaxPoints = 8     // how far ahead the return is looked for
-	returnMaxS      = 5400  // and how long (90 min): a sightseeing flight is slower than fast, a day trip is longer than this
+	minJumpM         = 300.0  // shorter hops are jitter or a walk; never judged
+	maxSpeedMS       = 350.0  // faster than an airliner over the ground: impossible, dropped alone
+	fastSpeedMS      = 90.0   // faster than road or rail (~320 km/h): a spike if the trail comes back
+	loneLegMS        = 12.0   // ~43 km/h averaged over a leg: a lone point in and out at this pace between slow movement
+	slowMS           = 4.0    // the pace before and after a lone point that makes it implausible (a brisk walk)
+	returnFrac       = 0.34   // "came back": within this fraction of the hop's length from where it left
+	returnMaxPoints  = 8      // how far ahead the return is looked for
+	returnMaxS       = 5400   // and how long (90 min): a sightseeing flight is slower than fast, a day trip is longer than this
+	excursionMinM    = 3000.0 // rule 4: how far the out and back hops go at least
+	excursionSpreadM = 2000.0 // rule 4: how close together the far fixes stay (one tower)
+	excursionMaxPts  = 3      // rule 4: at most this many fixes out there
 )
 
 // CleanTrack returns the time-ordered points that survive the rules above and how many were
@@ -83,10 +92,41 @@ func CleanTrack(pts []TrackPoint) ([]TrackPoint, int) {
 				continue
 			}
 		}
+		if v > loneLegMS && d >= excursionMinM && slowBefore(kept) { // rule 4
+			if j := parkedExcursion(sorted, i, a, d); j > 0 {
+				dropped += j - i
+				i = j
+				continue
+			}
+		}
 		kept = append(kept, p)
 		i++
 	}
 	return kept, dropped
+}
+
+// parkedExcursion looks ahead of the far hop at pts[i] for rule 4: at most excursionMaxPts fixes
+// that stay within excursionSpreadM of pts[i], then a fix back near the anchor a, reached by a hop
+// of at least excursionMinM at car speed or better, followed by slow movement, all inside
+// returnMaxS of the anchor. It returns the index of the fix back, or 0.
+func parkedExcursion(pts []TrackPoint, i int, a TrackPoint, d float64) int {
+	for k := i + 1; k < len(pts) && k <= i+excursionMaxPts; k++ {
+		q := pts[k]
+		if q.TS-a.TS > returnMaxS {
+			return 0
+		}
+		if HaversineM(a, q) <= d*returnFrac {
+			back := HaversineM(pts[k-1], q)
+			if back < excursionMinM || speedMS(pts[k-1], q, back) <= loneLegMS || !slowAfter(pts, k) {
+				return 0
+			}
+			return k
+		}
+		if HaversineM(pts[i], q) > excursionSpreadM {
+			return 0 // it moved out there: travel, not a tower
+		}
+	}
+	return 0
 }
 
 // returnsTo looks ahead of the fast hop at pts[i] for the first point back near the anchor a ,

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -153,5 +154,35 @@ func TestBuildDayPathCleansAcrossMidnight(t *testing.T) {
 	times := pr["times"].([]any)
 	if first := int64(times[0].(float64)); first < mid {
 		t.Fatalf("yesterday's context point %d leaked into the day", first)
+	}
+}
+
+func TestTrailReportNamesTheLongHopsAndTheDropped(t *testing.T) {
+	day := time.Date(2026, 9, 27, 0, 0, 0, 0, time.UTC)
+	t0 := day.Unix() + 9*3600
+	rows := []TrailRow{
+		{TrackPoint{t0, 39.150000, 20.220000}, "phone"},
+		{TrackPoint{t0 + 900, 39.150400, 20.220000}, "phone"},
+		{TrackPoint{t0 + 1800, 39.375000, 20.220000}, "phone"}, // a tower 25 km off, twice
+		{TrackPoint{t0 + 2700, 39.376000, 20.221000}, "phone"},
+		{TrackPoint{t0 + 3600, 39.150800, 20.220000}, "phone"},
+		{TrackPoint{t0 + 4500, 39.151000, 20.220000}, "phone"},
+		{TrackPoint{t0 + 7200, 39.600000, 20.500000}, "google-timeline"}, // a real move, kept
+		{TrackPoint{day.Unix() - 600, 39.15, 20.22}, "phone"},            // the day before: context only
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].TS < rows[j].TS })
+	out := TrailReport(day, rows, 2000)
+	for _, must := range []string{
+		"2026-09-27: 7 points (google-timeline 1, phone 6), 2 dropped",
+		"09:30:00  39.37500,20.22000  phone            hop   25.0 km at   100 km/h  DROPPED",
+		"09:45:00  39.37600,20.22100  phone",
+		"11:00:00  39.60000,20.50000  google-timeline  hop   55.4 km at    74 km/h  kept",
+	} {
+		if !strings.Contains(out, must) {
+			t.Fatalf("report lacks %q:\n%s", must, out)
+		}
+	}
+	if strings.Contains(out, "10:00:00") {
+		t.Fatalf("the short hop home after the dropped points is listed:\n%s", out)
 	}
 }

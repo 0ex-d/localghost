@@ -36,8 +36,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/LocalGhostDao/localghost/server/internal/exif"
 	"github.com/LocalGhostDao/localghost/server/internal/dayroute"
+	"github.com/LocalGhostDao/localghost/server/internal/exif"
 	"github.com/LocalGhostDao/localghost/server/internal/geo"
 )
 
@@ -558,15 +558,26 @@ func (p *Pipeline) RebuildDay(day string) {
 	// THE DAY ROUTE beside the path: the same points, told as stays and moves, walked along the
 	// streets where the box has them (<day>.route.json; secd's /v1/geo/route). The cleaned points
 	// only, and the day's own.
-	cleaned, _ := CleanTrack(pts)
-	fixes := make([]dayroute.Fix, 0, len(cleaned)+len(photos))
+	// The photos go through the same rules as the fixes, with them: a photo whose clock is wrong
+	// (a camera set to another day or zone) sits at the right place at the wrong time, and in the
+	// route it was a trip there and back that never happened. It stays a dot on the map.
+	type pkey struct {
+		ts       int64
+		lat, lon float64
+	}
+	isPhoto := make(map[pkey]bool, len(photos))
+	all := make([]TrackPoint, 0, len(pts)+len(photos))
+	all = append(all, pts...)
+	for _, ph := range photos {
+		isPhoto[pkey{ph.TakenAt, ph.Lat, ph.Lon}] = true
+		all = append(all, TrackPoint{TS: ph.TakenAt, Lat: ph.Lat, Lon: ph.Lon})
+	}
+	cleaned, _ := CleanTrack(all)
+	fixes := make([]dayroute.Fix, 0, len(cleaned))
 	for _, q := range cleaned {
 		if q.TS >= start && q.TS < end {
-			fixes = append(fixes, dayroute.Fix{TS: q.TS, Lat: q.Lat, Lon: q.Lon})
+			fixes = append(fixes, dayroute.Fix{TS: q.TS, Lat: q.Lat, Lon: q.Lon, Photo: isPhoto[pkey{q.TS, q.Lat, q.Lon}]})
 		}
-	}
-	for _, ph := range photos {
-		fixes = append(fixes, dayroute.Fix{TS: ph.TakenAt, Lat: ph.Lat, Lon: ph.Lon, Photo: true})
 	}
 	t0 := time.Now()
 	route := dayroute.Build(day, fixes, p.store.DaySteps(day), p.store, p.router)

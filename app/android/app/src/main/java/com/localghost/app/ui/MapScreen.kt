@@ -229,7 +229,12 @@ fun MapScreen() {
     var tracks by remember { mutableStateOf<List<Track>>(emptyList()) }
     // THE TRAIL PANEL: which day is lit, and where along it the scrubber sits (0..1).
     var trailOpen by remember { mutableStateOf(false) }
+    // ONE DAY AT A TIME: the map draws the newest day (today when there is one) and nothing else;
+    // ‹ and › step back and forward through the days, the strip picks one, "all days" lays every
+    // day of the last sixty over the map as it used to. Eleven days of lines at once was a knot.
     var trailDay by remember { mutableStateOf<String?>(null) }
+    var showAll by remember { mutableStateOf(false) }
+    var frameTick by remember { mutableIntStateOf(0) } // bumped by a pick or a step: frame that day
     var scrub by remember { mutableStateOf(1f) }
     val lastFix = remember(tracks) { com.localghost.app.sync.LocationLog.last(ctx) }
     val nowSec = remember(tracks) { System.currentTimeMillis() / 1000 }
@@ -240,6 +245,15 @@ fun MapScreen() {
         tracks.groupBy { it.day }.entries.filter { it.key.isNotEmpty() }
             .map { (d, ts) -> Triple(d, ts.sumOf { it.distanceM }, ts) }
             .sortedByDescending { it.first }
+    }
+    // the newest day is the one shown until another is picked (and again if the picked one is gone)
+    LaunchedEffect(days) {
+        if (days.isNotEmpty() && days.none { it.first == trailDay }) trailDay = days.first().first
+    }
+    fun stepDay(older: Boolean) {
+        val i = days.indexOfFirst { it.first == trailDay }
+        val j = if (i < 0) 0 else if (older) i + 1 else i - 1
+        if (j in days.indices) { trailDay = days[j].first; showAll = false; scrub = 1f; frameTick++ }
     }
     // The lit day as one time-ordered list of points (the box's line, then the phone's continuation).
     val dayPts = remember(trailDay, tracks) { trailDay?.let { d -> dayPoints(tracks.filter { it.day == d }) } ?: emptyList() }
@@ -362,7 +376,8 @@ fun MapScreen() {
     }
     // Picking a day frames it: centre on its bbox, zoom to fit with a margin, and never further in
     // than a street , a day spent at one table is a dot, not a 250,000x view of a paving slab.
-    LaunchedEffect(trailDay) {
+    LaunchedEffect(frameTick) {
+        if (frameTick == 0) return@LaunchedEffect // the day shown at open does not move the camera
         val d = trailDay ?: return@LaunchedEffect
         val ts = tracks.filter { it.day == d }
         if (ts.isEmpty()) return@LaunchedEffect
@@ -842,6 +857,7 @@ fun MapScreen() {
                 // rhythm shows; every other day is the dim thread it always was.
                 val routeShown = route != null && route?.day == trailDay
                 for (t in tracks) {
+                    if (!showAll && t.day != trailDay) continue
                     if (t.maxX < vx0 || t.minX > vx1 || t.maxY < vy0 || t.minY > vy1) continue
                     // with the day's route on screen the raw line steps back to a thin thread
                     val lit = t.day.isNotEmpty() && t.day == trailDay && !routeShown
@@ -896,7 +912,7 @@ fun MapScreen() {
                     }
                 }
                 // The scrubber's point on the lit day, with its clock.
-                scrubAt?.let { at ->
+                scrubAt?.takeIf { trailOpen }?.let { at ->
                     val x = sx(at.x); val y = sy(at.y)
                     drawCircle(GhostText, radius = 7f, center = Offset(x, y), style = Stroke(width = 2.5f))
                     if (at.ts > 0) drawContext.canvas.nativeCanvas.drawText(clock(at.ts), x, y - 12f, labelPaint)
@@ -987,15 +1003,28 @@ fun MapScreen() {
         // with their distance (a dot after the label means part of it is still only on the phone),
         // and for the lit day a scrubber that walks the line with a clock.
         Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
-            val todayM = days.firstOrNull { it.first == todayKey }?.second ?: 0.0
+            val shownIdx = days.indexOfFirst { it.first == trailDay }
+            val shownM = if (shownIdx >= 0) days[shownIdx].second else 0.0
             Row(verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth().clickable { trailOpen = !trailOpen }.padding(vertical = 6.dp)) {
                 Text("◎ trail", color = TerminalGreen, style = MaterialTheme.typography.labelMedium)
                 Spacer(Modifier.width(8.dp))
-                Text(
-                    if (days.isEmpty()) "no points yet , a fix every quarter hour once location is allowed (settings › location trail)"
-                    else "today ${km(todayM)}" + (lastFix?.let { " · last fix ${ago(nowSec - it.ts)}" } ?: "") + " · ${days.size} days",
-                    color = GhostTextDim, style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
+                if (days.isEmpty()) {
+                    Text("no points yet , a fix every quarter hour once location is allowed (settings › location trail)",
+                        color = GhostTextDim, style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
+                } else {
+                    // ‹ an older day · the day shown · a newer day ›
+                    val older = shownIdx < days.size - 1
+                    val newer = shownIdx > 0
+                    Text("‹", color = if (older) TerminalGreen else TerminalDim, style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.clickable(enabled = older) { stepDay(older = true) }.padding(horizontal = 10.dp, vertical = 2.dp))
+                    Text(
+                        (if (showAll) "all ${days.size} days" else trailDay?.let { dayLabel(it, todayKey, yesterdayKey) + " " + km(shownM) } ?: "") +
+                            (lastFix?.let { " · last fix ${ago(nowSec - it.ts)}" } ?: ""),
+                        color = GhostTextDim, style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
+                    Text("›", color = if (newer) TerminalGreen else TerminalDim, style = MaterialTheme.typography.titleMedium,
+                        modifier = Modifier.clickable(enabled = newer) { stepDay(older = false) }.padding(horizontal = 10.dp, vertical = 2.dp))
+                }
                 Text(if (trailOpen) "▴" else "▾", color = TerminalDim, style = MaterialTheme.typography.labelMedium)
             }
             if (trailOpen && days.isNotEmpty()) {
@@ -1007,9 +1036,16 @@ fun MapScreen() {
                             modifier = Modifier.padding(end = 8.dp, bottom = 6.dp)
                                 .border(1.dp, TerminalGreen, RectangleShape)
                                 .background(if (on) TerminalGreen else Void)
-                                .clickable { trailDay = if (on) null else d; scrub = 1f }
+                                .clickable { trailDay = d; showAll = false; scrub = 1f; frameTick++ }
                                 .padding(horizontal = 10.dp, vertical = 6.dp))
                     }
+                    // every day at once, the shown one lit, the rest the dim amber thread
+                    Text("all days", color = if (showAll) Void else TerminalGreen, style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.padding(end = 8.dp, bottom = 6.dp)
+                            .border(1.dp, TerminalGreen, RectangleShape)
+                            .background(if (showAll) TerminalGreen else Void)
+                            .clickable { showAll = !showAll }
+                            .padding(horizontal = 10.dp, vertical = 6.dp))
                 }
                 trailDay?.let { d ->
                     val ts = tracks.filter { it.day == d }

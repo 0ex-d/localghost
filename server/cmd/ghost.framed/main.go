@@ -458,6 +458,30 @@ func main() {
 		}()
 		return ctlsock.Response{OK: true, Text: fmt.Sprintf("rebuilding the last %d days' paths and routes (watch the log)", a.Days)}, nil
 	})
+	// trail: which stored points draw a day's long lines, where each came from, and what the glitch
+	// rules made of it , `ghost-cli ghost.framed trail day=2026-09-27 [km=2]`
+	ctl.Handle("trail", func(args json.RawMessage) (ctlsock.Response, error) {
+		var a struct {
+			Day string  `json:"day"`
+			Km  float64 `json:"km"`
+		}
+		if len(args) > 0 {
+			_ = json.Unmarshal(args, &a)
+		}
+		t, err := time.Parse("2006-01-02", a.Day)
+		if err != nil {
+			return ctlsock.Response{}, fmt.Errorf("trail requires day=YYYY-MM-DD")
+		}
+		if a.Km <= 0 {
+			a.Km = 2
+		}
+		start := t.UTC().Unix()
+		rows, err := store.TrailRows(start-2*3600, start+86400+2*3600)
+		if err != nil {
+			return ctlsock.Response{}, err
+		}
+		return ctlsock.Response{OK: true, Text: framed.TrailReport(t, rows, a.Km*1000)}, nil
+	})
 	ctl.Handle("rebuild-day", func(args json.RawMessage) (ctlsock.Response, error) {
 		var a struct {
 			Day string `json:"day"`
@@ -519,7 +543,9 @@ func categorize(cli *ctlsock.Client, rep framed.ConvergeReport, lg *slog.Logger)
 	if rep.NoCategory == 0 {
 		return
 	}
-	resp, err := cli.Call("categorize", map[string]any{"limit": 5000})
+	// the whole backlog at once: searchd works it a few jobs per tick behind captions and tags,
+	// so a big queue delays nothing new, and a small one left most of an archive waiting days
+	resp, err := cli.Call("categorize", map[string]any{"limit": 40000})
 	if err != nil {
 		lg.Warn("categorize request failed (next pass retries)", "fn", "categorize", "err", err)
 		return
