@@ -53,7 +53,12 @@ fun cmakeVar(name: String): String = if (llamaCmake.exists())
 val llamaSha: String = cmakeVar("LLAMA_CPP_SHA256")
 val llamaPin: String = cmakeVar("LLAMA_CPP_TAG") + "-" + cmakeVar("LLAMA_CPP_COMMIT")
 val buildPhoneModel = Regex("^[0-9a-f]{64}$").matches(llamaSha)
-val llamaTarball: String = (findProperty("llamaTarball") as String?).orEmpty()
+// -PllamaTarball wins; otherwise, on the box itself, the copy setup_llama.sh verified and kept
+// (CMake checks it against the pin all the same), so a build there needs no network at all
+val llamaTarball: String = (findProperty("llamaTarball") as String?).orEmpty().ifEmpty {
+    file("/opt/localghost/llama.cpp.mirror-dl/" + cmakeVar("LLAMA_CPP_TARBALL"))
+        .takeIf { buildPhoneModel && cmakeVar("LLAMA_CPP_TARBALL").isNotEmpty() && it.isFile }?.path.orEmpty()
+}
 val llamaArch: String = (findProperty("llamaArch") as String?) ?: "armv8.2-a+dotprod+fp16"
 
 android {

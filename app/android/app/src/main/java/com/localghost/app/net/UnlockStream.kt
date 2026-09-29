@@ -66,6 +66,23 @@ enum class UnlockStage(val label: String) {
 
 enum class StageState { PENDING, RUNNING, SKIPPED, COMPLETE, ERRORED }
 
+/**
+ * The model's load as the box measures it: oracled reads llama.cpp's own progress and knows how long
+ * the last load took, and secd carries that on the unlock poll as {phase, pct, etaMs, elapsedMs}.
+ * phase: starting, weights, projector, warmup, finishing, ready, failed. etaMs is -1 when unknown.
+ */
+data class ModelLoad(val phase: String, val pct: Int, val etaMs: Long, val elapsedMs: Long) {
+    companion object {
+        /** From the poll's "model" object; null when absent or empty (a box from before 29 Sep 2026). */
+        fun fromJson(o: org.json.JSONObject?): ModelLoad? {
+            if (o == null) return null
+            val phase = o.optString("phase", "")
+            if (phase.isEmpty()) return null
+            return ModelLoad(phase, o.optInt("pct", 0).coerceIn(0, 100), o.optLong("etaMs", -1), o.optLong("elapsedMs", 0))
+        }
+    }
+}
+
 /** One stage's state in the current unlock, for rendering a row. */
 data class StageProgress(val stage: UnlockStage, val state: StageState)
 
@@ -77,10 +94,12 @@ data class UnlockSnapshot(
     val stages: List<StageProgress>,
     val done: Boolean,
     val failed: String? = null,
+    /** The model's load while MODEL runs (oracled measures it; the poll carries it), else null. */
+    val model: ModelLoad? = null,
 ) {
     companion object {
         /** A full snapshot from a flat map of stage -> state, filling unreached stages as PENDING. */
-        fun from(states: Map<UnlockStage, StageState>): UnlockSnapshot {
+        fun from(states: Map<UnlockStage, StageState>, model: ModelLoad? = null): UnlockSnapshot {
             val rows = UnlockStage.order.map { st ->
                 StageProgress(st, states[st] ?: StageState.PENDING)
             }
@@ -90,6 +109,7 @@ data class UnlockSnapshot(
                 stages = rows,
                 done = ready,
                 failed = if (err != null) "failed at ${err.stage.label}" else null,
+                model = model,
             )
         }
 

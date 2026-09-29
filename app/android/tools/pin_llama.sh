@@ -8,6 +8,11 @@
 #                                            /opt/localghost/llama.cpp.mirror-dl/, verified there)
 #   tools/pin_llama.sh --key <mirror-key.asc> the site key to check the manifest's signature with
 #                                            (default: the server repo's tools/mirror-key.asc)
+#   tools/pin_llama.sh --from-box [dir]      on the box: pin exactly the tarball the box's engine was
+#                                            built from (dir defaults to /opt/localghost). Its name
+#                                            and SHA-256 were recorded when setup_llama.sh verified
+#                                            it against the signed manifest; the file is hashed
+#                                            again here and must match that record.
 #
 # The manifest's signature is checked against the site key by fingerprint when gpg and the key are
 # at hand, the way the box's tools/mirror_fetch.sh does; without them the script says so and pins
@@ -19,18 +24,33 @@ MIRROR="${GHOST_MIRROR:-https://www.localghost.ai/mirror}"
 MIRROR="${MIRROR%/}"
 FPR="${GHOST_MIRROR_FPR:-DCE9A3D14EB461971DD5F393706E4194F08A09A0}"
 KEY="${GHOST_MIRROR_KEY:-}"
-TARBALL=""; BOX_SHA=""
+TARBALL=""; BOX_SHA=""; FROM_BOX=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --tarball) TARBALL="$2"; shift 2 ;;
         --key) KEY="$2"; shift 2 ;;
         --mirror) MIRROR="${2%/}"; shift 2 ;;
         --box-sha) BOX_SHA="$2"; shift 2 ;;
-        -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+        --from-box)
+            FROM_BOX="/opt/localghost"; shift
+            case "${1:-}" in /*) FROM_BOX="${1%/}"; shift ;; esac ;;
+        -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
         *) echo "unknown option $1" >&2; exit 2 ;;
     esac
 done
 [ -f "$CMAKE" ] || { echo "!! no $CMAKE" >&2; exit 2; }
+
+if [ -n "$FROM_BOX" ]; then
+    # the box's own record, written by setup_llama.sh after the manifest check: the name the engine
+    # was built from and that file's SHA-256. The tarball it kept must still hash to that.
+    SRC="$(cat "$FROM_BOX/llama.cpp/.mirror-src" 2>/dev/null || true)"
+    REC="$(cat "$FROM_BOX/llama.cpp/.mirror-sha256" 2>/dev/null || true)"
+    [ -n "$SRC" ] && [ -n "$REC" ] || { echo "!! $FROM_BOX/llama.cpp has no .mirror-src/.mirror-sha256 , this box's engine was not built from the mirror (sudo ./tools/update.sh engine)" >&2; exit 3; }
+    TARBALL="$FROM_BOX/llama.cpp.mirror-dl/$SRC"
+    [ -f "$TARBALL" ] || { echo "!! the box recorded $SRC but $TARBALL is gone" >&2; exit 3; }
+    BOX_SHA="$REC"
+    echo "-- the box's engine: $SRC, recorded sha256 $REC"
+fi
 
 if [ -n "$TARBALL" ]; then
     [ -f "$TARBALL" ] || { echo "!! no such file: $TARBALL" >&2; exit 2; }
@@ -66,7 +86,12 @@ else
     echo "-- $NAME: sha256 $SHA (build $(sed -n 's/^# Build: //p' "$T/MANIFEST.txt" | head -1))"
 fi
 if [ -n "$BOX_SHA" ] && [ "$BOX_SHA" != "$SHA" ]; then
-    echo "!! the box's copy has sha256 $BOX_SHA , not the same tarball; nothing pinned" >&2; exit 4
+    if [ -n "$FROM_BOX" ]; then
+        echo "!! $TARBALL hashes to $SHA, not the $BOX_SHA the box recorded when it verified it; nothing pinned" >&2
+    else
+        echo "!! the box's copy has sha256 $BOX_SHA , not the same tarball; nothing pinned" >&2
+    fi
+    exit 4
 fi
 
 # llama.cpp-<tag>-<commit>.tar.gz

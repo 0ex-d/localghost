@@ -92,8 +92,16 @@ func PipelineProgressFrom(c *poltergres.ReadWrite) (PipelineProgress, error) {
 	}
 	// One pass over frames for every stage count. The version is read from the rows, so a box
 	// where nothing has been re-derived yet reports the version it actually has.
+	//
+	// frame_tags is read ONCE, grouped by hash, and joined. It used to be two EXISTS subqueries per
+	// frame, and the planner inlines a subquery column into every FILTER that uses it: five index
+	// probes per frame, a million buffer touches on 33,000 photos, seconds warm and far longer with
+	// the pages cold. The Box Status screen polls this; on 29 Sep 2026 it ran past the app's
+	// timeout, the phone gave up and offered the unlock screen, and the unlock queued behind it.
 	v := ints(`
-		WITH ver AS (SELECT coalesce(max(pipe_ver), 0) AS v FROM frames)
+		WITH ver AS (SELECT coalesce(max(pipe_ver), 0) AS v FROM frames),
+		     tags AS (SELECT hash, bool_or(category = '' AND source <> 'user_removed') AS uncategorised
+		              FROM frame_tags GROUP BY hash)
 		SELECT (SELECT v FROM ver),
 		       count(*) FILTER (WHERE kind = 'photo'),
 		       count(*) FILTER (WHERE kind = 'video'),
@@ -109,10 +117,11 @@ func PipelineProgressFrom(c *poltergres.ReadWrite) (PipelineProgress, error) {
 		       count(*) FILTER (WHERE staged AND description <> '' AND described_at >= $1),
 		       count(*) FILTER (WHERE staged AND description <> '' AND described_at >= $2),
 		       coalesce(max(described_at), 0)
-		FROM (SELECT f.*, f.kind IN ('photo','video') AS staged,
-		             EXISTS (SELECT 1 FROM frame_tags t WHERE t.hash = f.hash) AS tagged,
-		             NOT EXISTS (SELECT 1 FROM frame_tags t WHERE t.hash = f.hash AND t.category = '' AND t.source <> 'user_removed') AS categorised
-		      FROM frames f) x`, p.Now-3600, p.Now-86400)
+		FROM (SELECT f.kind, f.pipe_ver, f.preview_path, f.thumb_path, f.description, f.display_name, f.described_at,
+		             f.kind IN ('photo','video') AS staged,
+		             t.hash IS NOT NULL AS tagged,
+		             NOT coalesce(t.uncategorised, false) AS categorised
+		      FROM frames f LEFT JOIN tags t ON t.hash = f.hash) x`, p.Now-3600, p.Now-86400)
 	p.PipelineVersion = at(v, 0)
 	p.Photos, p.Videos, p.Other = at(v, 1), at(v, 2), at(v, 3)
 	p.Total = p.Photos + p.Videos

@@ -2624,3 +2624,86 @@ For each it prints the HTTP code, the time, the answer and the speed. If llama-s
 prints the exit code and signal, its last lines and the kernel's last relevant lines. `--small`
 tries `-c 8192 --parallel 1`, `--cpu` adds `-ngl 0` last, and `--keep` keeps the log. It leaves
 the running stack alone and cleans up after itself.
+
+## Box Status froze the database: the stage count read frame_tags five times per photo (hw)
+
+Opening Box Status polls `/v1/pipeline`, and its stage count ran two `EXISTS (… frame_tags …)`
+subqueries per frame. The planner inlines a subquery column into every `FILTER` that uses it, so
+each frame got five index probes into frame_tags: about a million buffer touches on 33,000 photos.
+That is seconds with the pages cached and much longer when they are not. The Postgres log shows it
+as pairs of "could not send data to client: Broken pipe" about 30 s apart: the screen's poll gave
+up before the count finished. The phone then treated the box as down and offered the unlock, and
+that unlock queued behind the count (the 45 s "loading database").
+
+Now frame_tags is read once, grouped by hash (`bool_or` of "waiting for a category"), and
+left-joined to frames. Only the columns the counts use are selected.
+
+Tested against Postgres 16 (`TestPipelineStagesGroupedJoinCountsTheSame`): 6,000 frames covering
+untagged, categorised, waiting, waiting-but-removed, other kinds and old pipeline versions. Every
+count equals the old query's, and the new one took 21 ms against 108 ms warm.
+
+`tools/db_probe.sh` (read-only) shows, on the box's own Postgres (not the host's):
+- what is running and what blocks what;
+- the sizes of the counted tables, and whether the `hash` indexes exist;
+- the old stage count under `EXPLAIN (ANALYZE, BUFFERS)` with a 120 s cap, plus the job counts
+  and `search.health`.
+
+`--watch` samples running queries every 5 s for a minute; open Status while it runs.
+
+## The unlock screen: a bar in real time, each step's time, and tidbits (app)
+
+The unlock screen now shows a percentage and the time left, a bar, the box's steps each with how
+long it took (the running one counts up live and breathes), and a line underneath that turns every
+4.5 s. That line alternates between what the box is doing ("Postgres wakes up inside the encrypted
+store", "loading the model's weights into the GPU: 42%") and a "did you know?" about something the
+app does. There are 13 tips, each naming where to find the feature (the check-in voice note, ‹ › on
+the MAP, ON THIS DAY, NEAR YOU, gallery search, web search, MODELS, PHRASES, jot a note, WHAT YOU
+PHOTOGRAPH, LOCK BOX NOW, BOX STATUS, HEALTH). A lock shows the same screen with only the doing
+lines.
+
+- **Time, not steps.** `UnlockClock` (pure Kotlin) times each stage on the phone's clock, from the
+  previous stage's done to its own. After a cold unlock that finished, it folds each time into what
+  it expects next time (old and new averaged), stored in the `unlock_clock` preferences. Before the
+  first one, defaults are used (model 30 s) and the screen says "roughly … (first time on this
+  phone)".
+- **The model's own clock.** While MODEL runs, the box's estimate is used: the poll's
+  `model{phase,pct,etaMs,elapsedMs}`, which the app now parses (`ModelLoad`).
+- **The bar.** Its value is elapsed / (elapsed + left). It never goes back, and it holds under 98%
+  until the box says ready.
+- **When a step runs long.** A step at more than twice its usual time (and over 5 s) shows "taking
+  longer than usual (0:45 on this step)" in amber, not a countdown stuck at "a few seconds".
+- **Nothing is learned** from a warm box (nothing done, then everything done in one look), from a
+  failed unlock, or twice from one run.
+- **Same for every account.** It is built from the stage stream alone, which the box sends
+  identically for every account.
+
+Tested: 7 `UnlockClockTest` cases (timing, learning and the next unlock's estimate, the box's model
+estimate, never backwards, overdue, warm, failed, `ModelLoad` parsing) and 3 `UnlockTidbitsTest`
+cases. Of the app's unit tests that run without Android, 108 ran, and the only failure is the old
+`QrSamplerTest` one. The Compose screen itself is structure-checked only.
+
+## Model downloads: speed and time left (app)
+
+A phone model download shows the percentage, "1.20 GB of 2.19 GB", a thicker bar, and
+"▼ 11.3 MB/s · about 2 min left". The notification carries the same numbers. `TransferRate`
+measures over the last 8 s, not since the start, so a resumed download or a Wi-Fi change shows the
+current speed. The shown rate is smoothed, and the time left is rounded to 5 s under a minute and
+to whole minutes under an hour. When no bytes have arrived for 10 s, the row says so in amber
+("waiting for the box; it picks up where it stopped"). Tested: 4 `TransferRateTest` cases.
+
+## The phone's llama.cpp pinned to the box's (app)
+
+The phone model's runtime needs `LLAMA_CPP_SHA256` in `app/src/main/cpp/CMakeLists.txt`, and it
+was empty ("this build carries no model runtime (its llama.cpp pin is not set)"). The hash could
+not be set from here: it is the SHA-256 of the mirror's tarball, which this sandbox cannot fetch.
+
+- `app/android/tools/pin_llama.sh --from-box` pins it on the box itself. It reads the name and
+  SHA-256 that `setup_llama.sh` recorded when it verified the tarball against the signed manifest
+  (`/opt/localghost/llama.cpp/.mirror-src` and `.mirror-sha256`), hashes the kept tarball in
+  `/opt/localghost/llama.cpp.mirror-dl/` again, and refuses if the two differ. The phone then
+  builds from the same bytes as the box: `llama.cpp-v0.5.0-7fe450e`.
+- `build.gradle.kts` uses that kept copy automatically when `-PllamaTarball` is not given, so a
+  build on the box needs no network. CMake still checks it against the pin.
+
+Tested against a fake box directory: it pins, and it refuses a tampered tarball. The native build
+itself needs the Android NDK on the build machine.

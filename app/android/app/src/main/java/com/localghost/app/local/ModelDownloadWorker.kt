@@ -47,6 +47,8 @@ class ModelDownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWor
                     val buf = ByteArray(1 shl 16)
                     var downloaded = existing
                     var lastTick = 0L
+                    val rate = TransferRate()
+                    rate.add(System.currentTimeMillis(), existing)
                     while (true) {
                         if (isStopped) return Result.retry()   // cancelled or constraint lost → resume later
                         val n = ins.read(buf); if (n < 0) break
@@ -55,8 +57,11 @@ class ModelDownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWor
                         val now = System.currentTimeMillis()
                         if (now - lastTick > 500) {             // throttle UI + notification updates
                             lastTick = now
-                            setProgress(workDataOf(P_DONE to downloaded, P_TOTAL to total))
-                            setForeground(makeForegroundInfo(downloaded, total, name))
+                            rate.add(now, downloaded)
+                            val bps = rate.bytesPerSecond()
+                            val left = rate.secondsLeft(downloaded, total)
+                            setProgress(workDataOf(P_DONE to downloaded, P_TOTAL to total, P_RATE to bps, P_LEFT to left))
+                            setForeground(makeForegroundInfo(downloaded, total, name, bps, left))
                         }
                     }
                 }
@@ -70,12 +75,14 @@ class ModelDownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWor
         }
     }
 
-    private fun makeForegroundInfo(done: Long, total: Long, name: String = "model"): ForegroundInfo {
+    private fun makeForegroundInfo(done: Long, total: Long, name: String = "model", bps: Long = -1, left: Long = -1): ForegroundInfo {
         ensureChannel(applicationContext)
         val pct = if (total > 0) ((done * 100) / total).toInt() else 0
+        val speed = if (bps >= 0) "  ·  ${TransferRate.rate(bps)}" else ""
+        val eta = TransferRate.left(left).takeIf { it.isNotEmpty() }?.let { "  ·  $it" } ?: ""
         val notif = NotificationCompat.Builder(applicationContext, CHANNEL)
             .setContentTitle("Downloading $name from the box")
-            .setContentText("$pct%  ·  ${gb(done)} / ${gb(total)}")
+            .setContentText("$pct%  ·  ${TransferRate.size(done)} / ${TransferRate.size(total)}$speed$eta")
             .setSmallIcon(com.localghost.app.R.drawable.ic_ghost_notif)
             .setOngoing(true)
             .setProgress(100, pct, total <= 0)
@@ -91,6 +98,7 @@ class ModelDownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWor
     companion object {
         const val KEY_ID = "id"; const val KEY_NAME = "name"; const val KEY_SIZE = "size"; const val KEY_SHA = "sha"
         const val P_DONE = "done"; const val P_TOTAL = "total"
+        const val P_RATE = "bps"; const val P_LEFT = "left" // bytes/s and seconds left, -1 while measuring
         private const val CHANNEL = "localghost.downloads"
         private const val NOTIF_ID = 4242
 
@@ -113,7 +121,5 @@ class ModelDownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWor
             val ch = NotificationChannel(CHANNEL, "Model downloads", NotificationManager.IMPORTANCE_LOW)
             ctx.getSystemService(NotificationManager::class.java).createNotificationChannel(ch)
         }
-
-        private fun gb(b: Long) = "%.1f GB".format(b / 1_000_000_000.0)
     }
 }

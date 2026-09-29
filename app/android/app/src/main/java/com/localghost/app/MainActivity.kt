@@ -79,6 +79,7 @@ import com.localghost.app.local.ModelStore
 import com.localghost.app.local.ModelDownloadWorker
 import com.localghost.app.net.PhoneModel
 import com.localghost.app.ui.ModelRowState
+import com.localghost.app.ui.DownloadTick
 import com.localghost.app.ui.LockScreen
 import com.localghost.app.ui.MainShell
 import com.localghost.app.ui.PinScreen
@@ -141,7 +142,7 @@ class MainActivity : ComponentActivity() {
     var thinkLevelState by mutableStateOf("")
     var incognitoState by mutableStateOf(false)
     private var currentChatId = 0L
-    private val downloadProgress = mutableStateMapOf<String, Pair<Long, Long>>()
+    private val downloadProgress = mutableStateMapOf<String, DownloadTick>()
     private var installedModels by mutableStateOf<List<String>>(emptyList())
     private var activeModel by mutableStateOf<String?>(null)
     private var offeredModels by mutableStateOf<List<PhoneModel>>(emptyList())
@@ -782,7 +783,7 @@ class MainActivity : ComponentActivity() {
             .getWorkInfosForUniqueWork(ModelDownloadWorker.workName(id)).get()
             ?.firstOrNull()?.let { wi ->
                 if (wi.state == WorkInfo.State.RUNNING || wi.state == WorkInfo.State.ENQUEUED) {
-                    downloadProgress[id] = 0L to 1L   // placeholder until first progress tick
+                    downloadProgress[id] = DownloadTick(0L, 1L, at = 0L)   // placeholder until first progress tick
                     observeDownload(id)
                 }
             }
@@ -815,14 +816,17 @@ class MainActivity : ComponentActivity() {
             installed = installedModels.contains(id),
             active = activeModel == id,
             downloading = dl != null,
-            downloadedBytes = dl?.first ?: 0L,
-            totalBytes = dl?.second ?: 0L,
+            downloadedBytes = dl?.done ?: 0L,
+            totalBytes = dl?.total ?: 0L,
+            bytesPerSecond = dl?.bytesPerSecond ?: -1L,
+            secondsLeft = dl?.secondsLeft ?: -1L,
+            lastProgressAt = dl?.at ?: 0L,
         )
     }
 
     private fun downloadModel(id: String) {
         val model = offeredModels.firstOrNull { it.id == id } ?: return
-        downloadProgress[id] = 0L to model.sizeBytes
+        downloadProgress[id] = DownloadTick(0L, model.sizeBytes, at = 0L)
         ModelDownloadWorker.enqueue(this, model.id, model.name, model.sizeBytes, model.sha256)
         observeDownload(id)
     }
@@ -836,7 +840,11 @@ class MainActivity : ComponentActivity() {
                     WorkInfo.State.RUNNING -> {
                         val done = info.progress.getLong(ModelDownloadWorker.P_DONE, 0L)
                         val total = info.progress.getLong(ModelDownloadWorker.P_TOTAL, 0L)
-                        if (total > 0) downloadProgress[id] = done to total
+                        val bps = info.progress.getLong(ModelDownloadWorker.P_RATE, -1L)
+                        val left = info.progress.getLong(ModelDownloadWorker.P_LEFT, -1L)
+                        val prev = downloadProgress[id]
+                        if (total > 0) downloadProgress[id] = DownloadTick(done, total, bps, left,
+                            if (prev != null && prev.done == done) prev.at else System.currentTimeMillis())
                     }
                     WorkInfo.State.SUCCEEDED -> { downloadProgress.remove(id); refreshModels() }
                     WorkInfo.State.FAILED -> { downloadProgress.remove(id); error = "download failed" }

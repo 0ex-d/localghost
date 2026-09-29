@@ -140,13 +140,13 @@ object BoxClient {
             return@flow
         }
         while (true) {
-            val states = try {
+            val (states, model) = try {
                 pollUnlock(ctx)
             } catch (e: Exception) {
                 emit(UnlockSnapshot.failed("lost contact with the box: ${e.message}"))
                 return@flow
             }
-            val snap = UnlockSnapshot.from(states)
+            val snap = UnlockSnapshot.from(states, model)
             emit(snap)
             if (snap.done || snap.failed != null) break
             delay(1000) // poll cadence: once a second
@@ -164,7 +164,7 @@ object BoxClient {
     }
 
     /** Poll the box for the current unlock stage states, mapping the JSON to the app enums. */
-    private suspend fun pollUnlock(ctx: Context): Map<UnlockStage, StageState> {
+    private suspend fun pollUnlock(ctx: Context): Pair<Map<UnlockStage, StageState>, ModelLoad?> {
         val resp = BoxHttp.getJson(ctx, "/v1/unlock/poll")
         // THE KEY EXCHANGE HAPPENS HERE, not on the unlock POST. The box issues the session token once,
         // on the poll that reports a successful unlock (token + expiresAt ride alongside the stages).
@@ -182,13 +182,14 @@ object BoxClient {
             }
         }
         val out = mutableMapOf<UnlockStage, StageState>()
-        val arr = resp.optJSONArray("stages") ?: return out
+        val model = ModelLoad.fromJson(resp.optJSONObject("model"))
+        val arr = resp.optJSONArray("stages") ?: return out to model
         for (i in 0 until arr.length()) {
             val o = arr.getJSONObject(i)
             val stage = stageFromName(o.optString("stage")) ?: continue
             out[stage] = stateFromName(o.optString("state"))
         }
-        return out
+        return out to model
     }
 
     private fun stageFromName(n: String): UnlockStage? = when (n) {

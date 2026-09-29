@@ -62,8 +62,10 @@ died() {
     LP=""
     echo
     echo "!! llama-server DIED (exit $rc$( [ $rc -gt 128 ] && echo ", signal $((rc-128)): $(kill -l $((rc-128)) 2>/dev/null)"))"
+    echo "   why (error lines from its whole log):"
+    grep -iE "error|assert|abort|exception|terminate|out of memory|failed|cannot|invalid" "$LOG" | grep -vE "\(\+0x|\[0x[0-9a-f]+\][[:space:]]*$" | tail -12 | sed 's/^/   | /'
     echo "   its last lines:"
-    tail -25 "$LOG" | sed 's/^/   | /'
+    tail -8 "$LOG" | sed 's/^/   | /'
     echo "   kernel, last minute:"
     dmesg -T 2>/dev/null | tail -200 | grep -iE "llama|segfault|oom|killed process|NVRM|Xid" | tail -5 | sed 's/^/   | /'
     exit 2
@@ -77,7 +79,10 @@ for i in $(seq 1 300); do
 done
 echo " ready in $(( $(date +%s) - t0 )) s"
 echo "   what it said about the GPU and the projector:"
-grep -iE "build:|ggml_cuda_init|Device [0-9]|offload|CUDA[0-9]* (model|KV|compute) buffer|CPU_Mapped|clip_model_loader: (model name|has_vision|has_audio|projector)|projector|vision|mtmd|warn|error" "$LOG" | head -24 | sed 's/^/   | /'
+if ! grep -iE "build|cuda|gpu|device|offload|buffer|vram|clip|mtmd|vision|audio|projector|warn|error" "$LOG" | head -30 | sed 's/^/   | /' | grep .; then
+    echo "   (nothing about the GPU in its log; its first lines, so the parser can learn this build's format:)"
+    head -15 "$LOG" | sed 's/^/   | /'
+fi
 
 ask() { # name, body file
     local name="$1" t1 code
@@ -85,6 +90,10 @@ ask() { # name, body file
     code=$(curl -s -o "$OUT" -w '%{http_code}' --max-time 300 -H 'Content-Type: application/json' \
         --data-binary @"$BODY" "http://127.0.0.1:$PORT/v1/chat/completions")
     printf "== %-26s http %s in %s ms\n" "$name" "$code" "$(( ($(date +%s%N) - t1) / 1000000 ))"
+    if [ "$code" = 000 ] || [ "$code" = 100 ]; then
+        echo "   the connection dropped mid-request"
+        for _ in 1 2 3 4 5 6; do alive || died; sleep 0.5; done
+    fi
     alive || died
     if [ "$code" = 200 ]; then
         printf "   answer: %s\n" "$(grep -o '"content":"[^"]*' "$OUT" | head -1 | cut -c12- | cut -c1-220)"
@@ -104,13 +113,24 @@ printf '{"messages":[{"role":"user","content":"In one sentence: what is a lighth
 ask "text" "$BODY"
 
 B64="$(mktemp /tmp/llama-probe.XXXXXX.b64)"
-echo "/9j/2wCEAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSgBBwcHCggKEwoKEygaFhooKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKP/AABEIAEAAYAMBIgACEQEDEQH/xAGiAAABBQEBAQEBAQAAAAAAAAAAAQIDBAUGBwgJCgsQAAIBAwMCBAMFBQQEAAABfQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNicoIJChYXGBkaJSYnKCkqNDU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk5ebn6Onq8fLz9PX29/j5+gEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoLEQACAQIEBAMEBwUEBAABAncAAQIDEQQFITEGEkFRB2FxEyIygQgUQpGhscEJIzNS8BVictEKFiQ04SXxFxgZGiYnKCkqNTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqCg4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2dri4+Tl5ufo6ery8/T19vf4+fr/2gAMAwEAAhEDEQA/AMULTwtPC08LX3LkfFwkMC08LTwtSBahyOmEiMLUgWnYCjJIA96j+0xg/wAR9wK48RjaGGt7WaVz1sFgMVjL/V6blbsv1JQtPC1Ct3FkZDD3xVuIq65Qgj2rOjjqGIdqU02dVfL8Xg0pV6bin3Q0LTwtSBaeFrdyMoSGBaeFp4WnhahyOmEjCC08LTwtSBa6XI+KhIYFp2AqknoOTUgWoNQytuMd2ANceMxP1ehOra9kevlWF+vYunhr25mlfy6lKaUyMeTt7Co6KK/MK1adabqVHds/oLDYanhaao0VaKCnwyvC+5Dj1HY0yiphOVOSlB2aLq0oVYOnUV090zooGWWNXT7pqYLWdoJJWZf4QQQPrn/CtcLX6LgcU8Vh41Xu/wBND8ZzTCLAYyph4u6i9PRq6/BjAtPC08LUgWulyOeEjCC08LTwtPC10uR8TCQwLVbVFP2YEDowz+tXwtLJCssbIw4YYrjxtJ4ihOkt2j2snx0cDjKWJkrqLTfp1OaoqS5ha3maNweOh9R61HX5pOEqcnGSs0f0TRrQr041abvFq6fkFFFOijeaRY41LOxwAKlJydkXKSgnKTskbHh1SROcHHyjP51thajsbVbW3WJecck4xk1aC1+gYCi8Nh4Upbr9dT8SzjHwx2OqYin8Lenoklf52uMC08LTwtPC11ORyQkYQWnhakC08LXS5HxUJDAtPC08LTwtQ5HTCRBLbxzx7JVDL1xWc2hKWOychewK5P8AOtsLUgWuHE4PD4l3qxu/67HvZbnuPy5OOFquKfTRr7mmr+ZgpoA3DdcErnkBMf1rXs7OK0TbCuM9SeSatBaeFrOhgcPh3zUo2f3/AJnVjM/x+YQ9niarce2iXzSSv8xgWnhaeFp4WuhyOKEhgWnhaeFqQLUOR0wkf//Z" > "$B64"
+printf '%s' "/9j/2wCEAAYEBQYFBAYGBQYHBwYIChAKCgkJChQODwwQFxQYGBcUFhYaHSUfGhsjHBYWICwgIyYnKSopGR8tMC0oMCUoKSgBBwcHCggKEwoKEygaFhooKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKP/AABEIAEAAYAMBIgACEQEDEQH/xAGiAAABBQEBAQEBAQAAAAAAAAAAAQIDBAUGBwgJCgsQAAIBAwMCBAMFBQQEAAABfQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNicoIJChYXGBkaJSYnKCkqNDU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk5ebn6Onq8fLz9PX29/j5+gEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoLEQACAQIEBAMEBwUEBAABAncAAQIDEQQFITEGEkFRB2FxEyIygQgUQpGhscEJIzNS8BVictEKFiQ04SXxFxgZGiYnKCkqNTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqCg4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2dri4+Tl5ufo6ery8/T19vf4+fr/2gAMAwEAAhEDEQA/AMULTwtPC08LX3LkfFwkMC08LTwtSBahyOmEiMLUgWnYCjJIA96j+0xg/wAR9wK48RjaGGt7WaVz1sFgMVjL/V6blbsv1JQtPC1Ct3FkZDD3xVuIq65Qgj2rOjjqGIdqU02dVfL8Xg0pV6bin3Q0LTwtSBaeFrdyMoSGBaeFp4WnhahyOmEjCC08LTwtSBa6XI+KhIYFp2AqknoOTUgWoNQytuMd2ANceMxP1ehOra9kevlWF+vYunhr25mlfy6lKaUyMeTt7Co6KK/MK1adabqVHds/oLDYanhaao0VaKCnwyvC+5Dj1HY0yiphOVOSlB2aLq0oVYOnUV090zooGWWNXT7pqYLWdoJJWZf4QQQPrn/CtcLX6LgcU8Vh41Xu/wBND8ZzTCLAYyph4u6i9PRq6/BjAtPC08LUgWulyOeEjCC08LTwtPC10uR8TCQwLVbVFP2YEDowz+tXwtLJCssbIw4YYrjxtJ4ihOkt2j2snx0cDjKWJkrqLTfp1OaoqS5ha3maNweOh9R61HX5pOEqcnGSs0f0TRrQr041abvFq6fkFFFOijeaRY41LOxwAKlJydkXKSgnKTskbHh1SROcHHyjP51thajsbVbW3WJecck4xk1aC1+gYCi8Nh4Upbr9dT8SzjHwx2OqYin8Lenoklf52uMC08LTwtPC11ORyQkYQWnhakC08LXS5HxUJDAtPC08LTwtQ5HTCRBLbxzx7JVDL1xWc2hKWOychewK5P8AOtsLUgWuHE4PD4l3qxu/67HvZbnuPy5OOFquKfTRr7mmr+ZgpoA3DdcErnkBMf1rXs7OK0TbCuM9SeSatBaeFrOhgcPh3zUo2f3/AJnVjM/x+YQ9niarce2iXzSSv8xgWnhaeFp4WuhyOKEhgWnhaeFqQLUOR0wkf//Z" > "$B64"
 photo "tiny photo (red disc)" "$B64"
 
 REAL="$(find "$R$M/frames" -type f -iname '*.jpg' -size +200k -size -8M -print -quit 2>/dev/null)"
+FF="$(command -v ffmpeg || true)"; FFLIB=""
+if [ -z "$FF" ] && [ -x "$R$M/runtime/ffmpeg/bin/ffmpeg" ]; then FF="$R$M/runtime/ffmpeg/bin/ffmpeg"; FFLIB="$R$M/runtime/ffmpeg/lib"; fi
 if [ -n "$REAL" ]; then
+    DIM="$(LD_LIBRARY_PATH="$FFLIB" "${FF%ffmpeg}ffprobe" -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "$REAL" 2>/dev/null | head -1)"
+    if [ -n "$FF" ]; then
+        SMALLJPG="$(mktemp /tmp/llama-probe.XXXXXX.jpg)"
+        if LD_LIBRARY_PATH="$FFLIB" "$FF" -loglevel error -y -i "$REAL" -vf "scale='if(gt(iw,ih),min(1024,iw),-2)':'if(gt(iw,ih),-2,min(1024,ih))'" -q:v 3 -f mjpeg "$SMALLJPG" 2>/dev/null; then
+            base64 -w0 "$SMALLJPG" > "$B64"
+            photo "same photo at 1024 px" "$B64"
+        fi
+        rm -f "$SMALLJPG"
+    fi
     base64 -w0 "$REAL" > "$B64"
-    photo "a real photo ($(du -h "$REAL" | cut -f1))" "$B64"
+    photo "the photo as is ($(du -h "$REAL" | cut -f1)${DIM:+, ${DIM/,/x}})" "$B64"
 else
     echo "== a real photo: none found under $M/frames"
 fi

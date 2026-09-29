@@ -10,12 +10,15 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.unit.dp
+import com.localghost.app.local.TransferRate
 import com.localghost.app.net.PhoneModel
 import com.localghost.app.ui.theme.*
 
@@ -26,6 +29,18 @@ data class ModelRowState(
     val downloading: Boolean,
     val downloadedBytes: Long,
     val totalBytes: Long,
+    val bytesPerSecond: Long = -1,  // -1 while the first second is measured
+    val secondsLeft: Long = -1,
+    val lastProgressAt: Long = 0,   // when the byte count last moved (wall clock), 0 before the first tick
+)
+
+/** One model download's latest progress, as the worker reported it. */
+data class DownloadTick(
+    val done: Long,
+    val total: Long,
+    val bytesPerSecond: Long = -1,
+    val secondsLeft: Long = -1,
+    val at: Long = System.currentTimeMillis(),
 )
 
 @Composable
@@ -98,12 +113,32 @@ private fun ModelRow(
             st.downloading -> {
                 val frac = if (st.totalBytes > 0)
                     (st.downloadedBytes.toFloat() / st.totalBytes).coerceIn(0f, 1f) else 0f
-                Text("▼ ${gb(st.downloadedBytes)} / ${gb(st.totalBytes)}",
-                    color = TerminalDim, style = MaterialTheme.typography.labelMedium)
-                Spacer(Modifier.height(4.dp))
+                // a clock for "stalled": the worker only reports when bytes arrive
+                val now: Long by produceState(System.currentTimeMillis()) {
+                    while (true) { kotlinx.coroutines.delay(1_000); value = System.currentTimeMillis() }
+                }
+                val stalled = st.lastProgressAt > 0 && now - st.lastProgressAt > 10_000
+                Row(verticalAlignment = Alignment.Bottom) {
+                    Text("${(frac * 100).toInt()}%", color = TerminalGreen,
+                        style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.width(10.dp))
+                    Text("${TransferRate.size(st.downloadedBytes)} of ${TransferRate.size(st.totalBytes)}",
+                        color = TerminalDim, style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.padding(bottom = 2.dp))
+                }
+                Spacer(Modifier.height(6.dp))
                 LinearProgressIndicator(progress = { frac }, color = TerminalGreen,
                     trackColor = Void, strokeCap = StrokeCap.Butt,
-                    modifier = Modifier.fillMaxWidth().height(2.dp))
+                    modifier = Modifier.fillMaxWidth().height(6.dp))
+                Spacer(Modifier.height(6.dp))
+                val line = when {
+                    st.lastProgressAt == 0L -> "waiting for the box…"
+                    stalled -> "no data for ${(now - st.lastProgressAt) / 1000} s , waiting for the box (it picks up where it stopped)"
+                    else -> "▼ " + TransferRate.rate(st.bytesPerSecond) +
+                        TransferRate.left(st.secondsLeft).takeIf { it.isNotEmpty() }?.let { "  ·  $it" }.orEmpty()
+                }
+                Text(line, color = if (stalled) Warning else GhostTextDim,
+                    style = MaterialTheme.typography.labelMedium)
                 Spacer(Modifier.height(8.dp))
                 Text("[ CANCEL ]", color = Warning, style = MaterialTheme.typography.labelMedium,
                     modifier = Modifier.clickable { onCancel(m.id) })
