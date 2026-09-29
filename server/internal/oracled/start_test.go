@@ -3,12 +3,46 @@ package oracled
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+// TestMain doubles as a fake llama-server: with GHOST_FAKE_LLAMA set, this binary serves /health
+// on the --port it was given, then dies the way a crash does.
+func TestMain(m *testing.M) {
+	if os.Getenv("GHOST_FAKE_LLAMA") != "" {
+		fakeLlamaProcess()
+		return
+	}
+	os.Exit(m.Run())
+}
+
+func fakeLlamaProcess() {
+	port := ""
+	for i, a := range os.Args {
+		if a == "--port" && i+1 < len(os.Args) {
+			port = os.Args[i+1]
+		}
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:"+port)
+	if err != nil {
+		os.Exit(9)
+	}
+	go func() {
+		_ = http.Serve(ln, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
+	}()
+	fmt.Println("main: server is listening on http://127.0.0.1:" + port)
+	time.Sleep(800 * time.Millisecond)
+	fmt.Fprintln(os.Stderr, "llama.cpp/tools/mtmd/clip.cpp:1234: GGML_ASSERT(img.nx > 0) failed")
+	os.Exit(134)
+}
 
 // A llama-server that dies at start (here: a flag it does not know, the way a build from another
 // commit answers oracled's arguments) is noticed at once, with its own words, not after minutes of
@@ -63,5 +97,52 @@ func TestDropRejectedArg(t *testing.T) {
 	}
 	if _, ok := b.DropRejectedArg(errors.New("CUDA error: out of memory")); ok {
 		t.Fatal("dropped something on an error that names no argument")
+	}
+}
+
+// A llama-server that was ready and then died (a crash on a request, the OOM killer) is noticed:
+// Died's channel closes and its account carries the exit and the child's last words. On 29 Sep
+// 2026 oracled kept saying "ok" over a dead port because nothing watched after ready.
+func TestDiedAfterReady(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "llama-server") // a copy, so the stray sweep before a start never sees this test
+	src, err := os.Open(self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst, _ := os.OpenFile(bin, os.O_CREATE|os.O_WRONLY, 0o755)
+	_, _ = io.Copy(dst, src)
+	src.Close()
+	dst.Close()
+	model := filepath.Join(dir, "m.gguf")
+	_ = os.WriteFile(model, make([]byte, 1<<20), 0o644)
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+	t.Setenv("GHOST_FAKE_LLAMA", "1")
+	b := NewLlamaBackend(LlamaConfig{BinPath: bin, ModelPath: model, Port: port, ModelName: "test"})
+	if err := b.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	died, how := b.Died()
+	if died == nil {
+		t.Fatal("no channel for a running child")
+	}
+	select {
+	case <-died:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the death was not noticed")
+	}
+	msg := how()
+	if !strings.Contains(msg, "exit status 134") || !strings.Contains(msg, "GGML_ASSERT") {
+		t.Fatalf("the account: %s", msg)
+	}
+	b.Stop() // already reaped: returns at once, signals nothing
+	if d, _ := b.Died(); d != nil {
+		t.Fatal("a stopped backend still hands out the old channel")
 	}
 }

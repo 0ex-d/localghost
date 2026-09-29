@@ -2562,3 +2562,65 @@ out, the stalled case still holds the volume after 5 s, so the test catches it.
 
 Deploy this when the phone's sync is paused or the new app is installed. A redeploy restarts secd,
 which locks the box.
+
+## A model that died after it was ready, reported as "ok" (oracled)
+
+At 21:06:05 oracled logged "model ready". At 21:06:33 the first caption got EOF, and every request
+after it got "connection refused". llama-server had died, but health.sh still showed
+`ghost.oracled UP ok`. Once the child was ready nothing watched it, so nothing noticed, logged or
+restarted it.
+
+Now:
+- **The backend hands out `Died()`** after a successful start: a channel closed when the child is
+  reaped, and a func that gives its exit state (a signal such as `killed` from the OOM killer, or an
+  exit status) and its last lines.
+- **oracled waits on it.** On a death it logs "llama-server died while serving" with how long it was
+  up and why, and the health line turns degraded with the same reason. It then starts the child
+  again: after 10 s the first time, then 30 s, 1, 2, 5 and 10 minutes while it keeps dying within
+  10 minutes of starting. Our own shutdown is told apart by the context, so it is not reported as a
+  death.
+- **`Stop` on a child that already died** returns at once and signals nothing.
+
+Tested: `TestDiedAfterReady` uses the test binary as a fake llama-server that serves `/health`
+and then exits 134 with a GGML_ASSERT line. The death is seen, and the account names the exit
+status and the assert.
+
+## "Loading database" for 45 s: a repeat unlock of a running box (secd, hw)
+
+At 21:05:54 the box unlocked cold, and START_DB took 0.4 s. At 21:08:39 and 21:10:08 the phone
+unlocked the same box again while it was already running, and START_DB took 44.8 s and 45.5 s.
+At those moments the Postgres log has pairs of "could not send data to client: Broken pipe /
+connection to client lost". Those are queries whose callers gave up while they waited.
+
+A repeat unlock re-runs the schema script with every daemon running. The script's
+`ALTER TABLE … ADD COLUMN IF NOT EXISTS` takes the table's exclusive lock even when the column
+exists. So it waits for whatever query holds that table, and every new query on the table queues
+behind it. The time went there: from the pg_hba reload at the start of the pass to "schema already
+converged (no changes)" at its end.
+
+Now the datastore remembers which Postgres instance (postmaster pid and start time, from
+`postmaster.pid`) this secd process has already converged. A repeat unlock of that same running
+instance skips the schema pass and logs "database already running and converged by this secd ,
+schema pass skipped". The schema only changes with secd's own code, and a new secd starts with an
+empty memory, so a secd deploy still converges at its first unlock. A Postgres that was restarted
+is converged again.
+
+Tested: `TestAlreadyConvergedFollowsTheInstance` covers the same instance (skip), a restarted one,
+another slot, and a missing or garbled pid file (run). Not tested here: the whole unlock against a
+live Postgres with daemons holding locks.
+
+## tools/llama_probe.sh: the engine by hand, with a photo
+
+watchd starts daemons with no stdout, so llama-server's own output (teed by oracled) goes nowhere.
+When it died on the first caption at 21:06:33, nothing recorded why. (The new oracled logs a death
+and its last lines.) The probe runs the volume's llama-server as oracled would, with the conf's
+`extraArgs` minus `--mlock`, on port 18090, through secd's namespace door. It sends:
+
+1. a text question;
+2. a tiny generated photo (a red disc, so the answer shows whether the image arrived);
+3. a real JPEG from `frames/`.
+
+For each it prints the HTTP code, the time, the answer and the speed. If llama-server dies, it
+prints the exit code and signal, its last lines and the kernel's last relevant lines. `--small`
+tries `-c 8192 --parallel 1`, `--cpu` adds `-ngl 0` last, and `--keep` keeps the log. It leaves
+the running stack alone and cleans up after itself.

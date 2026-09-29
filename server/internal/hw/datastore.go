@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -41,6 +42,15 @@ type DataStore struct {
 	// dm-crypt), but Postgres REFUSES to run as root ("initdb: cannot be run as root"), so every DB
 	// process is dropped to this user. Empty means no drop , only valid in tests that never spawn a DB.
 	runUser string
+	// converged: per slot, the Postgres instance (postmaster pid + start time) THIS secd process has
+	// already run EnsureSchema against. A repeat unlock of a box that is already unlocked skips the
+	// schema pass: on 29 Sep 2026 two such unlocks sat 45 s each in START_DB, the schema script's
+	// ALTER TABLEs (they take the table lock even when there is nothing to add) queued behind the
+	// running daemons' queries, and every query on those tables queued behind them ("connection
+	// to client lost" in the Postgres log). The schema only changes with secd's own code, and a new
+	// secd process starts with this empty, so the every-unlock rule still holds where it matters.
+	convergedMu sync.Mutex
+	converged   map[int]string
 }
 
 func NewDataStore(mountPathFor func(slot int) string, runUser string) *DataStore {
@@ -171,7 +181,11 @@ func (d *DataStore) startPostgres(slot int, c ServicesConfig) error {
 	// "mounted", unlock skipped this stage, and a dead Postgres on a live mount stayed dead forever).
 	// A live server needs no start; it still gets EnsureSchema, the every-unlock rule.
 	if d.pgAlive(slot) {
-		return d.EnsureSchema(slot, c)
+		if d.alreadyConverged(slot) {
+			slog.Info("database already running and converged by this secd , schema pass skipped", "fn", "startPostgres", "slot", slot)
+			return nil
+		}
+		return d.ensureSchemaOnce(slot, c)
 	}
 	firstRun := false
 	// initdb on first run (the data dir lives in the encrypted volume).
@@ -229,11 +243,50 @@ func (d *DataStore) startPostgres(slot int, c ServicesConfig) error {
 	}
 	// EVERY unlock, not just the first: converge the live database to the current code , tables,
 	// roles, grants, search layer. Idempotent by rule; drift-proof by construction.
-	if err := d.EnsureSchema(slot, c); err != nil {
+	if err := d.ensureSchemaOnce(slot, c); err != nil {
 		_ = d.stopPostgres(slot, c)
 		return fmt.Errorf("ensure schema slot %d: %w", slot, err)
 	}
 	return nil
+}
+
+// ensureSchemaOnce runs EnsureSchema and, when it succeeds, remembers the Postgres instance it ran
+// against, so a repeat unlock of the same running database does not run it again.
+func (d *DataStore) ensureSchemaOnce(slot int, c ServicesConfig) error {
+	if err := d.EnsureSchema(slot, c); err != nil {
+		return err
+	}
+	if inst := d.pgInstance(slot); inst != "" {
+		d.convergedMu.Lock()
+		if d.converged == nil {
+			d.converged = map[int]string{}
+		}
+		d.converged[slot] = inst
+		d.convergedMu.Unlock()
+	}
+	return nil
+}
+
+// alreadyConverged: this secd process ran EnsureSchema against the Postgres instance running now.
+func (d *DataStore) alreadyConverged(slot int) bool {
+	inst := d.pgInstance(slot)
+	d.convergedMu.Lock()
+	defer d.convergedMu.Unlock()
+	return inst != "" && d.converged[slot] == inst
+}
+
+// pgInstance names the running Postgres: its postmaster pid and start time, from postmaster.pid
+// (lines 1 and 3). A restarted server is a new instance. "" when there is no pid file.
+func (d *DataStore) pgInstance(slot int) string {
+	b, err := os.ReadFile(filepath.Join(d.pgData(slot), "postmaster.pid"))
+	if err != nil {
+		return ""
+	}
+	l := strings.SplitN(string(b), "\n", 4)
+	if len(l) < 3 || strings.TrimSpace(l[0]) == "" {
+		return ""
+	}
+	return strings.TrimSpace(l[0]) + "@" + strings.TrimSpace(l[2])
 }
 
 // appConfigSchema is the application schema , every statement idempotent (IF NOT EXISTS) BY RULE,

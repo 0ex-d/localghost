@@ -84,6 +84,20 @@ func NewLlamaBackend(cfg LlamaConfig) *llamaBackend {
 // Load is how far the current start has got: phase, percent, time left (loadprog.go).
 func (b *llamaBackend) Load() LoadProgress { return b.info.load.snapshot() }
 
+// Died reports the running child's end: a channel closed when it exits, and a func that says how
+// (its exit state and its last lines). Taken right after a Start that succeeded, so oracled notices
+// a llama-server that dies LATER (a crash on a request, the kernel's OOM killer) instead of
+// reporting "ok" over a dead port. nil when no child is running.
+func (b *llamaBackend) Died() (<-chan struct{}, func() string) {
+	ex := b.exited
+	if ex == nil {
+		return nil, nil
+	}
+	return ex, func() string {
+		return "llama-server exited (" + stateString(b.exitState) + "); it said: " + b.info.Why()
+	}
+}
+
 // Engine is what the child said about the hardware; Stats how fast it has been answering.
 func (b *llamaBackend) Engine() EngineInfo                  { return b.info.get() }
 func (b *llamaBackend) Stats() StatsSummary                 { return b.stats.Summary() }
@@ -421,6 +435,14 @@ func (b *llamaBackend) inferMultimodal(ctx context.Context, req oracle.Request) 
 func (b *llamaBackend) Stop() {
 	if b.proc == nil {
 		return
+	}
+	if b.exited != nil {
+		select {
+		case <-b.exited: // died by itself and already reaped: nothing to signal
+			b.proc, b.exited = nil, nil
+			return
+		default:
+		}
 	}
 	pid := b.proc.Pid
 	t0 := time.Now()

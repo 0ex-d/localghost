@@ -135,41 +135,83 @@ func main() {
 		// health line, and the start is tried again after 30 s, 1, 2, 5, then every 10 minutes (a
 		// GPU still releasing the old child's memory is one reason that clears by itself).
 		backoff := []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 5 * time.Minute, 10 * time.Minute}
-		for try := 0; ; try++ {
-			lg.Info("starting llama-server child", "fn", "main", "model", cfg.ModelName, "try", try+1)
-			err := llama.Start(ctx)
-			if err == nil {
-				break
+		crashes := 0 // deaths after ready, in a row; a child that stays up 10 minutes resets it
+		for {
+			for try := 0; ; try++ {
+				lg.Info("starting llama-server child", "fn", "main", "model", cfg.ModelName, "try", try+1)
+				err := llama.Start(ctx)
+				if err == nil {
+					break
+				}
+				if ctx.Err() != nil {
+					return
+				}
+				if dropped, ok := llama.DropRejectedArg(err); ok {
+					// a tuning flag from conf this llama.cpp does not know: without it, at once
+					lg.Warn("llama-server does not know a flag from conf/ghost.oracled.conf extraArgs , starting without it; take it out of the conf", "fn", "main", "dropped", dropped, "try", try+1)
+					try--
+					continue
+				}
+				wait := backoff[len(backoff)-1]
+				if try < len(backoff) {
+					wait = backoff[try]
+				}
+				why := err.Error()
+				if len(why) > 400 {
+					why = why[:400]
+				}
+				modelWhy.Store("model not running (try " + strconv.Itoa(try+1) + ", next in " + wait.String() + "): " + why)
+				lg.Error("llama-server did not become ready", "fn", "main", "try", try+1, "retryIn", wait.String(), "err", err)
+				llama.Stop() // a child still running but never healthy is ended before the next try
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(wait):
+				}
 			}
-			if ctx.Err() != nil {
+			broker.SetBackend(oracle.ClassLocalSmall, llama)
+			modelReady.Store(true)
+			lg.Info("model ready", "fn", "main", "model", cfg.ModelName)
+			// ...and WATCHED. On 29 Sep 2026 llama-server died on the first caption after a start (EOF,
+			// then "connection refused" on every request) while this health line kept saying "ok":
+			// nothing looked at the child once it was ready. Now its death is logged with its exit
+			// state (a signal: the OOM killer, a crash) and its last lines, the health line says so,
+			// and it is started again, with the same backoff when it keeps dying soon after starting.
+			died, how := llama.Died()
+			if died == nil {
 				return
 			}
-			if dropped, ok := llama.DropRejectedArg(err); ok {
-				// a tuning flag from conf this llama.cpp does not know: without it, at once
-				lg.Warn("llama-server does not know a flag from conf/ghost.oracled.conf extraArgs , starting without it; take it out of the conf", "fn", "main", "dropped", dropped, "try", try+1)
-				try--
-				continue
+			upAt := time.Now()
+			select {
+			case <-ctx.Done():
+				return
+			case <-died:
 			}
-			wait := backoff[len(backoff)-1]
-			if try < len(backoff) {
-				wait = backoff[try]
+			if ctx.Err() != nil {
+				return // our own shutdown stopped it
 			}
-			why := err.Error()
+			modelReady.Store(false)
+			why := how()
+			if time.Since(upAt) > 10*time.Minute {
+				crashes = 0
+			}
+			wait := 10 * time.Second
+			if crashes > 0 {
+				wait = backoff[min(crashes-1, len(backoff)-1)]
+			}
+			crashes++
 			if len(why) > 400 {
 				why = why[:400]
 			}
-			modelWhy.Store("model not running (try " + strconv.Itoa(try+1) + ", next in " + wait.String() + "): " + why)
-			lg.Error("llama-server did not become ready", "fn", "main", "try", try+1, "retryIn", wait.String(), "err", err)
-			llama.Stop() // a child still running but never healthy is ended before the next try
+			modelWhy.Store("model died after " + time.Since(upAt).Round(time.Second).String() + " up (starting again in " + wait.String() + "): " + why)
+			lg.Error("llama-server died while serving", "fn", "main", "up", time.Since(upAt).Round(time.Second).String(), "inARow", crashes, "restartIn", wait.String(), "err", why)
+			llama.Stop() // reaped already: clears the handle for the next start
 			select {
 			case <-ctx.Done():
 				return
 			case <-time.After(wait):
 			}
 		}
-		broker.SetBackend(oracle.ClassLocalSmall, llama)
-		modelReady.Store(true)
-		lg.Info("model ready", "fn", "main", "model", cfg.ModelName)
 	}()
 	broker.Run()
 	// Shutdown order matters: the MODEL first, then the broker. The broker's Stop waits for its
