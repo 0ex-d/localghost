@@ -204,6 +204,34 @@ var schemaRegistry = []SchemaTable{
 		"CREATE INDEX IF NOT EXISTS journal_ts ON journal_entries (ts)",
 		"CREATE INDEX IF NOT EXISTS journal_undistilled ON journal_entries (ts DESC) WHERE NOT distilled",
 	}},
+	// VOICE NOTES , the person's own recordings (at the daily check-in, or any time), kept: the
+	// audio is theirs, like a photo. ghost.voiced archives the WAV under path (relative to the
+	// mount), transcribes it with whisper.cpp when the box has a speech model, and writes the
+	// transcript to the journal (source ghost.voiced, ref voice:<id>). status: pending (waiting for
+	// the engine or its turn), done, failed (MaxTries used; error says why). id is the phone's
+	// (32 hex), so an upload retried after a lost answer is the same note.
+	{Name: "voice_notes", PK: "id", Cols: []SchemaCol{
+		{"id", "TEXT", true, ""},
+		{"kind", "TEXT", true, "'journal'"}, // checkin | journal
+		{"day", "TEXT", true, "''"},         // the phone's day it was recorded on, YYYY-MM-DD
+		{"taken_at", "BIGINT", true, ""},    // recording start, unix seconds
+		{"duration_ms", "BIGINT", true, "0"},
+		{"bytes", "BIGINT", true, "0"},
+		{"sha256", "TEXT", true, "''"},
+		{"path", "TEXT", true, "''"},
+		{"device", "TEXT", true, "''"},
+		{"status", "TEXT", true, "'pending'"},
+		{"tries", "INTEGER", true, "0"},
+		{"error", "TEXT", true, "''"},
+		{"transcript", "TEXT", true, "''"},
+		{"lang", "TEXT", true, "''"},
+		{"model", "TEXT", true, "''"},
+		{"received_at", "BIGINT", true, "0"},
+		{"transcribed_at", "BIGINT", true, "0"},
+	}, Indexes: []string{
+		"CREATE INDEX IF NOT EXISTS voice_notes_taken ON voice_notes (taken_at DESC)",
+		"CREATE INDEX IF NOT EXISTS voice_notes_pending ON voice_notes (taken_at DESC) WHERE status = 'pending'",
+	}},
 	{Name: "health_metrics", PK: "day, metric", Cols: []SchemaCol{
 		{"day", "TEXT", true, ""},
 		{"metric", "TEXT", true, ""},

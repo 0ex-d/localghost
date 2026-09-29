@@ -41,6 +41,9 @@ type LlamaConfig struct {
 	Port       int    // loopback port oracled picks and tells no one
 	ModelName  string // reported back in Response.Model, e.g. "gemma-4-12b"
 	ExtraArgs  []string
+	// LoadTimesPath keeps the last complete load's measured times (loadprog.go), the basis of the
+	// next load's time-left estimate. Empty: estimates start from nothing every time.
+	LoadTimesPath string
 }
 
 // llamaBackend owns a llama-server subprocess.
@@ -57,19 +60,28 @@ type llamaBackend struct {
 	// the two facts "is the GPU running" is made of. See engine.go.
 	info  *engineInfoBox
 	stats *EngineStats
+	// exited is closed when the child is reaped (one waiter, started with it); exitState says how
+	exited    chan struct{}
+	exitState *os.ProcessState
+	starts    int // how many times Start ran (the retry number on the unlock screen)
 }
 
 // NewLlamaBackend prepares (does not start) the backend.
 func NewLlamaBackend(cfg LlamaConfig) *llamaBackend {
+	info := newEngineInfoBox()
+	info.load = newLoadTracker(cfg.LoadTimesPath)
 	return &llamaBackend{
 		cfg:          cfg,
 		client:       &http.Client{Timeout: 120 * time.Second}, // a 12B generation can be slow
 		streamClient: &http.Client{},                           // streaming: context-cancelled, never clock-killed
 		addr:         "127.0.0.1:" + strconv.Itoa(cfg.Port),
-		info:         newEngineInfoBox(),
+		info:         info,
 		stats:        NewEngineStats(),
 	}
 }
+
+// Load is how far the current start has got: phase, percent, time left (loadprog.go).
+func (b *llamaBackend) Load() LoadProgress { return b.info.load.snapshot() }
 
 // Engine is what the child said about the hardware; Stats how fast it has been answering.
 func (b *llamaBackend) Engine() EngineInfo                  { return b.info.get() }
@@ -141,6 +153,9 @@ func (b *llamaBackend) Start(ctx context.Context) error {
 	if strays := procs.KillStrays(b.cfg.BinPath, 2*time.Second); len(strays) > 0 {
 		slog.Warn("killed a stray llama-server before starting ours , it was holding the port and the GPU", "fn", "Start", "strays", strings.Join(strays, ", "))
 	}
+	b.info.resetTail()
+	b.starts++
+	b.info.load.begin(b.starts)
 	cmd := exec.Command(b.cfg.BinPath, args...)
 	// own process group so oracled can signal the whole group on stop, and inherit oracled's env
 	// (GHOST_LOG_LEVEL etc.). stdout/stderr pass through to oracled's log THROUGH the engine
@@ -157,9 +172,21 @@ func (b *llamaBackend) Start(ctx context.Context) error {
 		return fmt.Errorf("start llama-server: %w", err)
 	}
 	b.proc = cmd.Process
-	if err := b.waitHealthy(ctx, 90*time.Second); err != nil {
+	// ONE waiter reaps the child and closes exited: waitHealthy returns the moment llama-server dies
+	// (a flag this build does not know, a model or projector it cannot read, the GPU full) with its
+	// own last lines, instead of polling a dead port for minutes and saying "not healthy".
+	exited := make(chan struct{})
+	b.exited = exited
+	go func(c *exec.Cmd) {
+		_ = c.Wait() // reaps it AND waits for its last lines to reach the watcher
+		b.exitState = c.ProcessState
+		close(exited)
+	}(cmd)
+	if err := b.waitHealthy(ctx, llamaReadyWithin); err != nil {
+		b.info.load.fail()
 		return err
 	}
+	b.info.load.ready()
 	// The verdict, once, where a person looks: on the GPU with how many layers and how much VRAM,
 	// or a warning naming why not. tools/gpu.sh and the Box Status drill-in read the same facts.
 	info := b.info.get()
@@ -178,6 +205,8 @@ func (b *llamaBackend) waitHealthy(ctx context.Context, within time.Duration) er
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-b.exited:
+			return fmt.Errorf("llama-server exited (%s) before it was ready; it said: %s", stateString(b.exitState), b.info.Why())
 		default:
 		}
 		resp, err := http.Get(url)
@@ -189,8 +218,13 @@ func (b *llamaBackend) waitHealthy(ctx context.Context, within time.Duration) er
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	return fmt.Errorf("llama-server not healthy within %s", within)
+	return fmt.Errorf("llama-server not healthy within %s (still running); its last lines: %s", within, b.info.Why())
 }
+
+// llamaReadyWithin: how long a start may take before oracled gives up on it. A 12B from a cold
+// encrypted volume, right after a seven-minute build has pushed it out of the page cache, is not a
+// ten-second load; a child that dies is noticed at once anyway.
+const llamaReadyWithin = 5 * time.Minute
 
 // Infer sends one completion request to the private llama-server. This is the ONLY place the model's
 // address is used. Text-only requests keep the native /completion path unchanged; requests carrying
@@ -357,25 +391,32 @@ func (b *llamaBackend) Stop() {
 	t0 := time.Now()
 	_ = b.proc.Signal(syscall.SIGTERM)
 	slog.Info("llama-server stop: SIGTERM sent", "fn", "Stop", "pid", pid)
-	done := make(chan *os.ProcessState, 1)
-	go func() { st, _ := b.proc.Wait(); done <- st }()
+	// the waiter started with the child reaps it; Stop only watches for that (two Waits on one pid
+	// race, and the loser returns at once as if the child were gone)
+	exited := b.exited
+	if exited == nil {
+		ch := make(chan struct{})
+		go func(p *os.Process) { st, _ := p.Wait(); b.exitState = st; close(ch) }(b.proc)
+		exited = ch
+	}
 	select {
-	case st := <-done:
-		slog.Info("llama-server stop: exited on SIGTERM", "fn", "Stop", "pid", pid, "ms", time.Since(t0).Milliseconds(), "state", stateString(st))
+	case <-exited:
+		slog.Info("llama-server stop: exited on SIGTERM", "fn", "Stop", "pid", pid, "ms", time.Since(t0).Milliseconds(), "state", stateString(b.exitState))
 	case <-time.After(llamaTermGrace):
 		// A model server has nothing to flush; watchd gives the whole daemon 5s before it kills
 		// us (and, through Pdeathsig, llama with us), so TERM gets one second, not a courtesy.
 		_ = b.proc.Kill()
 		slog.Warn("llama-server stop: no exit on SIGTERM, SIGKILL sent", "fn", "Stop", "pid", pid, "afterMs", time.Since(t0).Milliseconds())
 		select {
-		case st := <-done:
-			slog.Info("llama-server stop: reaped after SIGKILL", "fn", "Stop", "pid", pid, "ms", time.Since(t0).Milliseconds(), "state", stateString(st))
+		case <-exited:
+			slog.Info("llama-server stop: reaped after SIGKILL", "fn", "Stop", "pid", pid, "ms", time.Since(t0).Milliseconds(), "state", stateString(b.exitState))
 		case <-time.After(llamaReapWait):
 			slog.Warn("llama-server stop: SIGKILLed but not reaped yet , the kernel is still tearing it down (VRAM, pinned pages); leaving it to init, oracled exits",
 				"fn", "Stop", "pid", pid, "afterMs", time.Since(t0).Milliseconds())
 		}
 	}
 	b.proc = nil
+	b.exited = nil
 }
 
 const (

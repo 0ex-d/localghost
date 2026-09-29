@@ -1,10 +1,12 @@
 package secd
 
 import (
-	"time"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/LocalGhostDao/localghost/server/internal/profile"
 )
@@ -23,6 +25,22 @@ type unlockService struct {
 	done     bool
 	failed   string
 	openSlot int
+	// model is the model's load progress while MODEL runs (oracled's /load), for the app's bar.
+	// Numbers only (phase, percent, time): nothing that names the model or the account, so the
+	// poll keeps the same shape whichever account opened.
+	model *modelLoad
+	// running: an unlock is in progress; runSum is its PIN's hash, so a second tap of the same PIN
+	// joins it instead of starting another
+	running bool
+	runSum  [32]byte
+}
+
+// modelLoad is oracled's load progress as the unlock poll carries it.
+type modelLoad struct {
+	Phase     string `json:"phase"`
+	Pct       int    `json:"pct"`
+	EtaMs     int64  `json:"etaMs"`
+	ElapsedMs int64  `json:"elapsedMs"`
 }
 
 // statusReporter is optionally implemented by a backend that supervises daemons (the real one does;
@@ -92,6 +110,7 @@ func (u *unlockService) Lock(slot int) ([]map[string]any, error) {
 	u.done = false
 	u.failed = ""
 	u.openSlot = profile.NoSlot
+	u.model = nil
 	u.mu.Unlock()
 	return steps, err
 }
@@ -115,18 +134,41 @@ func (s *Server) handleUnlockStart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	u := s.unlock
+	sum := sha256.Sum256([]byte(req.Pin))
 	u.mu.Lock()
+	// ONE unlock at a time. A second POST while one runs (a second tap on OK while "starting
+	// database" sat behind a busy table) used to start a second run over the same state: two
+	// schema converges at once, which deadlocked each other on 29 Sep 2026 and failed the unlock.
+	// The same PIN again joins the running unlock (the app just polls it); a different one is told
+	// to wait, and is not tried.
+	if u.running {
+		same := subtle.ConstantTimeCompare(sum[:], u.runSum[:]) == 1
+		u.mu.Unlock()
+		if same {
+			writeJSON(w, map[string]any{"started": true})
+			return
+		}
+		writeErr(w, http.StatusConflict, "an unlock is already running")
+		return
+	}
+	u.running, u.runSum = true, sum
 	// reset for a fresh unlock
 	u.progress = map[profile.Stage]profile.StepState{}
 	u.done = false
 	u.failed = ""
 	u.openSlot = profile.NoSlot
+	u.model = nil
 	u.mu.Unlock()
 
 	// Drive the unlock through the backend: resolve the PIN (main / wipe / reject),
 	// unseal the slot key from the TPM, map + mount the container, start the per-account DB + cache.
 	// The default build wires a simulation; the `tpm` build wires the real hardware path.
-	go u.run(req.Pin)
+	go func() {
+		u.run(req.Pin)
+		u.mu.Lock()
+		u.running, u.runSum = false, [32]byte{}
+		u.mu.Unlock()
+	}()
 
 	writeJSON(w, map[string]any{"started": true})
 }
@@ -172,13 +214,23 @@ func (u *unlockService) run(pin string) {
 // waitModelReady polls oracled's health port until the model reports live (Code 0), the deadline
 // passes, or nothing answers. Emits the MODEL stage: Running while loading, Complete when live,
 // Errored past the deadline. Synchronous by design , see run().
+//
+// It also reads oracled's /load each second (phase, percent, time left, measured from llama-server's
+// own progress) for the app's bar, and uses it: while the percent keeps rising the wait is extended
+// a minute at a time (a cold 12B on a slow disk is not a broken one), up to ten minutes in all; a
+// load that has FAILED and not started again within 40 s ends the wait at once, and the unlock
+// completes without the model (oracled keeps retrying on its own).
 func (u *unlockService) waitModelReady(emit func(profile.Progress), within time.Duration) {
 	emit(profile.Progress{Stage: profile.StageModel, State: profile.Running})
-	deadline := time.Now().Add(within)
+	start := time.Now()
+	deadline := start.Add(within)
+	hardCap := start.Add(10 * time.Minute)
 	client := &http.Client{Timeout: 2 * time.Second}
 	lastDetail := "no response from ghost.oracled"
+	lastPct := -1
+	var failedSince time.Time
 	for time.Now().Before(deadline) {
-		resp, err := client.Get("http://127.0.0.1:9118/health")
+		resp, err := client.Get(oracledHealthURL + "/health")
 		if err == nil {
 			var body struct {
 				Code   int    `json:"code"`
@@ -188,8 +240,11 @@ func (u *unlockService) waitModelReady(emit func(profile.Progress), within time.
 			_ = resp.Body.Close()
 			if derr == nil {
 				if body.Code == 0 {
+					u.mu.Lock()
+					u.model = &modelLoad{Phase: "ready", Pct: 100, ElapsedMs: time.Since(start).Milliseconds()}
+					u.mu.Unlock()
 					emit(profile.Progress{Stage: profile.StageModel, State: profile.Complete})
-					secdLog.Info("model ready", "fn", "waitModelReady")
+					secdLog.Info("model ready", "fn", "waitModelReady", "waitedMs", time.Since(start).Milliseconds())
 					return
 				}
 				if body.Detail != "" {
@@ -197,11 +252,55 @@ func (u *unlockService) waitModelReady(emit func(profile.Progress), within time.
 				}
 			}
 		}
+		if lp, ok := fetchModelLoad(client); ok {
+			u.mu.Lock()
+			u.model = &lp
+			u.mu.Unlock()
+			if lp.Pct > lastPct {
+				lastPct = lp.Pct
+				if ext := time.Now().Add(time.Minute); ext.After(deadline) {
+					deadline = ext
+					if deadline.After(hardCap) {
+						deadline = hardCap
+					}
+				}
+			}
+			if lp.Phase == "failed" {
+				if failedSince.IsZero() {
+					failedSince = time.Now()
+				} else if time.Since(failedSince) > 40*time.Second {
+					break
+				}
+			} else {
+				failedSince = time.Time{}
+			}
+		}
 		time.Sleep(1 * time.Second)
 	}
 	secdLog.Warn("model did not become ready , unlock completes without it (box serves, chat degraded)",
-		"fn", "waitModelReady", "within", within.String(), "last", lastDetail)
+		"fn", "waitModelReady", "waited", time.Since(start).Round(time.Second).String(), "last", lastDetail)
 	emit(profile.Progress{Stage: profile.StageModel, State: profile.Errored})
+}
+
+// oracledHealthURL is ghost.oracled's loopback health listener (its fixed health port).
+var oracledHealthURL = "http://127.0.0.1:9118"
+
+// fetchModelLoad reads oracled's /load. False when oracled is not up yet or is an older build
+// without it (the bar then runs on the app's own timings).
+func fetchModelLoad(c *http.Client) (modelLoad, bool) {
+	var lp modelLoad
+	resp, err := c.Get(oracledHealthURL + "/load")
+	if err != nil {
+		return lp, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return lp, false
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&lp); err != nil || lp.Phase == "" {
+		return lp, false
+	}
+	return lp, true
 }
 
 // handleUnlockPoll returns the current stage states, the shape the app's UnlockSnapshot.from expects.
@@ -219,6 +318,9 @@ func (s *Server) handleUnlockPoll(w http.ResponseWriter, r *http.Request) {
 		stages = append(stages, map[string]any{"stage": stageName(st), "state": stageState})
 	}
 	resp := map[string]any{"stages": stages, "done": u.done}
+	if u.model != nil {
+		resp["model"] = u.model // the model's load: phase, percent, time left
+	}
 	if u.failed != "" {
 		resp["failed"] = u.failed
 	}

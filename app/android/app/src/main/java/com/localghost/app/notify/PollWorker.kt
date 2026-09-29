@@ -13,6 +13,8 @@ import java.util.concurrent.TimeUnit
 class PollWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
     override suspend fun doWork(): Result {
         Notifications.ensureChannel(applicationContext)
+        // voice notes made while the box was out of reach go now (a few MB each; kept until it has them)
+        try { com.localghost.app.voice.VoiceNotes.uploadPending(applicationContext) } catch (_: Exception) {}
         return try {
             Notifications.postBatch(applicationContext, BoxClient.pollPending(applicationContext))
             Result.success()

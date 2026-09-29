@@ -265,6 +265,14 @@ func (w *Worker) doCategorize(ctx context.Context, job *Job) error {
 	}
 	var rest []string
 	for _, t := range p.Tags {
+		if strings.TrimSpace(t) == "" {
+			// a blank tag (a caption parse that left an empty item): nothing to ask about. Sent to
+			// the model it came back "please provide the tags" and failed the whole job, forever.
+			if err := set(t, OtherCategory); err != nil {
+				return err
+			}
+			continue
+		}
 		if c := Lexicon(t); c != "" {
 			if err := set(t, c); err != nil {
 				return err

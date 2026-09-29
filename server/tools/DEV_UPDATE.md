@@ -2332,3 +2332,172 @@ non-answers) and `ParseTags` on numbered lines. On Postgres: the queue (limit, n
 "other" counts as done, a parked job is given back), and the SQL prepare test still resolves every
 statement. On the phone: TrailClean on the shared fixture and all 113 app tests (the one
 pre-existing QR failure is unchanged).
+
+## The check-in: more feelings, two ticked from the day, and a voice note transcribed on the box
+
+Vlad: "can we expand the list of things we can feel in the check in and maybe preselect some, and
+let me record a voice note on the daily check in, maybe that's what gets me going to record the day
+as a journal".
+
+**Feelings (app, `checkin/Feelings.kt`).** 38 feelings in five groups: the four quadrants of the
+usual mood meter (bright, easy, tense, heavy) and "mind" (focused, curious, reflective, nostalgic,
+distracted, unsure). The twelve from before are all still there, so past check-ins keep their
+words. The card shows a quick row of eight first: the box's guesses from the day, then the
+person's own most-picked feelings from the last 30 check-ins, then common ones. The rest are
+behind "more feelings". Up to four a day (was three).
+
+**Preselected.** The box's first two guesses are ticked before the person looks, marked "·" as the
+box's, one tap to untick. The check-in text gains a `Preselected:` line naming them, so a later
+look at the moods can tell a guess left standing from a feeling picked. `hw.DayContext`'s guesses
+are strongest first now and read more of the day: under six hours of sleep → tired, seven and a
+half or more → rested, 9,000 steps or 30 min of exercise → energised, 20,000 steps → tired,
+somewhere green or by water → calm, 25 photos or three places → curious, a short night and a long
+day → stressed.
+
+**The voice note.** On the check-in card: record, stop, listen, again, drop. The take goes with the
+check-in when it is saved, and after the check-in the card offers "say more about today" for more
+notes to the same day. The whole path:
+
+- **Phone.** `voice/VoiceCapture.kt` records the microphone into a 16 kHz mono 16-bit WAV (what
+  whisper reads, 1.9 MB a minute) in the no-backup folder, 20 minutes at most. The screen stays on
+  while recording, because Android gives a background app silence from the microphone.
+  `voice/VoiceNotes.kt` queues a saved take (`<id>.wav` + `<id>.json`) and sends it to `POST
+  /v1/voice`. The id is made on the phone, so a retry after a lost answer is the same note. The
+  phone deletes its copy only when the box answers 2xx. Retries run when the app opens, from the
+  MEMORIES screen, and in the 15-minute poll. A take whose app died before it was saved is found
+  again after two minutes and kept as a note of that day.
+- **secd, `voice_http.go`.** `POST /v1/voice` spools the body to `<mount>/voiced/inbox/<id>.wav` and
+  then `<id>.json` (kind, day, start time, device). It checks only the RIFF/WAVE magic and allows
+  128 MB. `GET /v1/voice/notes`, `GET /v1/voice/audio?id=` (Range works) and `POST
+  /v1/voice/delete` complete the set. A delete removes the audio, the row and the journal entry. A
+  memory synthd already distilled from the note stays until the person deletes that too.
+- **ghost.voiced (no longer a stub), `internal/voiced`.** Each pass (15 s) moves every complete
+  pair into `voiced/archive/YYYY/MM/<id>.wav` and records it in `voice_notes` as pending. It then
+  transcribes the pending notes newest first with whisper.cpp's `whisper-cli`: `-l auto` (English
+  or Romanian, detected per note), `-ng` (the GPU stays the chat model's), at most four threads,
+  nice 10. A WAV in another format is converted to 16 kHz mono first. whisper's output goes to
+  `voiced/work` on the volume, never the OS disk, and is deleted after reading. Markers such as
+  `[BLANK_AUDIO]` and a segment repeated back to back are dropped. The transcript becomes a
+  journal entry (source `ghost.voiced`, ref `voice:<id>`, at the time it was recorded). A note
+  whisper fails on three times is marked failed with its error. `ghost-cli ghost.voiced voice`
+  shows counts, engine and the newest notes. `ghost-cli ghost.voiced voice-again id=<id>|failed`
+  puts notes back in the queue.
+- **No speech engine yet = notes wait.** Without `whisper-cli` and a `ggml-*.bin`, the notes are
+  archived and stay pending, and health says so (degraded, with the reason). ghost.voiced looks for
+  the engine on every pass, so the first pass after it arrives transcribes the backlog.
+- **The check-in knows its note.** The check-in text carries `Voice: <id> m:ss`. `/v1/checkins`
+  returns each check-in with its note's status and transcript, and the past check-ins list shows
+  them under each day.
+- **synthd.** A voice note's words go into the day's sheet (`Spoken`): the template says "You said:
+  “…”", and the model's prompt gets the transcript, marked as machine-transcribed. The note also
+  becomes a journal entry that synthd distils like any other.
+- **Evening reminder.** It now says "a couple of feelings are already ticked from your day ,
+  change them, or say a minute about it in a voice note". Still one ask a day, nothing after.
+
+**The speech engine: `tools/setup_whisper.sh`, mirror only.** Two new mirror sets. `whisper` is
+one tarball, `whisper.cpp-<tag>-<commit>.tar.gz`, with one folder inside named after the full
+commit, checked like llama's. `speech` is a ggml model, `ggml-large-v3-turbo-q5_0.bin` suggested.
+The build is CPU-only and static. At setup it is step 6/6 of `setup_llama.sh` (GHOST_SPEECH=0
+skips it) and stages both for the next unlock. On a running box, `sudo ./tools/update.sh speech`
+puts both straight on the volume. Exit 3 while the mirror does not list the sets: the notes are
+kept and wait. `health.sh` prints the voice counts and the engine.
+
+**Tested here.**
+- Go: WAV parsing, including an unfinished header and a non-WAV. Stereo 48 kHz converted to 16 kHz
+  keeps its tone. whisper's JSON with markers and a repeat. The engine search picks the largest
+  model and never a VAD model. `Transcribe` against a stand-in `whisper-cli`: JSON, text-only
+  output and a failure.
+- Postgres: an inbox pair archived, transcribed, journaled, joined to its check-in, listed and
+  deleted, with a non-WAV sent to `rejected/`. Also the day sheet with a voice note, and the SQL
+  prepare test (now 261 statements).
+- `setup_whisper.sh` against a signed `file://` test mirror: build, install, a rerun that fetches
+  nothing new, "not published" (exit 3) and "unreachable" (exit 1).
+- App: Feelings and the WAV writer (8 JUnit tests). The phone's WAV header is byte for byte the
+  one the box's test asserts. The recorder and queue ran on the JVM with a stand-in microphone:
+  record, stop, queue, unreachable box, 503, sent with the right headers, orphan recovery, too
+  short.
+
+**Not tested.**
+- A real whisper.cpp. GitHub and Hugging Face are out of reach from where this was built, so the
+  CLI flags and JSON shape are whisper.cpp's documented ones, exercised through a stand-in.
+- The check-in card on a phone: Compose was checked for structure only.
+- The CPU time on xyntai. "A three-minute note in about a minute" is an estimate to measure.
+
+## After the engine update: the model did not come back, and nothing said why
+
+xyntai's health on 29 Sep 2026, after `update.sh engine` swapped in the mirror's llama.cpp
+(`llama.cpp-v0.5.0-7fe450e`): oracled restarted at 17:57, logged "llama-server did not become ready:
+not healthy within 1m30s" at 17:58:30, and stopped there. No model, no retry. The reason lives only
+in secd's journal, because llama-server's output goes to oracled's stdout. health.sh showed "UP {"
+for every daemon, so nothing looked wrong.
+
+- **oracled notices a child that dies.** One waiter reaps llama-server (`cmd.Wait`, so its last
+  lines are in) and `waitHealthy` returns the moment it exits. The error carries what it said: the
+  error-looking lines of its last 40, else the last few. A child still running but not healthy
+  gets 5 minutes, up from 90 s: a cold 12B right after a build has pushed it out of the page cache.
+- **oracled tries again.** It retries after 30 s, 1, 2 and 5 minutes, then every 10 minutes, ending
+  the half-started child first. The health line reads "model not running (try N, next in …): <the
+  reason>" instead of "model loading".
+- **Every daemon's status carries its health.** `ghosthealth.Current()`, read by the base `status`
+  command. health.sh prints "ok", "DEGRADED <why>" or "FAILING <why>" per daemon instead of the
+  first line of a JSON object.
+- **update.sh engine keeps the old build.** It saves the old binary as `llama-server.prev`, waits up
+  to 7 minutes for oracled to report the model ready, and if it doesn't, puts the old one back,
+  restarts oracled and says "NOT kept" with the reason. The failed build stays as
+  `llama-server.failed`. This time the old binary had been renamed away, so there was nothing to go
+  back to.
+- **setup_llama.sh** no longer prints "EXISTING volume? Seed it now" when update.sh runs it
+  (update.sh does that itself; following the printed steps copied the same binary a second time).
+- **redeploy.sh** stages `bin/whisper-cli` with the daemons (it staged only `ghost.*` and
+  `llama-server`, so a whisper-cli built by setup would never have reached the volume).
+
+**The category backlog, the last 33 frames.** Converge says 32,862 of 32,981 frames are at the
+latest stage and 33 have a tag without a category. Their jobs failed every time and were queued
+again at every stock-take:
+- The model answered with a category of its own, "architecture:vaulted ceiling" on every church
+  photo, which the parser dropped as no answer. `canonCategory` now reads plurals ("places",
+  "activities") and 60 synonyms (architecture, building and landmark map to place; plant and flower
+  to nature; clothing to object; lighting to style; …). A pair whose tag is one of those asked but
+  whose category is the model's own ("religion:church") is a verdict: `other`. A parenthesised
+  aside after the tag ("vaulted ceiling (Wait, …") is cut.
+- A blank tag was sent to the model as an empty list ("Please provide the list of tags…"). It now
+  gets `other` without asking.
+
+Tested: the five answer shapes from xyntai's log, and a refusal still counts as no answer (the job
+fails and is retried). For oracled, a stand-in llama-server that exits with "error: invalid
+argument" is reported in under a second with that line, and a second start reports its own lines,
+not the first's (with `-race`).
+
+## The unlock that deadlocked, and the model's load as a number
+
+xyntai, 29 Sep 2026 20:19:59, an unlock failed at START_DB: "converge ownership: deadlock detected …
+ALTER TABLE public.notifications OWNER TO ghost". Around it, a Postgres backend sat at 100% CPU,
+"starting database" hung, and the gallery crawled.
+
+- **Ownership converge takes no lock on a converged database.** It ran `ALTER … OWNER TO` on every
+  table, sequence and view at every unlock, in one transaction. An owner change that changes
+  nothing still takes an ACCESS EXCLUSIVE lock. On a warm box, with the cohort running, each ALTER
+  queued behind whatever query held its table, and every daemon query queued behind the ALTER. It
+  now alters only objects whose owner differs, in name order, with `lock_timeout = 15s`. A deadlock
+  is retried once, and a failure is logged, not fatal: the unlock goes on. Tested on Postgres 16:
+  mis-owned objects converge, and a second run takes no time while another session holds a lock on
+  a table.
+- **One unlock at a time.** A second `POST /v1/unlock` while one runs (a second tap on OK) started a
+  second run over the same state: two schema converges at once. The same PIN now joins the running
+  unlock; a different one gets 409 and is not tried.
+- **The model's load, measured (oracled `/load`).** llama-server prints one "." per percent of the
+  tensors loaded. oracled counts them in the unfinished line and follows the phases from the
+  output: starting, weights, finishing, projector, warmup, ready, failed. The time left comes from
+  the rate the dots are arriving at and the post-weights time of the last load (kept in
+  `conf/ghost.oracled.load.json`). The percent never goes backwards.
+- **The unlock carries it and waits smarter.** `/v1/unlock/poll` has `model: {phase, pct, etaMs,
+  elapsedMs}`: numbers only, the same shape for every account. MODEL's 3-minute wait is extended a
+  minute at a time while the percent rises (at most 10 minutes). A load that has failed and not
+  restarted within 40 s ends the wait, so a broken engine costs an unlock 40 s, not 3 minutes.
+
+Tested: the load tracker against a scripted llama-server output, from history and without it.
+`waitModelReady` against a stand-in oracled: progress carried, completion, and a failed load ending
+the wait.
+
+Not done yet: the app side of the unlock screen (the bar, the time left, the tidbits). It waits
+until the box is stable again.

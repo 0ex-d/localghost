@@ -111,7 +111,7 @@ say "2b   stage the COHORT for the volume (ingested at next unlock)"
 # spawns, so there is no running-binary replacement problem at all.
 install -d -m700 /var/lib/ghost/staging/bin
 STAGED=0
-for f in "$REPO"/bin/ghost.* "$REPO"/bin/llama-server; do
+for f in "$REPO"/bin/ghost.* "$REPO"/bin/llama-server "$REPO"/bin/whisper-cli; do
     [ -e "$f" ] || continue
     base="$(basename "$f")"
     [ "$base" = "ghost.secd" ] && continue   # secd lives in /opt, staged above, not on the volume

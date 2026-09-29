@@ -85,6 +85,8 @@ func TestDaysPGBuildOnceTellOnThisDay(t *testing.T) {
 	exec(`INSERT INTO journal_entries (source, ref, ts, title, body, created_at) VALUES ('ghost.noted','c1',$1,'Daily check-in `+dayStr+`','Feeling: calm'||chr(10)||'Energy: good',$1)`, t0+3600)
 	exec(`INSERT INTO journal_entries (source, ref, ts, title, body, created_at) VALUES ('ghost.noted','n1',$1,'Swam to the lighthouse','',$1)`, t0+7200)
 	exec(`INSERT INTO chats (title, created_at, updated_at) VALUES ('ferry times to Corfu',$1,$1)`, (t0+5400)*1000)
+	// a voice note from the check-in, as ghost.voiced journals it: the words go to the sheet, not the title
+	exec(`INSERT INTO journal_entries (source, ref, ts, title, body, created_at) VALUES ('ghost.voiced','voice:0123456789abcdef0123456789abcdef',$1,'Voice note: The water was cold at eight','Said at the daily check-in of `+dayStr+` (1 min 12 s):'||chr(10)||'The water was cold at eight but I swam anyway.',$1)`, t0+36000)
 	// the backfill starts at this day (the watermark), so one pass reaches it
 	exec(`INSERT INTO settings (key, value) VALUES ('synthd_days_watermark',$1)`, dayStr)
 
@@ -109,10 +111,10 @@ func TestDaysPGBuildOnceTellOnThisDay(t *testing.T) {
 	}
 	if f.Photos != 6 || f.Described != 4 || f.Points != 30 || f.Steps != 12840 || f.Feeling != "calm" ||
 		len(f.Notes) != 1 || len(f.Chats) != 1 || len(f.Tags) != 1 || f.Country != "Greece" || len(f.Covers) != 6 ||
-		len(f.Places) != 1 || f.Places[0] != "Lakka" {
+		len(f.Places) != 1 || f.Places[0] != "Lakka" || len(f.Spoken) != 1 || f.Spoken[0] != "The water was cold at eight but I swam anyway." {
 		t.Fatalf("the sheet: %+v", f)
 	}
-	if *v[2] != "template" || strings.TrimSpace(*v[1]) == "" || !strings.Contains(*v[0], day.Weekday().String()) {
+	if *v[2] != "template" || !strings.Contains(*v[1], "You said: \u201cThe water was cold") || !strings.Contains(*v[0], day.Weekday().String()) {
 		t.Fatalf("row: title %q summary %q by %q", *v[0], *v[1], *v[2])
 	}
 	// the memories feed got the day (it has signal: six photos, a feeling, a note)

@@ -21,6 +21,9 @@
 #   engine    llama.cpp from the mirror's pinned tarball (tools/setup_llama.sh --build-only): built
 #             again only when the tarball changed (or this box still has a git checkout), then put
 #             on the volume and ghost.oracled restarted onto it.
+#   speech    whisper.cpp from the mirror's pinned tarball (set whisper, built CPU-only) and a ggml
+#             speech model (set speech), straight onto the volume (tools/setup_whisper.sh). ghost.voiced
+#             looks for them on every pass, so the voice notes waiting are transcribed within a minute.
 #
 # The mirror only, as at setup: a set the mirror does not list yet is said and skipped; the mirror
 # not answering stops the run before anything is touched. What this reveals is what setup reveals:
@@ -44,9 +47,9 @@ OWNER="$(stat -c %U "$DOOR$MOUNT/run" 2>/dev/null || echo coder)"
 CLI="$REPO/bin/ghost-cli"; [ -x "$CLI" ] || CLI=/opt/localghost/bin/ghost-cli
 CTL="$REPO/bin/ghost-ctl"; [ -x "$CTL" ] || CTL=/opt/localghost/bin/ghost-ctl
 
-STEPS="${*:-maps embedder weights phone engine}"
+STEPS="${*:-maps embedder weights phone engine speech}"
 for s in $STEPS; do
-    case "$s" in maps|embedder|weights|phone|engine) ;; *) echo "unknown step '$s' (maps embedder weights phone engine)" >&2; exit 2 ;; esac
+    case "$s" in maps|embedder|weights|phone|engine|speech) ;; *) echo "unknown step '$s' (maps embedder weights phone engine speech)" >&2; exit 2 ;; esac
 done
 
 # has_cuda <binary>: linked against CUDA, or CUDA compiled in (the check tools/gpu.sh makes)
@@ -54,6 +57,15 @@ has_cuda() {
     [ -x "$1" ] || return 1
     ldd "$1" 2>/dev/null | grep -qEi 'cuda|cublas' && return 0
     strings -n 8 "$1" 2>/dev/null | grep -q 'ggml_cuda_init'
+}
+# model_up <seconds>: ghost.oracled says its model is ready, within the time given
+model_up() {
+    _end=$(( $(date +%s) + $1 ))
+    while [ "$(date +%s)" -lt "$_end" ]; do
+        "$TOOLS/ns.sh" "$CLI" ghost.oracled models 2>/dev/null | grep -q '"ready": *true' && return 0
+        sleep 5
+    done
+    return 1
 }
 _t0=$(date +%s)
 say() { printf '\n=== %s ===  (+%ss)\n' "$1" "$(( $(date +%s) - _t0 ))"; }
@@ -140,7 +152,7 @@ phone)
     ;;
 engine)
     say "engine: llama.cpp from the mirror's pinned source"
-    brc=0; bash "$TOOLS/setup_llama.sh" --build-only || brc=$?
+    brc=0; GHOST_FROM_UPDATE=1 bash "$TOOLS/setup_llama.sh" --build-only || brc=$?
     NEW="$REPO/bin/llama-server"; ON="$DOOR$MOUNT/bin/llama-server"
     if [ "$brc" != 0 ] || [ ! -x "$NEW" ]; then
         result engine "FAILED (above); the llama-server on the volume keeps running"; failed=1
@@ -152,14 +164,41 @@ engine)
         failed=1
     else
         # onto the volume beside the old one, then renamed over it (a running binary is never
-        # rewritten in place); oracled's restart starts the new llama-server
+        # rewritten in place); oracled's restart starts the new llama-server. The old one is kept
+        # as llama-server.prev and put back if the new one does not bring the model up: on 29 Sep
+        # 2026 a new build did not, and with the old binary renamed away there was nothing to go
+        # back to.
+        [ -x "$ON" ] && cp -f "$ON" "$ON.prev" && chown "$OWNER:$OWNER" "$ON.prev"
         install -m755 "$NEW" "$ON.new" && chown "$OWNER:$OWNER" "$ON.new" && mv -f "$ON.new" "$ON"
-        if "$CTL" restart-daemon ghost.oracled >/dev/null 2>&1; then
-            result engine "$(cat /opt/localghost/llama.cpp/.mirror-src 2>/dev/null || echo 'the new build') on the volume; ghost.oracled restarted onto it"
+        SRC_NAME="$(cat /opt/localghost/llama.cpp/.mirror-src 2>/dev/null || echo 'the new build')"
+        if ! "$CTL" restart-daemon ghost.oracled >/dev/null 2>&1; then
+            result engine "$SRC_NAME on the volume; restart ghost.oracled to use it: sudo $CTL restart-daemon ghost.oracled"
+        elif model_up 420; then
+            result engine "$SRC_NAME on the volume; the model is up on it (the previous build kept as llama-server.prev)"
+        elif [ -x "$ON.prev" ]; then
+            why="$("$TOOLS/ns.sh" "$CLI" ghost.oracled status 2>/dev/null | tr -d '\n' | sed -n 's/.*"detail": *"\([^"]*\)".*/\1/p')"
+            mv -f "$ON" "$ON.failed" && mv -f "$ON.prev" "$ON"
+            "$CTL" restart-daemon ghost.oracled >/dev/null 2>&1
+            if model_up 420; then
+                result engine "NOT kept: $SRC_NAME did not bring the model up (${why:-see the ghost.oracled log}); the previous build is back and serving. The failed one: $ON.failed"
+            else
+                result engine "NOT kept, and the previous build did not come up either: see ghost.oracled's log and sudo journalctl -u ghost.secd"
+            fi
+            failed=1
         else
-            result engine "on the volume; restart ghost.oracled to use it: sudo $CTL restart-daemon ghost.oracled"
+            result engine "$SRC_NAME on the volume but the model is NOT up (no previous build to go back to): see ghost.oracled's log"
+            failed=1
         fi
     fi
+    ;;
+speech)
+    say "speech: whisper.cpp and a speech model, for voice notes"
+    src=0; GHOST_SPEECH_INSTALL_TO="$DOOR$MOUNT" GHOST_SPEECH_OWNER="$OWNER" bash "$TOOLS/setup_whisper.sh" || src=$?
+    case "$src" in
+        0) result speech "$(cat /opt/localghost/whisper.cpp/.mirror-src 2>/dev/null || echo whisper.cpp) and $(ls "$DOOR$MOUNT/ai-models"/ggml-*.bin 2>/dev/null | xargs -r -n1 basename | tr '\n' ' ')on the volume; ghost.voiced picks them up on its next pass" ;;
+        3) result speech "not on the mirror yet (sets whisper, speech); voice notes are kept and wait" ;;
+        *) result speech "FAILED (above; a rerun resumes)"; failed=1 ;;
+    esac
     ;;
 esac
 done

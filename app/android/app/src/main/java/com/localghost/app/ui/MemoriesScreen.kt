@@ -17,9 +17,20 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.asImageBitmap
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.platform.LocalView
+import androidx.core.content.ContextCompat
+import com.localghost.app.checkin.Feelings
 import com.localghost.app.net.BoxClient
 import com.localghost.app.net.LifeContext
 import com.localghost.app.ui.theme.*
+import com.localghost.app.voice.VoiceCapture
+import com.localghost.app.voice.VoiceNotes
+import com.localghost.app.voice.VoicePlayback
 import kotlinx.coroutines.launch
 
 /**
@@ -41,7 +52,25 @@ fun MemoriesScreen(context: LifeContext?) {
     var otdLoading by remember { mutableStateOf(false) }
     var checkinHist by remember { mutableStateOf<List<BoxClient.CheckinRow>>(emptyList()) }
     var histOpen by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) { checkinHist = BoxClient.checkins(ctx) ?: emptyList() }
+    // VOICE NOTES , the box's list (with transcripts) and what still waits on the phone
+    var voiceOpen by remember { mutableStateOf(false) }
+    var voiceList by remember { mutableStateOf<List<BoxClient.VoiceNoteRow>?>(null) }
+    var voiceLocal by remember { mutableStateOf<List<VoiceNotes.Pending>>(emptyList()) }
+    fun reloadVoice() {
+        voiceLocal = VoiceNotes.pending(ctx)
+        scope.launch { voiceList = BoxClient.voiceNotes(ctx) }
+    }
+    fun reloadCheckins() {
+        voiceLocal = VoiceNotes.pending(ctx)
+        scope.launch { checkinHist = BoxClient.checkins(ctx) ?: emptyList() }
+        if (voiceOpen) reloadVoice()
+    }
+    LaunchedEffect(Unit) {
+        // what waits on the phone goes first, so the list below shows it on the box
+        VoiceNotes.uploadPending(ctx)
+        voiceLocal = VoiceNotes.pending(ctx)
+        checkinHist = BoxClient.checkins(ctx) ?: emptyList()
+    }
     var jotting by remember { mutableStateOf(false) }
     var jotSent by remember { mutableStateOf(false) }
     // WHAT YOU PHOTOGRAPH and NEAR YOU , the taste synthd distils from the photos' tags, and the
@@ -88,18 +117,52 @@ fun MemoriesScreen(context: LifeContext?) {
                 style = MaterialTheme.typography.labelMedium)
         }
         item {
-            val y = checkinHist.firstOrNull()
-            CheckinCard(yesterday = if (y != null) "${y.day} you felt ${y.feelings}" else "")
+            CheckinCard(history = checkinHist, onSaved = { reloadCheckins() })
         }
         if (checkinHist.isNotEmpty()) item {
             Text(if (histOpen) "[ − past check-ins ]" else "[ + past check-ins (${checkinHist.size}) ]",
                 color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
                 modifier = Modifier.clickable { histOpen = !histOpen })
             if (histOpen) Column(Modifier.animateContentSize()) {
+                val onPhone = voiceLocal.map { it.id }.toSet()
                 checkinHist.take(14).forEach { r ->
                     Text("${r.day} · ${r.feelings}", color = GhostTextDim,
                         style = MaterialTheme.typography.labelMedium,
-                        modifier = Modifier.padding(vertical = 2.dp))
+                        modifier = Modifier.padding(top = 2.dp))
+                    r.voice?.let { v -> key("ci-" + v.id) { VoiceNoteCard(v, onPhone = v.id in onPhone, onDelete = null) } }
+                }
+            }
+        }
+        item {
+            // VOICE NOTES , everything said, newest first: what still waits on the phone, then the
+            // box's notes with their transcripts. Deleting one removes the audio, the words and the
+            // journal entry on the box.
+            val count = (voiceList?.size ?: 0) + voiceLocal.size
+            Text(if (voiceOpen) "[ − voice notes ]" else "[ + voice notes" + (if (count > 0) " ($count)" else "") + " , what you said, transcribed on your box ]",
+                color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.clickable {
+                    voiceOpen = !voiceOpen
+                    if (voiceOpen) reloadVoice()
+                })
+            if (voiceOpen) Column(Modifier.animateContentSize()) {
+                voiceLocal.forEach { p ->
+                    key("local-" + p.id) {
+                        VoiceNoteCard(BoxClient.VoiceNoteRow(p.id, p.kind, p.day, p.takenAt / 1000, p.durationMs, "missing", "", "", ""),
+                            onPhone = true, onDelete = { VoiceNotes.deleteLocal(ctx, p.id); reloadVoice() })
+                    }
+                }
+                val list = voiceList
+                when {
+                    list == null -> Text("asking the box…", color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+                    list.isEmpty() && voiceLocal.isEmpty() -> Text("! none yet , record one at the check-in above",
+                        color = TerminalDim, style = MaterialTheme.typography.labelMedium)
+                    else -> list.forEach { v ->
+                        key("box-" + v.id) {
+                            VoiceNoteCard(v, onPhone = false, onDelete = {
+                                scope.launch { BoxClient.voiceDelete(ctx, v.id); reloadCheckins(); reloadVoice() }
+                            })
+                        }
+                    }
                 }
             }
         }
@@ -228,77 +291,103 @@ fun MemoriesScreen(context: LifeContext?) {
     }
 }
 
-/** The DAILY CHECK-IN , "how are you feeling today, and why" , mood chips plus a why prefilled
- *  from what the box already knows about today (framed's places and counts, the journal's notes),
- *  editable before sending. It lands in the JOURNAL via /v1/notes like any other text , synthd
- *  distills it, so feelings become memories with the same sovereignty as everything else. Once a
- *  day: after sending, the card collapses to a checkmark until tomorrow. */
+/** The DAILY CHECK-IN , "how are you feeling today, and why". Feelings as chips: a quick row (the
+ *  box's guesses from the day's shape, then your usual ones) with the full list behind "more"; the
+ *  box's first two guesses are ticked before you look and marked "·" as its guess. A why prefilled
+ *  from what the box knows about today, and a VOICE NOTE: say the day in your own words, and the
+ *  box transcribes it (whisper.cpp, on the box) into the journal beside the check-in. It all lands
+ *  in the JOURNAL via /v1/notes and /v1/voice , synthd distils it like everything else. Once a day:
+ *  afterwards the card is a checkmark and a recorder for more notes to the same day. */
 @Composable
-private fun CheckinCard(yesterday: String = "") {
+private fun CheckinCard(history: List<BoxClient.CheckinRow>, onSaved: () -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val today = remember { java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date()) }
     var done by remember { mutableStateOf(com.localghost.app.settings.AppSettings.lastCheckinDay(ctx) == today) }
-    var open by remember { mutableStateOf(false) }
+    var open by remember { mutableStateOf(true) }
     var why by remember { mutableStateOf("") }
     var prefilled by remember { mutableStateOf(false) }
-    val base = listOf("calm", "happy", "energised", "grateful", "focused", "proud",
-        "tired", "stressed", "anxious", "restless", "low", "lonely")
     var suggested by remember { mutableStateOf<List<String>>(emptyList()) }
-    // Suggested-first ordering: the box's GUESSES from the day's shape lead the list, marked with
-    // a dot , offered, never preselected. The box proposes, the person disposes.
-    val feelings = remember(suggested) { suggested + base.filter { it !in suggested } }
-    val picked = remember { mutableStateListOf<String>() }
+    var preselected by remember { mutableStateOf<List<String>>(emptyList()) }
+    var picked by remember { mutableStateOf<List<String>>(emptyList()) }
+    var touched by remember { mutableStateOf(false) }
+    var more by remember { mutableStateOf(false) }
+    var saving by remember { mutableStateOf(false) }
+    var note by remember { mutableStateOf("") }
+    val usual = remember(history) { Feelings.usual(history.take(30).map { it.feelings }) }
+    val quick = remember(suggested, usual) { Feelings.quick(suggested, usual) }
+    val rec by VoiceCapture.state.collectAsState()
+
+    // the prefill: the box's guesses (the first two ticked, unless the person already chose) and a
+    // why from the day's numbers; asked once, when the card is open
+    LaunchedEffect(open) {
+        if (!open || prefilled || done) return@LaunchedEffect
+        prefilled = true
+        val d = BoxClient.daySummary(ctx) ?: return@LaunchedEffect
+        suggested = d.suggested.filter { it in Feelings.all }
+        if (!touched) {
+            preselected = Feelings.preselect(suggested)
+            picked = preselected
+        }
+        if (why.isEmpty()) {
+            val bits = ArrayList<String>()
+            if (d.sleepMinutes > 0) bits.add("slept ${d.sleepMinutes / 60}h${"%02d".format(d.sleepMinutes % 60)}m")
+            if (d.steps > 0) bits.add("${"%,d".format(d.steps)} steps")
+            if (d.exerciseMinutes >= 10) bits.add("${d.exerciseMinutes}m exercise")
+            if (d.photos > 0) bits.add("${d.photos} photo${if (d.photos == 1) "" else "s"}" +
+                (if (d.places.isNotEmpty()) " around " + d.places.take(2)
+                    .joinToString(" and ") { it.substringAfterLast(" / ") } else ""))
+            if (d.places.isNotEmpty()) bits.add("was at " +
+                d.places.take(3).joinToString("; ") { it.substringAfterLast(" / ") })
+            d.notes.filterNot { it.startsWith("Voice note") }.take(2).forEach { bits.add(it) }
+            why = if (bits.isEmpty()) "" else "Today: " + bits.joinToString(". ") + "."
+        }
+    }
+
     if (done) {
-        Text("✓ checked in today", color = TerminalDim, style = MaterialTheme.typography.labelMedium)
+        Column(Modifier.fillMaxWidth().animateContentSize()) {
+            Text("✓ checked in today", color = TerminalDim, style = MaterialTheme.typography.labelMedium)
+            Spacer(Modifier.height(4.dp))
+            VoiceRecorder(hint = "say more about today , kept and transcribed on your box",
+                saveLabel = "[ save to today's journal ]", onSave = { take ->
+                    VoiceNotes.enqueue(ctx, take, "journal", today)
+                    VoiceCapture.taken()
+                    scope.launch { VoiceNotes.uploadPending(ctx); onSaved() }
+                })
+        }
         return
     }
     Column(Modifier.fillMaxWidth().animateContentSize().border(1.dp, GhostBorder, RectangleShape).background(Void).padding(12.dp)) {
         Text(if (open) "[ − how are you feeling today? ]" else "[ + how are you feeling today? ]",
             color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
-            modifier = Modifier.clickable {
-                open = !open
-                if (open && !prefilled) {
-                    prefilled = true
-                    scope.launch {
-                        val d = BoxClient.daySummary(ctx)
-                        if (d != null) suggested = d.suggested
-                        if (d != null && why.isEmpty()) {
-                            val bits = ArrayList<String>()
-                            if (d.sleepMinutes > 0) bits.add("slept ${d.sleepMinutes / 60}h${"%02d".format(d.sleepMinutes % 60)}m")
-                            if (d.steps > 0) bits.add("${"%,d".format(d.steps)} steps")
-                            if (d.exerciseMinutes >= 10) bits.add("${d.exerciseMinutes}m exercise")
-                            if (d.photos > 0) bits.add("${d.photos} photo${if (d.photos == 1) "" else "s"}" +
-                                (if (d.places.isNotEmpty()) " around " + d.places.take(2)
-                                    .joinToString(" and ") { it.substringAfterLast(" / ") } else ""))
-                            if (d.places.isNotEmpty()) bits.add("was at " +
-                                d.places.take(3).joinToString("; ") { it.substringAfterLast(" / ") })
-                            d.notes.take(2).forEach { bits.add(it) }
-                            why = if (bits.isEmpty()) "" else "Today: " + bits.joinToString(". ") + "."
-                        }
-                    }
-                }
-            })
+            modifier = Modifier.clickable { open = !open })
         if (open) {
-            if (yesterday.isNotEmpty()) {
+            history.firstOrNull { it.day != today }?.let { y ->
                 Spacer(Modifier.height(4.dp))
-                Text(yesterday, color = TerminalDim, style = MaterialTheme.typography.labelMedium)
+                Text("${y.day} you felt ${y.feelings}", color = TerminalDim, style = MaterialTheme.typography.labelMedium)
             }
             Spacer(Modifier.height(8.dp))
-            // chips, wrapping rows of 4 , pick up to three, tap again to unpick
-            feelings.chunked(4).forEach { rowFeels ->
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    rowFeels.forEach { f ->
-                        val on = f in picked
-                        val mark = if (f in suggested) "·" else " "
-                        Text(if (on) "[$f]" else "$mark$f ",
-                            color = if (on) TerminalGreen else GhostTextDim,
-                            style = MaterialTheme.typography.labelMedium,
-                            modifier = Modifier.clickable {
-                                if (on) picked.remove(f) else if (picked.size < 3) picked.add(f)
-                            }.padding(vertical = 3.dp))
-                    }
+            val tap: (String) -> Unit = { f -> touched = true; picked = Feelings.toggle(picked, f) }
+            FeelingRows(quick, picked, suggested, tap)
+            if (more) {
+                for (g in Feelings.groups) {
+                    val rest = g.feelings.filter { it !in quick }
+                    if (rest.isEmpty()) continue
+                    Spacer(Modifier.height(6.dp))
+                    Text("${g.label} , ${g.hint}", color = TerminalDim, style = MaterialTheme.typography.labelSmall)
+                    FeelingRows(rest, picked, suggested, tap)
                 }
+            }
+            Spacer(Modifier.height(2.dp))
+            Row {
+                Text(if (more) "[ − fewer ]" else "[ + more feelings ]", color = TerminalGreen,
+                    style = MaterialTheme.typography.labelMedium, modifier = Modifier.clickable { more = !more })
+                Spacer(Modifier.width(10.dp))
+                Text("${picked.size} of ${Feelings.MAX_PICKS}", color = TerminalDim, style = MaterialTheme.typography.labelMedium)
+            }
+            if (preselected.isNotEmpty()) {
+                Text("· = the box's guess from your day (sleep, steps, places); tap to change",
+                    color = TerminalDim, style = MaterialTheme.typography.labelSmall)
             }
             Spacer(Modifier.height(6.dp))
             BasicTextField(why, { why = it },
@@ -308,21 +397,175 @@ private fun CheckinCard(yesterday: String = "") {
                     .padding(8.dp)) { if (why.isEmpty()) Text("why? (prefilled from your day , edit freely)",
                         color = TerminalDim, style = MaterialTheme.typography.bodySmall); inner() } },
                 modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp))
-            Spacer(Modifier.height(6.dp))
-            Text("[ save check-in ]", color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
+            Spacer(Modifier.height(8.dp))
+            // the take in hand goes with the check-in when it is saved
+            VoiceRecorder(hint = "or say it: a minute about the day, in your own words , kept and transcribed on your box",
+                saveLabel = null, onSave = {})
+            Spacer(Modifier.height(8.dp))
+            val take = rec.take
+            val canSave = !saving && !rec.recording && (picked.isNotEmpty() || why.isNotBlank() || take != null)
+            Text(when { saving -> "saving…"; rec.recording -> "[ save check-in ] , stop the recording first"; else -> "[ save check-in ]" },
+                color = if (canSave) TerminalGreen else TerminalDim, style = MaterialTheme.typography.labelMedium,
                 modifier = Modifier.clickable {
-                    if (picked.isEmpty() && why.isBlank()) return@clickable
+                    if (!canSave) return@clickable
+                    saving = true
+                    note = ""
                     scope.launch {
-                        val text = "Daily check-in $today\nFeeling: " +
-                            (if (picked.isEmpty()) "(unspecified)" else picked.joinToString(", ")) +
-                            (if (why.isBlank()) "" else "\nWhy: " + why.trim())
+                        val text = Feelings.checkinText(today, picked, preselected, why, take?.id, take?.durationMs ?: 0L)
                         if (BoxClient.noteAdd(ctx, text)) {
+                            if (take != null) {
+                                VoicePlayback.stop()
+                                VoiceNotes.enqueue(ctx, take, "checkin", today)
+                                VoiceCapture.taken()
+                            }
                             com.localghost.app.settings.AppSettings.setLastCheckinDay(ctx, today)
                             done = true
+                            if (take != null) VoiceNotes.uploadPending(ctx)
+                            onSaved()
+                        } else {
+                            note = "! the box did not answer , nothing is lost (the voice note stays here); try again when it is reachable"
                         }
+                        saving = false
                     }
                 })
+            if (note.isNotEmpty()) Text(note, color = TerminalDim, style = MaterialTheme.typography.labelMedium)
         }
+    }
+}
+
+/** Feeling chips in rows that fit the width. A picked one is bracketed; the box's guess carries "·". */
+@Composable
+private fun FeelingRows(words: List<String>, picked: List<String>, guessed: List<String>, onTap: (String) -> Unit) {
+    for (row in Feelings.rows(words)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            for (f in row) {
+                val on = f in picked
+                val mark = if (f in guessed) "·" else ""
+                Text(if (on) "[$mark$f]" else "$mark$f ",
+                    color = if (on) TerminalGreen else GhostTextDim,
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.clickable { onTap(f) }.padding(vertical = 3.dp))
+            }
+        }
+    }
+}
+
+/** THE RECORDER on the card: record, stop, listen, again, drop. [saveLabel] null = the take is saved
+ *  by the card's own button (the check-in); else this row saves it. The screen stays on while it
+ *  records (a locked phone gives an app silence from the microphone). */
+@Composable
+private fun VoiceRecorder(hint: String, saveLabel: String?, onSave: (VoiceCapture.Take) -> Unit) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val rec by VoiceCapture.state.collectAsState()
+    val playing by VoicePlayback.playing.collectAsState()
+    var denied by remember { mutableStateOf(false) }
+    val view = LocalView.current
+    DisposableEffect(rec.recording) {
+        view.keepScreenOn = rec.recording
+        onDispose { view.keepScreenOn = false }
+    }
+    val mic = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        denied = !ok
+        if (ok) VoiceCapture.start(ctx)
+    }
+    fun record() {
+        VoicePlayback.stop()
+        if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            VoiceCapture.start(ctx)
+        } else {
+            mic.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+    val take = rec.take
+    Column(Modifier.fillMaxWidth()) {
+        when {
+            rec.recording -> Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("● " + Feelings.clock(rec.elapsedMs), color = Warning, style = MaterialTheme.typography.labelMedium)
+                Spacer(Modifier.width(8.dp))
+                Box(Modifier.width(72.dp).height(6.dp).background(GhostBorder)) {
+                    Box(Modifier.fillMaxHeight().fillMaxWidth(rec.level.coerceIn(0.02f, 1f)).background(TerminalGreen))
+                }
+                Spacer(Modifier.width(10.dp))
+                Text("[ ■ stop ]", color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.clickable { VoiceCapture.stop() })
+            }
+            take != null -> {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("🎙 voice note ${Feelings.clock(take.durationMs)}", color = GhostText, style = MaterialTheme.typography.labelMedium)
+                    Spacer(Modifier.width(10.dp))
+                    Text(if (playing == take.id) "[ ■ ]" else "[ ▶ ]", color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.clickable { scope.launch { VoicePlayback.toggle(ctx, take.id) } })
+                    Spacer(Modifier.width(10.dp))
+                    Text("[ ● again ]", color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.clickable { record() })
+                    Spacer(Modifier.width(10.dp))
+                    Text("[ ✕ ]", color = GhostTextDim, style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.clickable { VoicePlayback.stop(); VoiceCapture.discard() })
+                }
+                if (saveLabel != null) {
+                    Text(saveLabel, color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.padding(top = 4.dp).clickable { VoicePlayback.stop(); onSave(take) })
+                } else {
+                    Text("saved with the check-in", color = TerminalDim, style = MaterialTheme.typography.labelSmall)
+                }
+            }
+            else -> {
+                Text("[ ● record a voice note ]", color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.clickable { record() })
+                Text(hint, color = TerminalDim, style = MaterialTheme.typography.labelSmall)
+            }
+        }
+        if (rec.error.isNotEmpty()) Text("! " + rec.error, color = TerminalDim, style = MaterialTheme.typography.labelMedium)
+        if (denied) Text("! no microphone permission , allow it for LocalGhost in the phone's settings to record",
+            color = TerminalDim, style = MaterialTheme.typography.labelMedium)
+    }
+}
+
+/** A note's line under its check-in, or in the notes list: length, then the words or where it is. */
+private fun voiceStatus(v: BoxClient.VoiceNoteRow, onPhone: Boolean): String = when (v.status) {
+    "done" -> v.transcript.ifBlank { "(nothing the box could hear)" }
+    "pending" -> "on the box, waiting to be transcribed"
+    "failed" -> "not transcribed: " + v.error.ifBlank { "the speech engine failed" }
+    "missing" -> if (onPhone) "on the phone, waiting to reach the box" else "not on the box"
+    else -> v.status
+}
+
+/** One voice note: when, how long, what was said (tap to read it all), play, delete. */
+@Composable
+private fun VoiceNoteCard(v: BoxClient.VoiceNoteRow, onPhone: Boolean, onDelete: (() -> Unit)?) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val playing by VoicePlayback.playing.collectAsState()
+    var full by remember { mutableStateOf(false) }
+    var confirmDel by remember { mutableStateOf(false) }
+    var failed by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            val whenText = if (v.takenAt > 0) java.text.SimpleDateFormat("EEE d MMM, HH:mm", java.util.Locale.UK)
+                .format(java.util.Date(v.takenAt * 1000)) else v.day
+            Text("🎙 $whenText · ${Feelings.clock(v.durationMs)}" + (if (v.kind == "checkin") " · check-in" else ""),
+                color = GhostTextDim, style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
+            if (v.status != "missing" || onPhone) {
+                Text(if (playing == v.id) " [ ■ ]" else " [ ▶ ]", color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.clickable { scope.launch { failed = !VoicePlayback.toggle(ctx, v.id) } })
+            }
+            if (onDelete != null) {
+                if (confirmDel) {
+                    LaunchedEffect(confirmDel) { kotlinx.coroutines.delay(3000); confirmDel = false }
+                    Text(" [ delete? ]", color = Warning, style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.clickable { VoicePlayback.stop(); onDelete() })
+                } else {
+                    Text(" 🗑", color = GhostTextDim, style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.clickable { confirmDel = true })
+                }
+            }
+        }
+        val words = voiceStatus(v, onPhone)
+        Text(words, color = if (v.status == "done") GhostText else TerminalDim, style = MaterialTheme.typography.bodySmall,
+            maxLines = if (full) Int.MAX_VALUE else 3,
+            modifier = Modifier.clickable { full = !full })
+        if (failed) Text("! the audio could not be had from the box", color = TerminalDim, style = MaterialTheme.typography.labelSmall)
     }
 }
 

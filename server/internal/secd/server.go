@@ -230,6 +230,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/taste", s.handleTaste)                       // what the photos say you like (synthd's outing pass)
 	mux.HandleFunc("/v1/nearby", s.handleNearby)                     // places around you that fit the taste, from the box's own geo data
 	mux.HandleFunc("/v1/notes", s.handleNoteAdd)                     // app -> noted inbox -> journal
+	mux.HandleFunc("/v1/voice", s.handleVoiceUpload)                 // a voice note's WAV -> voiced inbox (idempotent by id)
+	mux.HandleFunc("/v1/voice/notes", s.handleVoiceNotes)            // the notes with transcripts and status
+	mux.HandleFunc("/v1/voice/audio", s.handleVoiceAudio)            // one note's audio (?id=), Range works
+	mux.HandleFunc("/v1/voice/delete", s.handleVoiceDelete)          // audio, row and journal entry gone
 	mux.HandleFunc("/v1/onthisday", s.handleOnThisDay)               // synthd's retrospective, from the prebuilt days
 	mux.HandleFunc("/v1/days", s.handleDays)                         // the prebuilt day summaries, newest first (?before&limit)
 	mux.HandleFunc("/v1/devices/name", s.handleDeviceName)           // a device names itself

@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 
 	"github.com/LocalGhostDao/localghost/server/internal/ctlsock"
+	"github.com/LocalGhostDao/localghost/server/internal/ghosthealth"
 )
 
 // Base is the config every service shares. Embed it in a service's conf struct.
@@ -162,6 +163,9 @@ func BindBase(srv *ctlsock.Server, service string, lv *slog.LevelVar, reload Rel
 
 	srv.Handle("status", func(json.RawMessage) (ctlsock.Response, error) {
 		st := map[string]any{"service": service, "logLevel": lv.Level().String()}
+		if h, ok := ghosthealth.Current(); ok {
+			st["health"] = h // what /health says: the code and the one line of why
+		}
 		data, _ := json.Marshal(st)
 		return ctlsock.Response{OK: true, Data: data}, nil
 	})

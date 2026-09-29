@@ -5,7 +5,20 @@ Audio ingestion and transcription. Accepts encrypted audio chunks streamed from 
 
 ## Status
 
-Phase 0. No code. This document describes the architecture as of April 2026. ghost.voiced targets shade (v0.2) for the full design described here, and has a planned retirement path as phone-side models mature (see [Why this daemon might retire](#why-this-daemon-might-retire)). The design is a sketch and will be revised substantially when implementation starts. Parts of the design that depend on local transcription model capability are explicitly hedged.
+**29 September 2026: the voice-memo path runs, and nothing else from this design does.** The phone
+records a note (the daily check-in's, or any other) as a 16 kHz mono WAV and sends it whole to
+`POST /v1/voice` on secd. secd spools it into `<mount>/voiced/inbox`. This daemon archives it under
+`voiced/archive/YYYY/MM/`, records it in the `voice_notes` table and transcribes it with whisper.cpp
+on the box's CPU. The transcript goes to the journal as `ghost.voiced` / `voice:<id>`. The audio is
+kept, and the person can play it or delete it (audio, row and journal entry). The code lives in
+`internal/voiced`; setup is `tools/setup_whisper.sh` (mirror sets `whisper` and `speech`).
+
+What the design below describes and this build does not do: chunked or encrypted streaming (a note
+travels whole over the same mTLS channel as a photo), live capture of conversations with other
+people (not built, and not to be built on this path), speaker separation, and anything on the
+phone beyond recording. Read the rest as the plan it was, dated April 2026.
+
+(April 2026:) Phase 0. No code. This document describes the architecture as of April 2026. ghost.voiced targets shade (v0.2) for the full design described here, and has a planned retirement path as phone-side models mature (see [Why this daemon might retire](#why-this-daemon-might-retire)). The design is a sketch and will be revised substantially when implementation starts. Parts of the design that depend on local transcription model capability are explicitly hedged.
 
 ## Purpose
 

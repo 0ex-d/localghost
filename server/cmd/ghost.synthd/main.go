@@ -39,6 +39,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/LocalGhostDao/localghost/server/internal/ctlsock"
 	"github.com/LocalGhostDao/localghost/server/internal/ghosthealth"
@@ -1090,6 +1091,11 @@ func clip(s string, n int) string {
 	s = strings.TrimSpace(s)
 	if len(s) <= n {
 		return s
+	}
+	// back to a rune boundary: a byte cut through "ș" or "ț" is invalid UTF-8 in the prompt and in
+	// the stored JSON (it came back as U+FFFD)
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
 	}
 	return s[:n] + "…"
 }

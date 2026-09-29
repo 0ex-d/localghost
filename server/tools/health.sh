@@ -40,6 +40,7 @@ ROSTER="ghost.watchd ghost.oracled ghost.searchd ghost.framed ghost.noted ghost.
 
 green() { printf '\033[32m%s\033[0m' "$1"; }
 red()   { printf '\033[31m%s\033[0m' "$1"; }
+yellow() { printf '\033[33m%s\033[0m' "$1"; }
 dim()   { printf '\033[2m%s\033[0m'  "$1"; }
 
 # The volume is mounted inside ghost.secd's PRIVATE MOUNT NAMESPACE , a deliberate design choice: the
@@ -102,8 +103,17 @@ for svc in $CHECK; do
         # ping first , cheapest liveness check; then status for the detail line.
         if "$CLI" "$svc" ping >/dev/null 2>&1; then
             printf '  %s   ' "$(green UP)"
-            # status is best-effort: a daemon can be up (ping ok) but mid-init; show whatever it gives.
-            "$CLI" "$svc" status 2>/dev/null | head -1 || echo "(no status line)"
+            # the daemon's own health, as its /health says it (status carries it since 29 Sep 2026):
+            # ok, or DEGRADED with the one line of why (a model not running, notes waiting ...)
+            st="$("$CLI" "$svc" status 2>/dev/null | tr -d '\n')"
+            hc="$(printf '%s' "$st" | sed -n 's/.*"code": *\([0-9]\).*/\1/p')"
+            hd="$(printf '%s' "$st" | sed -n 's/.*"detail": *"\([^"]*\)".*/\1/p')"
+            case "$hc" in
+                0) echo "ok${hd:+ , $hd}" ;;
+                1) echo "$(yellow DEGRADED) ${hd}" ;;
+                2) echo "$(red FAILING) ${hd}" ;;
+                *) echo "(no health in its status: a build from before 29 Sep 2026)" ;;
+            esac
             if [ "$svc" = "ghost.oracled" ]; then
                 # The GPU question, from oracled itself (tools/gpu.sh has the whole picture).
                 m=$("$CLI" ghost.oracled models 2>/dev/null)
@@ -129,6 +139,11 @@ for svc in $CHECK; do
                 else
                     printf '  phone model offered: none (sudo ./tools/phone_model.sh)\n'
                 fi
+            fi
+            if [ "$svc" = "ghost.voiced" ]; then
+                # The voice notes: how many wait, and the speech engine (whisper.cpp + a ggml model on
+                # the volume; none until the mirror's sets whisper and speech are fetched)
+                "$CLI" ghost.voiced voice 2>/dev/null | head -2 | sed 's/^/  /'
             fi
             if [ "$svc" = "ghost.framed" ]; then
                 # What the MAP can draw from this box: the Natural Earth cuts under geo/, and the

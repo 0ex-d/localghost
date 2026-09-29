@@ -770,24 +770,45 @@ ALTER ROLE %[1]s LOGIN PASSWORD %[2]s;`, rd.name, pgLit(rd.pass))
 			return fmt.Errorf("create database: %w", err)
 		}
 	}
-	// Ownership converge inside the database. ALTER ... OWNER TO the current owner is a no-op, so on
-	// a healthy box this whole block costs one round trip and changes nothing.
+	// Ownership converge inside the database: only what someone ELSE owns is altered. ALTER ...
+	// OWNER TO the current owner changes nothing but still takes an ACCESS EXCLUSIVE lock on the
+	// table, and this block used to do that to every table at every unlock, in one transaction.
+	// On a warm box the cohort is running: each ALTER queued behind whatever query held the table
+	// (a long one froze every daemon behind it), and on 29 Sep 2026 two of these at once
+	// deadlocked and failed the unlock at START_DB ("ALTER TABLE public.notifications OWNER TO
+	// ghost"). Now a converged database takes no table lock at all, a busy table waits 15 s at
+	// most, a deadlock is tried again once, and a failure is logged, not fatal: ownership is
+	// housekeeping, and yesterday's owner still works.
 	ownSQL := fmt.Sprintf(`
-ALTER DATABASE %[1]s OWNER TO %[2]s;
-ALTER SCHEMA public OWNER TO %[2]s;
+SET lock_timeout = '15s';
+DO $$ BEGIN
+  IF (SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = current_database()) <> %[3]s THEN
+    EXECUTE format('ALTER DATABASE %%I OWNER TO %%I', current_database(), %[3]s);
+  END IF;
+  IF (SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = 'public') <> %[3]s THEN
+    EXECUTE format('ALTER SCHEMA public OWNER TO %%I', %[3]s);
+  END IF;
+END $$;
 DO $$ DECLARE r record; BEGIN
-  FOR r IN SELECT tablename AS n FROM pg_tables WHERE schemaname = 'public' LOOP
+  FOR r IN SELECT tablename AS n FROM pg_tables WHERE schemaname = 'public' AND tableowner <> %[3]s ORDER BY 1 LOOP
     EXECUTE format('ALTER TABLE public.%%I OWNER TO %[2]s', r.n);
   END LOOP;
-  FOR r IN SELECT sequencename AS n FROM pg_sequences WHERE schemaname = 'public' LOOP
+  FOR r IN SELECT sequencename AS n FROM pg_sequences WHERE schemaname = 'public' AND sequenceowner <> %[3]s ORDER BY 1 LOOP
     EXECUTE format('ALTER SEQUENCE public.%%I OWNER TO %[2]s', r.n);
   END LOOP;
-  FOR r IN SELECT viewname AS n FROM pg_views WHERE schemaname = 'public' LOOP
+  FOR r IN SELECT viewname AS n FROM pg_views WHERE schemaname = 'public' AND viewowner <> %[3]s ORDER BY 1 LOOP
     EXECUTE format('ALTER VIEW public.%%I OWNER TO %[2]s', r.n);
   END LOOP;
-END $$;`, c.Postgres.Name, owner)
-	if _, err := super(c.Postgres.Name, ownSQL); err != nil {
-		return fmt.Errorf("converge ownership: %w", err)
+END $$;`, c.Postgres.Name, owner, pgLit(owner))
+	var oerr error
+	for try := 1; try <= 2; try++ {
+		if _, oerr = super(c.Postgres.Name, ownSQL); oerr == nil || !strings.Contains(oerr.Error(), "deadlock detected") {
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if oerr != nil {
+		slog.Warn("ownership converge did not finish , the objects keep their owners, unlock goes on", "fn", "ensureOwnerAndDB", "err", oerr)
 	}
 	return nil
 }

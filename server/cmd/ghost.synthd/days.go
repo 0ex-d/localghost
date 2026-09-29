@@ -64,8 +64,9 @@ type dayFacts struct {
 	ExerciseMin float64 `json:"exerciseMin,omitempty"`
 	Feeling     string  `json:"feeling,omitempty"`
 	// words of the person's own
-	Notes []string `json:"notes,omitempty"` // journal titles that day (not the check-in)
-	Chats []string `json:"chats,omitempty"` // chats started that day, by title
+	Notes  []string `json:"notes,omitempty"`  // journal titles that day (not the check-in, not a voice note)
+	Spoken []string `json:"spoken,omitempty"` // what the person said in the day's voice notes (ghost.voiced's transcripts)
+	Chats  []string `json:"chats,omitempty"`  // chats started that day, by title
 	// the outing this day is part of
 	Outing     string `json:"outing,omitempty"`
 	OutingDay  int    `json:"outingDay,omitempty"`
@@ -90,12 +91,12 @@ type dayMoveFact struct {
 
 // empty: the box knows nothing about the day.
 func (f *dayFacts) empty() bool {
-	return f.Photos == 0 && f.Points == 0 && f.Steps == 0 && f.SleepMin == 0 && f.Feeling == "" && len(f.Notes) == 0 && len(f.Chats) == 0
+	return f.Photos == 0 && f.Points == 0 && f.Steps == 0 && f.SleepMin == 0 && f.Feeling == "" && len(f.Notes) == 0 && len(f.Chats) == 0 && len(f.Spoken) == 0
 }
 
 // hasSignal: a day worth the model's time and a place in the memories feed.
 func (f *dayFacts) hasSignal() bool {
-	return len(f.Stays) >= 2 || f.WalkM >= 3000 || f.Photos >= 5 || f.Feeling != "" || len(f.Notes) > 0 || f.Outing != ""
+	return len(f.Stays) >= 2 || f.WalkM >= 3000 || f.Photos >= 5 || f.Feeling != "" || len(f.Notes) > 0 || len(f.Spoken) > 0 || f.Outing != ""
 }
 
 // signature changes when anything the summary could say changes.
@@ -355,6 +356,20 @@ func gatherDayFacts(db *poltergres.ReadWrite, mount, day string) *dayFacts {
 				}
 				continue
 			}
+			// a voice note: the words themselves, not the title (the body's first line says when
+			// and how long; the rest is the transcript)
+			if v[0] != nil && *v[0] == "ghost.voiced" {
+				if v[2] != nil && len(f.Spoken) < 4 {
+					body := *v[2]
+					if i := strings.Index(body, "\n"); i >= 0 {
+						body = body[i+1:]
+					}
+					if body = strings.TrimSpace(body); body != "" {
+						f.Spoken = append(f.Spoken, clip(body, 1500))
+					}
+				}
+				continue
+			}
 			if title != "" && len(f.Notes) < 6 {
 				f.Notes = append(f.Notes, clip(title, 120))
 			}
@@ -504,6 +519,9 @@ func dayTemplate(f *dayFacts) string {
 	if len(f.Notes) > 0 {
 		parts = append(parts, "You wrote: "+joinAnd(quoteAll(f.Notes))+".")
 	}
+	if len(f.Spoken) > 0 {
+		parts = append(parts, "You said: \u201c"+clip(f.Spoken[0], 280)+"\u201d")
+	}
 	if len(f.Chats) > 0 {
 		parts = append(parts, fmt.Sprintf("You asked the box about %s.", joinAnd(f.Chats)))
 	}
@@ -582,6 +600,9 @@ func (f *dayFacts) sheet() []string {
 	}
 	for _, n := range f.Notes {
 		s = append(s, "You wrote a note titled: "+n)
+	}
+	for _, sp := range f.Spoken {
+		s = append(s, "In a voice note you said (transcribed by the box, may mishear words): "+sp)
 	}
 	for _, c := range f.Chats {
 		s = append(s, "You started a chat with the box about: "+c)

@@ -702,16 +702,41 @@ object BoxClient {
         }
     } catch (_: Exception) { null }
 
-    data class CheckinRow(val day: String, val feelings: String, val why: String)
+    /** One check-in. [preselected] is what the app ticked from the day before the person looked;
+     *  [voice] the note recorded with it (status "missing" until the phone has sent it). */
+    data class CheckinRow(val day: String, val feelings: String, val why: String,
+                          val preselected: String = "", val voice: VoiceNoteRow? = null)
 
     suspend fun checkins(ctx: Context, days: Int = 30): List<CheckinRow>? = try {
         val r = BoxHttp.getJson(ctx, "/v1/checkins?days=$days")
         val a = r.optJSONArray("checkins") ?: org.json.JSONArray()
         (0 until a.length()).mapNotNull { i ->
             val o = a.optJSONObject(i) ?: return@mapNotNull null
-            CheckinRow(o.optString("day"), o.optString("feelings"), o.optString("why"))
+            CheckinRow(o.optString("day"), o.optString("feelings"), o.optString("why"),
+                o.optString("preselected"), o.optJSONObject("voice")?.let { voiceRow(it) })
         }
     } catch (_: Exception) { null }
+
+    /** A voice note as the box keeps it. status: pending (waiting to be transcribed), done, failed,
+     *  missing (named by a check-in, not on the box). */
+    data class VoiceNoteRow(val id: String, val kind: String, val day: String, val takenAt: Long,
+                            val durationMs: Long, val status: String, val transcript: String,
+                            val lang: String, val error: String)
+
+    private fun voiceRow(o: org.json.JSONObject) = VoiceNoteRow(o.optString("id"), o.optString("kind"),
+        o.optString("day"), o.optLong("taken_at"), o.optLong("duration_ms"), o.optString("status"),
+        o.optString("transcript"), o.optString("lang"), o.optString("error"))
+
+    /** The newest voice notes on the box, with their transcripts. Null when the box did not answer. */
+    suspend fun voiceNotes(ctx: Context, n: Int = 60): List<VoiceNoteRow>? = try {
+        val a = BoxHttp.getJson(ctx, "/v1/voice/notes?n=$n").optJSONArray("notes") ?: org.json.JSONArray()
+        (0 until a.length()).mapNotNull { i -> a.optJSONObject(i)?.let { voiceRow(it) } }
+    } catch (_: Exception) { null }
+
+    /** Delete a note on the box: its audio, its transcript and its journal entry. */
+    suspend fun voiceDelete(ctx: Context, id: String): Boolean = try {
+        BoxHttp.postJson(ctx, "/v1/voice/delete", org.json.JSONObject().put("id", id)).optBoolean("ok")
+    } catch (_: Exception) { false }
 
     data class DaySummary(val photos: Int, val videos: Int, val places: List<String>, val notes: List<String>,
         val steps: Int = 0, val sleepMinutes: Int = 0, val exerciseMinutes: Int = 0,

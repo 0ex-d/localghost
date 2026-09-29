@@ -12,6 +12,8 @@
 #   5. hands everything to stage_models.sh , the next unlock ingests onto the encrypted volume
 #   6. the phone's model (tools/phone_model.sh; GHOST_PHONE_MODEL=0 skips it), which the box offers
 #      its phones , a miss there is said, and setup carries on
+#   7. the speech engine for voice notes (tools/setup_whisper.sh; GHOST_SPEECH=0 skips it): whisper.cpp
+#      from the mirror's source and a ggml model, both staged , a miss is said, and setup carries on
 #
 # Usage:
 #   sudo ./tools/setup_llama.sh                       # llama.cpp + weights from the mirror
@@ -71,7 +73,7 @@ while [ $# -gt 0 ]; do
 done
 . "$(pwd)/tools/model_pins.sh"
 
-echo "=== 1/5  build dependencies ==="
+echo "=== 1/6  build dependencies ==="
 # (no libcurl: llama-server is built without it, LLAMA_CURL=OFF , the engine downloads nothing, ever)
 apt-get install -y --no-install-recommends cmake build-essential ca-certificates curl gpg
 
@@ -133,7 +135,7 @@ from_mirror() {
     echo "-- llama.cpp source from the mirror: $TB (commit $_full), signature and hash checked"
 }
 
-echo "=== 2/5  llama.cpp , the mirror's source, built in its own folder ==="
+echo "=== 2/6  llama.cpp , the mirror's source, built in its own folder ==="
 mkdir -p "$(dirname "$LLAMA_DIR")"
 mrc=0; from_mirror || mrc=$?
 if [ "$mrc" = 0 ]; then
@@ -208,19 +210,23 @@ REPO_BIN="$(pwd)/bin"
 mkdir -p "$REPO_BIN"
 install -m 0755 "$LLAMA_DIR/build/bin/llama-server" "$REPO_BIN/llama-server"
 echo "-- llama-server installed to $REPO_BIN (seeded to <mount>/bin at provision)"
+if [ "${GHOST_FROM_UPDATE:-}" = 1 ]; then
+    : # update.sh puts it on the volume itself, keeps the old one, and puts it back if the model does not come up
+else
 echo "-- EXISTING volume? Seed it now while unlocked (via /tmp: the repo lives under /home, which is"
 echo "   EMPTY inside secd's mount namespace , ProtectHome , so ns.sh cannot see the repo path):"
 echo "     cp $REPO_BIN/llama-server /tmp/llama-server"
 echo "     sudo ./tools/ns.sh cp /tmp/llama-server /var/lib/ghost/mnt/slot0/bin/llama-server"
 echo "     sudo ./tools/ns.sh chown coder /var/lib/ghost/mnt/slot0/bin/llama-server"
 echo "     rm /tmp/llama-server"
+fi
 
 if [ "$BUILD_ONLY" -eq 1 ]; then
     echo "build-only requested , done. Stage models later with tools/stage_models.sh"
     exit 0
 fi
 
-echo "=== 3/5  model weights ==="
+echo "=== 3/6  model weights ==="
 DL=/var/lib/ghost/staging/download
 mkdir -p "$DL"; chmod 700 "$DL"
 # set_notice <set> , the set's NOTICE.txt as NOTICE-<set>.txt (two sets land in one folder, and
@@ -327,7 +333,7 @@ else
     MODELS_DIR="$DL"
 fi
 
-echo "=== 4/5  stage for ingest at next unlock ==="
+echo "=== 4/6  stage for ingest at next unlock ==="
 ./tools/stage_models.sh "$MODELS_DIR"
 # staged copies live under /var/lib/ghost/staging/ai-models; remove the download scratch if we made it
 if [ -d "$DL" ] && [ "$MODELS_DIR" = "$DL" ]; then rm -rf "$DL"; fi
@@ -337,7 +343,7 @@ if [ -d "$DL" ] && [ "$MODELS_DIR" = "$DL" ]; then rm -rf "$DL"; fi
 # read with the box's model, and `sudo ./tools/phone_model.sh` installs it later.
 PHONE="skipped (GHOST_PHONE_MODEL=0)"
 if [ "${GHOST_PHONE_MODEL:-1}" != 0 ]; then
-    echo "=== 5/5  the phone's model (offered by this box to its phones) ==="
+    echo "=== 5/6  the phone's model (offered by this box to its phones) ==="
     if sh ./tools/phone_model.sh; then
         PHONE="installed , the app downloads it from the box (MODELS in the menu)"
     else
@@ -345,11 +351,26 @@ if [ "${GHOST_PHONE_MODEL:-1}" != 0 ]; then
     fi
 fi
 
+# THE SPEECH ENGINE for voice notes (whisper.cpp from the mirror's source, a ggml model from set
+# speech), at setup for the same reason as the phone's model. A miss is said, not fatal: notes are
+# kept on the box and wait, and `sudo ./tools/update.sh speech` brings the engine later.
+SPEECH="skipped (GHOST_SPEECH=0)"
+if [ "${GHOST_SPEECH:-1}" != 0 ]; then
+    echo "=== 6/6  the speech engine (voice notes, transcribed on this box) ==="
+    src=0; bash ./tools/setup_whisper.sh || src=$?
+    case "$src" in
+        0) SPEECH="whisper.cpp $(cat /opt/localghost/whisper.cpp/.mirror-src 2>/dev/null) + model, staged for the next unlock" ;;
+        3) SPEECH="not on the mirror yet (sets whisper, speech); voice notes wait. Later: sudo ./tools/update.sh speech" ;;
+        *) SPEECH="NOT installed (above); voice notes wait. Later: sudo ./tools/update.sh speech" ;;
+    esac
+fi
+
 echo "----------------------------------------"
 echo "Inference setup complete:"
 echo "  llama.cpp    $LLAMA_DIR ($(cat "$LLAMA_DIR/.mirror-src" 2>/dev/null || echo '?'); llama-server in the repo's bin/, seeded to the volume)"
 echo "  models       staged , the NEXT UNLOCK ingests them onto the encrypted volume"
 echo "  phone model  $PHONE"
+echo "  speech       $SPEECH"
 echo "Unlock from the app, then verify:"
 echo "  sudo journalctl -u ghost.secd --since '2 min ago' | grep -i 'ingested\\|oracled'"
 echo "  sudo ./tools/ns.sh ./bin/ghost-cli ghost.oracled status"

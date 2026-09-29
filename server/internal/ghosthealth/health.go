@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -70,7 +71,30 @@ type Server struct {
 }
 
 func NewServer(name string, rep Reporter) *Server {
+	currentMu.Lock()
+	current = rep
+	currentMu.Unlock()
 	return &Server{name: name, rep: rep, started: time.Now()}
+}
+
+// current is this process's reporter (a daemon makes one health server), so the control socket's
+// status command can say what /health says: tools/health.sh reads it there, through the namespace
+// door, without knowing each daemon's port.
+var (
+	currentMu sync.Mutex
+	current   Reporter
+)
+
+// Current is this process's health as its /health endpoint would answer; ok is false before a
+// health server was made.
+func Current() (h Health, ok bool) {
+	currentMu.Lock()
+	rep := current
+	currentMu.Unlock()
+	if rep == nil {
+		return Health{}, false
+	}
+	return rep.Health(), true
 }
 
 // Handle registers an extra route on the daemon's loopback listener , the transport for daemon-to-

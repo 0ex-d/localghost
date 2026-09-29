@@ -363,7 +363,7 @@ func (s *Server) checkinReminderLoop() {
 		_ = s.notif.Produce(mounted, hw.Notification{
 			Service: "ghost.secd", Kind: "checkin",
 			Title: "how are you feeling today?",
-			Body:  "your day is already prefilled , 30 seconds on the MEMORIES screen",
+			Body:  "a couple of feelings are already ticked from your day , change them, or say a minute about it in a voice note",
 		})
 		_ = s.notif.SetSetting(mounted, "checkin_reminded", today)
 	}

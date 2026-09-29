@@ -995,6 +995,8 @@ class MainActivity : ComponentActivity() {
         // this box existed. Its own worker also flushes every quarter hour; this is the moment a
         // session appears, so the map is current when the person opens it.
         lifecycleScope.launch(Dispatchers.IO) { com.localghost.app.sync.LocationLog.flush(this@MainActivity) }
+        // and any voice note still on the phone (made away from home, or a take the app died holding)
+        lifecycleScope.launch(Dispatchers.IO) { com.localghost.app.voice.VoiceNotes.uploadPending(this@MainActivity) }
         // Cooldown: even across lock/unlock cycles (which reset autoSyncTried), do not kick a fresh
         // full sync more than once every few minutes. Returning to the app should not restart sync ,
         // the periodic 15-min worker and the cursor already keep the box current. A manual SYNC NOW

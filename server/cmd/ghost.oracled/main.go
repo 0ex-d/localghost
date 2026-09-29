@@ -122,13 +122,44 @@ func main() {
 		Port:       cfg.LlamaPort,
 		ExtraArgs:  cfg.ExtraArgs,
 		ModelName:  cfg.ModelName,
+		// the last load's measured times, beside the conf: the next unlock's time-left estimate
+		LoadTimesPath: filepath.Join(filepath.Dir(confPath), "ghost.oracled.load.json"),
 	})
 	var modelReady atomic.Bool
+	var modelWhy atomic.Value // why the model is not up, for the health line
+	modelWhy.Store("model loading")
 	go func() {
-		lg.Info("starting llama-server child", "fn", "main", "model", cfg.ModelName)
-		if err := llama.Start(ctx); err != nil {
-			lg.Error("llama-server did not become ready", "fn", "main", "err", err)
-			return
+		// A start that fails is tried again, not given up on: on 29 Sep 2026 a new engine did not
+		// come up once and oracled sat there for hours without a model, captions and chat quietly
+		// failing, the reason only in secd's journal. Now the reason is in this log and on the
+		// health line, and the start is tried again after 30 s, 1, 2, 5, then every 10 minutes (a
+		// GPU still releasing the old child's memory is one reason that clears by itself).
+		backoff := []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 5 * time.Minute, 10 * time.Minute}
+		for try := 0; ; try++ {
+			lg.Info("starting llama-server child", "fn", "main", "model", cfg.ModelName, "try", try+1)
+			err := llama.Start(ctx)
+			if err == nil {
+				break
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			wait := backoff[len(backoff)-1]
+			if try < len(backoff) {
+				wait = backoff[try]
+			}
+			why := err.Error()
+			if len(why) > 400 {
+				why = why[:400]
+			}
+			modelWhy.Store("model not running (try " + strconv.Itoa(try+1) + ", next in " + wait.String() + "): " + why)
+			lg.Error("llama-server did not become ready", "fn", "main", "try", try+1, "retryIn", wait.String(), "err", err)
+			llama.Stop() // a child still running but never healthy is ended before the next try
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(wait):
+			}
 		}
 		broker.SetBackend(oracle.ClassLocalSmall, llama)
 		modelReady.Store(true)
@@ -211,9 +242,16 @@ func main() {
 		if modelReady.Load() {
 			return ghosthealth.Health{Code: ghosthealth.OK, Name: service}
 		}
-		return ghosthealth.Health{Code: ghosthealth.Degraded, Name: service, Detail: "model loading"}
+		why, _ := modelWhy.Load().(string)
+		return ghosthealth.Health{Code: ghosthealth.Degraded, Name: service, Detail: why}
 	})
 	srv := ghosthealth.NewServer(service, rep)
+	// /load , the model's load progress (phase, percent, time left), on the loopback health port:
+	// secd reads it every second while an unlock waits on the model and passes it to the app's bar
+	srv.Handle("/load", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(llama.Load())
+	})
 	// Streaming chat on the service's UNIX STREAM SOCKET (streamsock) , ctlsock is one-shot and
 	// cannot stream, and a loopback TCP port would be "anything on localhost may connect"; the
 	// socket carries filesystem permissions and dies with the run dir. This path

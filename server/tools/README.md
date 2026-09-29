@@ -286,6 +286,22 @@ SHA-256. On the machine that builds the app, once, and again whenever the mirror
 then rebuild the app (the build fetches the tarball from the mirror and checks it against the pin;
 -PllamaTarball=<file> builds from a local copy). Then MODELS in the app's menu → DOWNLOAD.
 
+## 7e. The speech engine for voice notes , at setup (GHOST_SPEECH=0 skips it)
+
+The daily check-in takes a voice note, and the box transcribes it itself: whisper.cpp's
+`whisper-cli`, built on the box from the mirror's pinned source (set `whisper`), and a ggml speech
+model (set `speech`). Both come from the mirror only, like llama.cpp. `setup_llama.sh` runs it as
+its last step and stages both for the next unlock. A miss is said and setup carries on. Voice notes
+are kept on the box meanwhile and transcribed once the engine arrives.
+
+    sudo ./tools/setup_whisper.sh              # engine + model, staged for the next unlock
+    sudo ./tools/update.sh speech              # on a running, unlocked box: straight onto the volume
+    sudo ./tools/ns.sh ./bin/ghost-cli ghost.voiced voice          # counts, engine, newest notes
+    sudo ./tools/ns.sh ./bin/ghost-cli ghost.voiced voice-again id=failed   # retry the failed ones
+
+The build is CPU-only on purpose: the 4070 stays the chat model's. ghost.voiced runs whisper at nice
+10 with at most four threads, and passes `-ng` so a CUDA build would leave the GPU alone too.
+
 ## 1b. The watchdog , root, once, before the box is ever left alone
 
     sudo ./tools/watchdog.sh --arm

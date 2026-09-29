@@ -31,6 +31,9 @@ INGESTION (each daemon writes its own tables, nobody else's)
  │   framed: "photo at <place>"    ref = frame hash         │
  │   noted:  texts, emails, chats  ref = content hash/chat: │
  │   tallyd: daily health line     ref = health:<day>       │
+ │   voiced: a voice note's words  ref = voice:<id>         │
+ │           (audio + status in voice_notes, archive on     │
+ │            the volume under voiced/archive/)             │
  │   distilled BOOL = synthd's high-water mark              │
  └──────────────────────────────────────────────────────────┘
                           │ distillation (oracled)

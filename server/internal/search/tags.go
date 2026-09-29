@@ -256,6 +256,17 @@ func splitTagList(raw string) []string {
 
 // normTag is a tag as compared with the model's copy of it: lowercase, hyphens and underscores
 // as spaces, spaces collapsed, a trailing plural s dropped.
+// askedName: s is one of the tags asked, as normTag reads them.
+func askedName(asked []string, s string) bool {
+	n := normTag(s)
+	for _, a := range asked {
+		if normTag(a) == n {
+			return true
+		}
+	}
+	return false
+}
+
 func normTag(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	s = strings.NewReplacer("-", " ", "_", " ").Replace(s)
@@ -265,6 +276,42 @@ func normTag(s string) string {
 		s = s[:len(s)-1]
 	}
 	return s
+}
+
+// categorySynonyms: the categories a model writes instead of ours, seen on xyntai on 29 Sep 2026
+// ("architecture:vaulted ceiling", on every church photo, failed the job forever) and the obvious
+// neighbours. Each maps to the closed set's nearest bucket.
+var categorySynonyms = map[string]string{
+	"architecture": "place", "building": "place", "landmark": "place", "location": "place", "city": "place",
+	"cityscape": "place", "interior": "place", "room": "place", "structure": "place", "scene": "place", "venue": "place",
+	"landscape": "nature", "plant": "nature", "flower": "nature", "tree": "nature", "weather": "nature",
+	"sky": "nature", "water": "nature", "outdoor": "nature", "scenery": "nature", "season": "nature",
+	"person": "people", "human": "people", "face": "people", "portrait": "people", "crowd": "people", "family": "people",
+	"clothing": "object", "clothes": "object", "fashion": "object", "item": "object", "thing": "object",
+	"furniture": "object", "tool": "object", "device": "object", "electronic": "object", "accessory": "object",
+	"sport": "activity", "action": "activity", "hobby": "activity", "leisure": "activity",
+	"drink": "food", "beverage": "food", "dish": "food", "meal": "food", "cuisine": "food",
+	"pet": "animal", "wildlife": "animal", "bird": "animal",
+	"transport": "vehicle", "transportation": "vehicle", "car": "vehicle", "boat": "vehicle",
+	"occasion": "event", "celebration": "event", "festival": "event",
+	"sign": "text", "signage": "text", "writing": "text", "document": "text", "logo": "text",
+	"color": "style", "colour": "style", "lighting": "style", "light": "style", "mood": "style",
+	"composition": "style", "art": "style", "aesthetic": "style", "photography": "style",
+}
+
+// canonCategory reads a category as a model wrote it: ours (or "other"), a plural of ours
+// ("places", "activities"), or a synonym. "" when it is none of those.
+func canonCategory(c string) string {
+	c = strings.Trim(strings.ToLower(strings.TrimSpace(c)), ".*\"'`")
+	for _, k := range []string{c, strings.TrimSuffix(c, "s"), strings.TrimSuffix(c, "ies") + "y"} {
+		if IsCategory(k) || k == OtherCategory {
+			return k
+		}
+		if m, ok := categorySynonyms[k]; ok {
+			return m
+		}
+	}
+	return ""
 }
 
 // AssignCategories reads the model's answer to CategorizePrompt for the tags asked. Each asked tag
@@ -281,17 +328,21 @@ func AssignCategories(asked []string, raw string) (out []Tag, ok bool) {
 		var a, b string
 		if i := strings.IndexByte(part, ':'); i > 0 {
 			a, b = strings.TrimSpace(part[:i]), strings.TrimSpace(part[i+1:])
+			if k := strings.Index(b, " ("); k > 0 { // "vaulted ceiling (wait, that is not in the list"
+				b = strings.TrimSpace(b[:k])
+			}
 		} else if j := strings.LastIndexByte(part, '('); j > 0 && strings.HasSuffix(part, ")") {
 			a, b = strings.TrimSpace(part[j+1:len(part)-1]), strings.TrimSpace(part[:j]) // "beach (place)"
 		} else {
 			continue
 		}
-		isCat := func(c string) bool { return IsCategory(c) || c == OtherCategory }
 		switch {
-		case isCat(a):
-			pairs = append(pairs, pair{a, b})
-		case isCat(b): // "beach: place", the other way round
-			pairs = append(pairs, pair{b, a})
+		case canonCategory(a) != "":
+			pairs = append(pairs, pair{canonCategory(a), b})
+		case canonCategory(b) != "": // "beach: place", the other way round
+			pairs = append(pairs, pair{canonCategory(b), a})
+		case askedName(asked, b): // "religion:church": the format, with a category of its own making
+			pairs = append(pairs, pair{OtherCategory, b})
 		}
 	}
 	if len(pairs) == 0 {

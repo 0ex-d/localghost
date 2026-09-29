@@ -94,3 +94,35 @@ func TestParseTagsReadsNumberedLines(t *testing.T) {
 		t.Fatalf("%v", got)
 	}
 }
+
+// The answers xyntai's searchd logged on 29 Sep 2026, each of which failed its job and was queued
+// again at every stock-take: a category of the model's own ("architecture"), a thought left in
+// the answer, a loop, and a category the model made up for a tag it did copy.
+func TestAssignCategoriesTakesTheModelsOwnCategories(t *testing.T) {
+	cases := []struct {
+		asked []string
+		raw   string
+		want  []string
+	}{
+		{[]string{"vaulted ceiling"}, "architecture:vaulted ceiling (Wait, 'architecture' is not in the list). \n\nLet's re-", []string{"place"}},
+		{[]string{"arches", "columns", "doorways", "facade"}, "architecture:arches, architecture:columns, architecture:doorways, architecture:facade", []string{"place", "place", "place", "place"}},
+		{[]string{"architecture"}, "architecture:architecture, architecture:architecture, architecture:architecture", []string{"place"}},
+		{[]string{"church", "candles"}, "religion:church, objects:candles", []string{"other", "object"}},
+		{[]string{"swimming", "sunset"}, "Activities: swimming, lighting: sunset", []string{"activity", "style"}},
+	}
+	for _, c := range cases {
+		got, ok := AssignCategories(c.asked, c.raw)
+		if !ok || len(got) != len(c.want) {
+			t.Fatalf("%q: ok=%v got %v", c.raw, ok, got)
+		}
+		for i, g := range got {
+			if g.Category != c.want[i] {
+				t.Errorf("%q: %s got %q, want %q", c.raw, g.Name, g.Category, c.want[i])
+			}
+		}
+	}
+	// a refusal is still no answer: the job fails and is tried again (the model may be busy)
+	if _, ok := AssignCategories([]string{"x"}, "Please provide the list of tags you would like me to categorize."); ok {
+		t.Fatal("a refusal read as an answer")
+	}
+}

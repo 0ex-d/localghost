@@ -143,6 +143,26 @@ object BoxHttp {
         code
     }
 
+    /** POST a file from disk with a known length (a voice note) and extra headers; the HTTP status
+     *  comes back. Fixed-length streaming: the box sees Content-Length, and nothing is buffered
+     *  whole in RAM. Throws on a transport failure, so the caller can tell "box not there" from
+     *  "box said no". */
+    suspend fun postFile(ctx: Context, path: String, file: java.io.File, contentType: String,
+                         headers: Map<String, String>): Int = withContext(Dispatchers.IO) {
+        val conn = open(ctx, path, "POST")
+        conn.doOutput = true
+        conn.readTimeout = 60_000
+        conn.setFixedLengthStreamingMode(file.length())
+        conn.setRequestProperty("Content-Type", contentType)
+        for ((k, v) in headers) conn.setRequestProperty(k, v)
+        try {
+            file.inputStream().use { ins -> conn.outputStream.use { out -> ins.copyTo(out, 256 * 1024) } }
+            conn.responseCode
+        } finally {
+            conn.disconnect()
+        }
+    }
+
     /** GET streamed straight to DISK , the big-payload path (video originals). A bounded 512KB
      *  buffer is the entire RAM footprint no matter how large the file; onBytes reports progress.
      *  Returns true on a complete 200; a partial write deletes itself , half a video is not a

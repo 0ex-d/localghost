@@ -1337,10 +1337,12 @@ type DaySummary struct {
 	Steps           int      `json:"steps,omitempty"`
 	SleepMinutes    int      `json:"sleep_minutes,omitempty"`
 	ExerciseMinutes int      `json:"exercise_minutes,omitempty"`
-	// Suggested feelings , GUESSES from the day's shape, offered first in the check-in, never
-	// preselected: the box proposes, the person disposes. The heuristics are plain and stated:
-	// short sleep suggests tired; real movement or exercise suggests energised; a park or trail
-	// in the places suggests calm; a heavy-everything day suggests stressed as a candidate.
+	// Suggested feelings , GUESSES from the day's shape, strongest first. The app ticks the first
+	// two before the person looks (Vlad asked for that on 29 Sep 2026: fewer taps), marks them as
+	// the box's guess, and writes them into the check-in as "Preselected:" so a guess left standing
+	// can be told from a feeling picked. The heuristics are plain and stated in DayContext: short
+	// sleep suggests tired, a long sleep rested, real movement energised, somewhere green or by
+	// water calm, many photos or places curious, a short night and a long day stressed.
 	Suggested []string `json:"suggested,omitempty"`
 }
 
@@ -1415,7 +1417,9 @@ func (s *NotifStore) DayContext(slot int, start, end int64) (DaySummary, error) 
 			}
 		}
 	}
-	// Suggestions , transparent heuristics over the day's shape.
+	// Suggestions , transparent heuristics over the day's shape, strongest first: the app ticks the
+	// first two before the person looks (marked as the box's guess, one tap to untick) and offers
+	// the rest first in the list. Each rule is one line and says what it reads.
 	sug := func(f string) {
 		for _, s := range out.Suggested {
 			if s == f {
@@ -1427,23 +1431,36 @@ func (s *NotifStore) DayContext(slot int, start, end int64) (DaySummary, error) 
 		}
 	}
 	if out.SleepMinutes > 0 && out.SleepMinutes < 360 {
-		sug("tired")
+		sug("tired") // under six hours of sleep
+	}
+	if out.SleepMinutes >= 450 {
+		sug("rested") // seven and a half hours or more
 	}
 	if out.ExerciseMinutes >= 30 || out.Steps >= 9000 {
-		sug("energised")
+		sug("energised") // real movement
+	}
+	if out.Steps >= 20000 {
+		sug("tired") // a very long day on foot
 	}
 	for _, p := range out.Places {
 		lp := strings.ToLower(p)
-		if strings.Contains(lp, "park") || strings.Contains(lp, "trail") || strings.Contains(lp, "falls") {
-			sug("calm")
+		hit := false
+		for _, w := range []string{"park", "trail", "falls", "beach", "forest", "lake", "bay", "mount", "garden", "harbour", "harbor", "cove"} {
+			if strings.Contains(lp, w) {
+				hit = true
+				break
+			}
+		}
+		if hit {
+			sug("calm") // somewhere green or by water
 			break
 		}
 	}
-	if out.SleepMinutes > 0 && out.SleepMinutes < 360 && out.Steps >= 12000 {
-		sug("stressed")
+	if out.Photos >= 25 || len(out.Places) >= 3 {
+		sug("curious") // many photos, or several places: a day out looking at things
 	}
-	if out.SleepMinutes >= 480 {
-		sug("calm")
+	if out.SleepMinutes > 0 && out.SleepMinutes < 360 && out.Steps >= 12000 {
+		sug("stressed") // short night, long day
 	}
 	return out, nil
 }
@@ -1869,6 +1886,13 @@ type CheckinRow struct {
 	Day      string `json:"day"`
 	Feelings string `json:"feelings"`
 	Why      string `json:"why,omitempty"`
+	// Preselected: the feelings the app ticked from the day's shape before the person looked (the
+	// "Preselected:" line), kept so a later look at the moods can tell a guess left standing from a
+	// feeling picked.
+	Preselected string `json:"preselected,omitempty"`
+	// Voice: the note recorded with the check-in (the "Voice: <id>" line), with its transcript once
+	// ghost.voiced has one.
+	Voice *VoiceNote `json:"voice,omitempty"`
 }
 
 // CheckinHistory , past check-ins, newest first. The check-in is a journal entry by design (one
@@ -1888,27 +1912,70 @@ func (s *NotifStore) CheckinHistory(slot, n int) ([]CheckinRow, error) {
 		return nil, err
 	}
 	out := make([]CheckinRow, 0, len(rows.Vals))
+	voiceOf := map[int]string{}
+	var ids []string
 	for _, v := range rows.Vals {
 		if len(v) == 0 || v[0] == nil {
 			continue
 		}
-		var r CheckinRow
-		for _, line := range strings.Split(*v[0], "\n") {
-			line = strings.TrimSpace(line)
-			switch {
-			case strings.HasPrefix(line, "Daily check-in "):
-				r.Day = strings.TrimPrefix(line, "Daily check-in ")
-			case strings.HasPrefix(line, "Feeling: "):
-				r.Feelings = strings.TrimPrefix(line, "Feeling: ")
-			case strings.HasPrefix(line, "Why: "):
-				r.Why = strings.TrimPrefix(line, "Why: ")
-			}
-		}
+		r, voiceID := ParseCheckin(*v[0])
 		if r.Day != "" {
+			if voiceID != "" {
+				voiceOf[len(out)] = voiceID
+				ids = append(ids, voiceID)
+			}
 			out = append(out, r)
 		}
 	}
+	if len(ids) > 0 {
+		notes := voiceByIDs(c, ids)
+		for i, id := range voiceOf {
+			if n, ok := notes[id]; ok {
+				nn := n
+				out[i].Voice = &nn
+			} else {
+				// uploaded later than the check-in text, or deleted: the id alone says a note was made
+				out[i].Voice = &VoiceNote{ID: id, Status: "missing"}
+			}
+		}
+	}
 	return out, nil
+}
+
+func isHex32(s string) bool {
+	if len(s) != 32 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// ParseCheckin reads a check-in's journal text back into its row and the id of its voice note.
+func ParseCheckin(body string) (CheckinRow, string) {
+	var r CheckinRow
+	voiceID := ""
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "Daily check-in "):
+			r.Day = strings.TrimPrefix(line, "Daily check-in ")
+		case strings.HasPrefix(line, "Feeling: "):
+			r.Feelings = strings.TrimPrefix(line, "Feeling: ")
+		case strings.HasPrefix(line, "Why: "):
+			r.Why = strings.TrimPrefix(line, "Why: ")
+		case strings.HasPrefix(line, "Preselected: "):
+			r.Preselected = strings.TrimPrefix(line, "Preselected: ")
+		case strings.HasPrefix(line, "Voice: "):
+			if f := strings.Fields(strings.TrimPrefix(line, "Voice: ")); len(f) > 0 && isHex32(strings.ToLower(f[0])) {
+				voiceID = strings.ToLower(f[0])
+			}
+		}
+	}
+	return r, voiceID
 }
 
 // FrameOriginalPath , the untouched archived original and its mime, for the full-quality viewer.

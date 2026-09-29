@@ -107,11 +107,52 @@ type EngineWatch struct {
 	buf  bytes.Buffer
 }
 
-// engineInfoBox is the shared, locked EngineInfo behind the watchers.
+// engineInfoBox is the shared, locked EngineInfo behind the watchers, and the child's last lines:
+// when llama-server dies before it serves, those lines are the reason, and they go into oracled's
+// own log instead of only the secd journal nobody reads.
 type engineInfoBox struct {
 	mu   sync.Mutex
 	info EngineInfo
+	tail []string
+	load *loadTracker // the current start's progress (loadprog.go); nil in tests that do not need it
 }
+
+const tailLines = 40
+
+// resetTail forgets the last child's lines (a new start is a new story).
+func (b *engineInfoBox) resetTail() {
+	b.mu.Lock()
+	b.tail = nil
+	b.mu.Unlock()
+}
+
+// Why returns what llama-server's last lines say about a failure: the lines that read like an
+// error, else the last few, joined with " | ".
+func (b *engineInfoBox) Why() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var hits []string
+	for _, l := range b.tail {
+		if reFailLine.MatchString(l) {
+			hits = append(hits, l)
+		}
+	}
+	if len(hits) == 0 {
+		n := len(b.tail)
+		if n > 6 {
+			n = 6
+		}
+		hits = b.tail[len(b.tail)-n:]
+	}
+	if len(hits) > 8 {
+		hits = hits[len(hits)-8:]
+	}
+	return strings.Join(hits, " | ")
+}
+
+// reFailLine: a llama-server line that says why it stopped (a bad argument, a model or projector
+// it cannot read, the GPU out of memory, a port already taken).
+var reFailLine = regexp.MustCompile(`(?i)\b(error|failed|failure|unknown|invalid|unsupported|not supported|abort|out of memory|cannot|could not|couldn't|exception|terminate)\b`)
 
 func newEngineInfoBox() *engineInfoBox { return &engineInfoBox{info: EngineInfo{Backend: "unknown"}} }
 
@@ -137,11 +178,17 @@ func (w *EngineWatch) Write(p []byte) (int, error) {
 		if i < 0 {
 			break
 		}
-		line := string(w.buf.Next(i + 1))
-		w.info.line(strings.TrimRight(line, "\r\n"))
+		line := strings.TrimRight(string(w.buf.Next(i+1)), "\r\n")
+		w.info.line(line)
+		if w.info.load != nil {
+			w.info.load.line(line)
+		}
 	}
 	if w.buf.Len() > 64<<10 { // a line that never ends is not one we parse
 		w.buf.Reset()
+	}
+	if w.info.load != nil {
+		w.info.load.partial(w.buf.Bytes()) // llama.cpp's progress dots, one per percent, no newline yet
 	}
 	return len(p), nil
 }
@@ -149,6 +196,15 @@ func (w *EngineWatch) Write(p []byte) (int, error) {
 func (b *engineInfoBox) line(l string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if t := strings.TrimSpace(l); t != "" {
+		if len(t) > 300 {
+			t = t[:300]
+		}
+		b.tail = append(b.tail, t)
+		if len(b.tail) > tailLines {
+			b.tail = b.tail[len(b.tail)-tailLines:]
+		}
+	}
 	e := &b.info
 	e.Lines++
 	if m := reCudaFound.FindStringSubmatch(l); m != nil {
