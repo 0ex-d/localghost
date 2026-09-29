@@ -127,6 +127,14 @@ std::string build_prompt(LgLlm* h, const std::string& system, const std::string&
     return "raw";
 }
 
+// use_mmap left llama_model_params in the mirror's v0.5.0 (the same release dropped --mlock from
+// llama-server). Asked for where the field exists, left to the library's own loading where it does
+// not, so the bridge builds against either side of that change.
+template <typename P>
+auto prefer_mmap(P& p, int) -> decltype(p.use_mmap = true, void()) { p.use_mmap = true; }
+template <typename P>
+void prefer_mmap(P&, long) {}
+
 bool is_stop_piece(const std::string& p) {
     return p == "<turn|>" || p == "<end_of_turn>" || p == "<|im_end|>" || p == "<|eot_id|>";
 }
@@ -140,7 +148,7 @@ Java_com_localghost_app_local_NativeLlama_nativeLoad(JNIEnv* env, jobject, jstri
 
     llama_model_params mparams = llama_model_default_params();
     mparams.n_gpu_layers = 0; // CPU: no GPU backend is compiled into the phone build
-    mparams.use_mmap = true;  // the weights page in from flash as needed; Android can reclaim them
+    prefer_mmap(mparams, 0);  // the weights page in from flash as needed; Android can reclaim them
     llama_model* model = llama_model_load_from_file(path.c_str(), mparams);
     if (!model) { LOGE("model load failed: %s", path.c_str()); return 0; }
 

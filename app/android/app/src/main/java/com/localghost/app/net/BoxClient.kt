@@ -319,6 +319,9 @@ object BoxClient {
                             if (mems.isNotEmpty()) channel.trySendBlocking(ChatChunk.Memories(mems))
                         }
                         o.optString("note").takeIf { it.isNotBlank() }?.let { channel.trySendBlocking(ChatChunk.Status(it)) }
+                        // the chat's id at once (a box from 30 Sep 2026): an app closed mid-answer
+                        // reopens on this chat, and the box has kept writing the answer into it
+                        o.optLong("chatId", 0L).takeIf { it > 0 }?.let { channel.trySendBlocking(ChatChunk.ChatId(it)) }
                         true
                     }
                     // {"more":{"queries":[...]}} asks for a second search; the closing
@@ -674,7 +677,29 @@ object BoxClient {
         android.util.Log.w("LocalGhost", "chats list failed: ${e.message}"); null
     }
 
-    data class BoxChatMsg(val id: Long, val role: String, val content: String)
+    /** One saved message. An answer carries its [reasoning] (the model's thinking), the web
+     *  [sources] it drew on, and [state] "writing" while the box is still producing it (the app was
+     *  closed on it), "stopped" when it ended early, "" when whole. */
+    data class BoxChatMsg(
+        val id: Long, val role: String, val content: String,
+        val reasoning: String = "", val sources: List<WebSearch.Hit> = emptyList(), val state: String = "",
+    )
+
+    /** The web sources as the box saved them beside an answer, in their [n] order. */
+    internal fun parseSources(a: org.json.JSONArray?): List<WebSearch.Hit> {
+        if (a == null) return emptyList()
+        return (0 until a.length()).mapNotNull { i ->
+            val o = a.optJSONObject(i) ?: return@mapNotNull null
+            val url = o.optString("url")
+            if (url.isBlank() && o.optString("title").isBlank()) null
+            else o.optInt("n", i + 1) to WebSearch.Hit(o.optString("title"), url, "", kind = o.optString("kind").ifBlank { "page" })
+        }.sortedBy { it.first }.map { it.second }
+    }
+
+    /** STOP: ends the answer the box is writing for this chat (closing the app does not). */
+    suspend fun chatStop(ctx: Context, chatId: Long): Boolean = try {
+        BoxHttp.postJson(ctx, "/v1/chat/stop", org.json.JSONObject().put("chatId", chatId)).optBoolean("stopped")
+    } catch (e: Exception) { android.util.Log.w("LocalGhost", "chat stop: ${e.message}"); false }
     /** One conversation's history, newest first as served; callers reverse for display. */
     /** Place + name + tag search (AND per term) , the location search over the archive. */
     suspend fun framesSearch(ctx: Context, q: String): List<GalleryFrame>? = try {
@@ -1232,8 +1257,10 @@ object BoxClient {
             f.writeBytes(b)
             val tiles = dir.listFiles { g -> g.name.endsWith(".lgt") } ?: emptyArray()
             var total = tiles.sumOf { it.length() }
-            if (total > 200L * 1024 * 1024) for (g in tiles.sortedBy { it.lastModified() }) {
-                if (total <= 150L * 1024 * 1024) break
+            // ~200 MB, oldest first; the size picked in SETTINGS when maps are downloaded ahead
+            val cap = com.localghost.app.local.MapPrefetch.capBytes(ctx, 200L * 1024 * 1024)
+            if (total > cap) for (g in tiles.sortedBy { it.lastModified() }) {
+                if (total <= cap * 3 / 4) break
                 total -= g.length(); g.delete()
             }
         }
@@ -1273,8 +1300,9 @@ object BoxClient {
             f.writeBytes(b)
             val tiles = dir.listFiles { g -> g.name.endsWith(".lgr") } ?: emptyArray()
             var total = tiles.sumOf { it.length() }
-            if (total > 400L * 1024 * 1024) for (g in tiles.sortedBy { it.lastModified() }) {
-                if (total <= 300L * 1024 * 1024) break
+            val cap = com.localghost.app.local.MapPrefetch.capBytes(ctx, 400L * 1024 * 1024)
+            if (total > cap) for (g in tiles.sortedBy { it.lastModified() }) {
+                if (total <= cap * 3 / 4) break
                 total -= g.length(); g.delete()
             }
         }
@@ -1300,7 +1328,9 @@ object BoxClient {
         val a = r.optJSONArray("messages") ?: return emptyList()
         (0 until a.length()).mapNotNull { i ->
             val o = a.optJSONObject(i) ?: return@mapNotNull null
-            BoxChatMsg(o.optLong("id"), o.optString("role"), o.optString("content"))
+            BoxChatMsg(o.optLong("id"), o.optString("role"), o.optString("content"),
+                reasoning = o.optString("reasoning"), sources = parseSources(o.optJSONArray("sources")),
+                state = o.optString("state"))
         }
     } catch (e: Exception) {
         android.util.Log.w("LocalGhost", "chat load failed: ${e.message}"); null

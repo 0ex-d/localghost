@@ -99,8 +99,14 @@ func chatHistory(mount string, chatID int64) []chatTurn {
 	if db == nil {
 		return nil
 	}
-	rows, err := db.Query(`SELECT role, content FROM chat_messages WHERE chat_id = $1 ORDER BY id DESC LIMIT $2`,
+	// an answer still being written (the app was closed on it and a new question came) is not
+	// history yet; a box whose schema has no state column yet reads the old way
+	rows, err := db.Query(`SELECT role, content FROM chat_messages WHERE chat_id = $1 AND state <> 'writing' ORDER BY id DESC LIMIT $2`,
 		strconv.FormatInt(chatID, 10), strconv.Itoa(historyMaxMsgs))
+	if err != nil {
+		rows, err = db.Query(`SELECT role, content FROM chat_messages WHERE chat_id = $1 ORDER BY id DESC LIMIT $2`,
+			strconv.FormatInt(chatID, 10), strconv.Itoa(historyMaxMsgs))
+	}
 	if err != nil {
 		slog.Warn("chat history load failed, answering without it", "fn", "chatHistory", "err", err)
 		return nil
@@ -219,6 +225,24 @@ func main() {
 	// model, in one short call (websmart.go). The phone asks before it searches; on any failure
 	// it plans by itself as before. {"ok":false} is an honest "plan it yourself".
 	planClient := oracle.NewClient(runDir, 25*time.Second)
+	// STOP in the app: the answer being written for this chat ends here (answers.go); what was
+	// written is kept, marked stopped. Closing the app does not stop an answer, this does.
+	streamMux.HandleFunc("/chat/stop", func(w http.ResponseWriter, r *http.Request) {
+		var q struct {
+			ChatID int64 `json:"chatId"`
+		}
+		if r.Method != http.MethodPost || json.NewDecoder(r.Body).Decode(&q) != nil || q.ChatID <= 0 {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		stopped := stopAnswer(q.ChatID)
+		lg.Info("answer stopped by the person", "fn", "chatStop", "chat", q.ChatID, "wasRunning", stopped)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "stopped": stopped})
+	})
+	if runDir != "" {
+		go settleOrphans(filepath.Dir(runDir)) // answers a previous synthd left mid-sentence
+	}
 	streamMux.HandleFunc("/plan", func(w http.ResponseWriter, r *http.Request) {
 		var q struct {
 			Prompt  string     `json:"prompt"`
@@ -369,10 +393,45 @@ func main() {
 			block += wb
 		}
 		if block != "" {
-			input = block + "\n\nUsing the context above only where it is actually relevant (say which source when you use one), answer:\n" + q.Prompt
+			ask := "answer:"
+			if len(history) > 0 {
+				// the web findings are loud; the conversation is what says what a short follow-up
+				// ("how about now?") is asking, so it is named here, with the need when there is one
+				ask = "answer the next message of the conversation above, read as its next turn (a short one repeats or adjusts the last question)"
+				if n := strings.TrimSpace(q.Need); n != "" {
+					ask += "; what it asks for: " + clip(n, 300)
+				}
+				ask += ":"
+			}
+			input = block + "\n\nUsing the context above only where it is actually relevant (say which source when you use one), " + ask + "\n" + q.Prompt
 		}
+		// Persist the question FIRST (incognito conversations never touch the tables), then the
+		// answer's row, so the answer is the box's from here on (answers.go): the chat id goes to
+		// the phone in the first event, and the generation no longer dies with the connection.
+		chatID := q.ChatID
+		var saver *answerSaver
+		if !q.Incognito {
+			// BOUNDED: persistence is a feature, the stream is the product. A slow or wedged DB
+			// connect must not hold a person's question , 800ms and we stream without it (logged;
+			// that conversation just does not persist).
+			persisted := make(chan int64, 1)
+			go func() { persisted <- chatPersist(mount, chatID, "user", q.Prompt) }()
+			select {
+			case id := <-persisted:
+				chatID = id
+			case <-time.After(800 * time.Millisecond):
+				lg.Warn("chat persist slow, streaming without it", "fn", "chat")
+			}
+			if chatID != 0 {
+				if msgID := chatStartAnswer(mount, chatID, sourcesJSON(web)); msgID != 0 {
+					saver = newAnswerSaver(mount, chatID, msgID)
+				}
+			}
+		}
+		genCtx, endGen := answerContext(r.Context(), chatID, saver != nil)
+		defer endGen()
 		body, _ := json.Marshal(map[string]any{"prompt": input, "think": q.Think, "image": q.Image, "history": history})
-		req, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
+		req, err := http.NewRequestWithContext(genCtx, http.MethodPost,
 			"http://ghost/chat", bytes.NewReader(body))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -382,12 +441,18 @@ func main() {
 		resp, err := streamsock.Client("ghost.oracled", runDir).Do(req)
 		if err != nil {
 			lg.Warn("chat stream: oracled unreachable", "fn", "chat", "err", err)
+			if saver != nil {
+				saver.update("", "", "stopped")
+			}
 			http.Error(w, "model unavailable", http.StatusBadGateway)
 			return
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
 			lg.Warn("chat stream refused by oracled", "fn", "chat", "code", resp.StatusCode)
+			if saver != nil {
+				saver.update("", "", "stopped")
+			}
 			http.Error(w, "model unavailable", http.StatusBadGateway)
 			return
 		}
@@ -407,29 +472,17 @@ func main() {
 				ev["note"] = webNote
 			}
 		}
+		if chatID != 0 {
+			ev["chatId"] = chatID // at once: an app closed mid-answer reopens on this chat
+		}
 		ctxEv, _ := json.Marshal(ev)
 		_, _ = w.Write([]byte("data: " + string(ctxEv) + "\n\n"))
 		if fl != nil {
 			fl.Flush()
 		}
-		// Persist the question now (incognito conversations never touch the tables); accumulate the
-		// answer from the token events while piping them through, save on done , and rewrite the
-		// done event to carry the chatId so the app can keep the conversation in one row.
-		chatID := q.ChatID
-		if !q.Incognito {
-			// BOUNDED: persistence is a feature, the stream is the product. A slow or wedged DB
-			// connect must not hold a person's question , 800ms and we stream without it (logged;
-			// that conversation just does not persist).
-			persisted := make(chan int64, 1)
-			go func() { persisted <- chatPersist(mount, chatID, "user", q.Prompt) }()
-			select {
-			case id := <-persisted:
-				chatID = id
-			case <-time.After(800 * time.Millisecond):
-				lg.Warn("chat persist slow, streaming without it", "fn", "chat")
-			}
-		}
-		var answer strings.Builder
+		// Accumulate the answer and the thinking from the token events while piping them through;
+		// the saver keeps the row up with them, and the done event carries the chatId.
+		var answer, thinking strings.Builder
 		// REASONING SPLIT. This gemma reasons IN-BAND (prompt-injected think, no native
 		// reasoning_content channel), so its thinking arrives as ordinary answer tokens wrapped in
 		// a <think>...</think> block. The app's thinking toggle listens for {"r":...} events that
@@ -448,6 +501,7 @@ func main() {
 			key := "t"
 			if kind == "r" {
 				key = "r"
+				thinking.WriteString(text)
 			}
 			nb, _ := json.Marshal(map[string]string{key: text})
 			_, _ = w.Write([]byte("data: " + string(nb) + "\n"))
@@ -495,6 +549,15 @@ func main() {
 			}
 			return answerOut.String()
 		}
+		finished := false
+		var lastSave time.Time
+		defer func() {
+			// the stream ended without its done event: the model died, STOP was pressed, or the
+			// run hit its bound; what was written stays, marked as stopped
+			if !finished && saver != nil {
+				saver.update(answer.String(), thinking.String(), "stopped")
+			}
+		}()
 		sc := bufio.NewScanner(resp.Body)
 		sc.Buffer(make([]byte, 64<<10), 64<<10)
 		for sc.Scan() {
@@ -503,23 +566,34 @@ func main() {
 				payload := strings.TrimPrefix(line, "data: ")
 				var tok struct {
 					T    string `json:"t"`
+					R    string `json:"r"`
 					Done bool   `json:"done"`
 				}
 				if json.Unmarshal([]byte(payload), &tok) == nil {
+					if tok.R != "" {
+						thinking.WriteString(tok.R) // native reasoning events pass through as they are
+					}
 					if tok.T != "" {
 						// Split reasoning from answer; only the answer portion is persisted.
 						answer.WriteString(route(tok.T))
 						_ = sawThink
+						if saver != nil && time.Since(lastSave) > 500*time.Millisecond {
+							saver.update(answer.String(), thinking.String(), "")
+							lastSave = time.Now()
+						}
 						if !tok.Done {
 							continue // token already emitted (r or t) by route; skip the raw line
 						}
 					}
 					if tok.Done {
-						if !q.Incognito && chatID != 0 {
-							// Fire and forget , the done event must not wait on the DB. chatID != 0
-							// guard: if the user-message persist failed or timed out, appending the
-							// assistant alone would CREATE a chat titled by the answer , worse than
-							// losing one exchange.
+						finished = true
+						if saver != nil {
+							saver.update(answer.String(), thinking.String(), "done")
+							saver.wait(3 * time.Second) // the row is whole before the phone is told
+						} else if !q.Incognito && chatID != 0 {
+							// No row was started (it failed): save the answer the old way, once.
+							// chatID != 0 guard: appending the assistant alone would CREATE a chat
+							// titled by the answer , worse than losing one exchange.
 							cid := chatID
 							text := answer.String()
 							go func() { chatPersist(mount, cid, "assistant", text) }()

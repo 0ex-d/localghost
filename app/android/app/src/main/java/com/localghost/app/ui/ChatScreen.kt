@@ -88,19 +88,25 @@ fun ChatScreen(
                 color = Warning, style = MaterialTheme.typography.labelMedium,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp))
         }
+        if (incognito) {
+            Text("◉ incognito , this conversation is not saved anywhere",
+                color = Warning, style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp))
+        }
         if (messages.isEmpty()) {
             EmptyState(Modifier.weight(1f))
         } else {
             LazyColumn(
                 state = listState,
-                modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                item { Spacer(Modifier.height(8.dp)) }
+                item { Spacer(Modifier.height(4.dp)) }
                 itemsIndexed(messages) { i, m ->
                     MessageBubble(m, selectable = !(streaming && i == messages.lastIndex))
                 }
-                if (streaming) item {
+                // only until the answer's own status line takes over
+                if (streaming && messages.lastOrNull()?.role == Message.Role.USER) item {
                     Text("◇ retrieving from index…", color = TerminalDim,
                         style = MaterialTheme.typography.labelMedium)
                 }
@@ -135,42 +141,17 @@ fun ChatScreen(
         // Not sendable while a reply is streaming: the round button already morphs into STOP, but the
         // keyboard's IME send action goes through canSend too , without this it could fire a second
         // generation mid-stream, interleaving two replies into the transcript.
-        // Incognito: this conversation never touches the box's chat tables. The state is visible ,
-        // an invisible privacy mode you cannot verify is worse than none.
-        Row(Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
-            Text(if (incognito) "◉ INCOGNITO , not saved" else "○ incognito off , conversation saved on the box",
-                color = if (incognito) Warning else GhostTextDim,
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.clickable { onToggleIncognito() })
-        }
-        // Web: the PHONE looks the question up and hands the findings to the box, which itself
-        // never reaches the internet. Off by default; auto only for questions that look like they
-        // need the outside world; on for every question. Tap to cycle. Visible, like incognito ,
-        // a search that leaves the phone for a third party must never be a surprise.
-        run {
-            val wctx = androidx.compose.ui.platform.LocalContext.current
-            var web by remember { mutableStateOf(com.localghost.app.settings.AppSettings.webMode(wctx)) }
-            Row(Modifier.fillMaxWidth().padding(bottom = 6.dp)) {
-                Text(when (web) {
-                    "on" -> "◉ WEB on , this phone searches for every question (DuckDuckGo, and weather, rates and Wikipedia when asked) and hands the findings to the box"
-                    "auto" -> "◐ web auto , searched on this phone when a question needs the outside world: news, prices, weather, who is, how much"
-                    else -> "○ web off , the box answers from your archive alone"
-                }, color = if (web == "on") TerminalGreen else GhostTextDim,
-                    style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.clickable {
-                        web = when (web) { "off" -> "auto"; "auto" -> "on"; else -> "off" }
-                        com.localghost.app.settings.AppSettings.setWebMode(wctx, web)
-                    })
-            }
-        }
+        // Incognito and web are icons in the top bar (MainShell's TopBar): seen before typing, and
+        // out of the composer, where their two long lines took four lines of the screen. An
+        // incognito chat also says so above the conversation. What each means is in the GLOSSARY.
         val canSend = !streaming && (input.isNotBlank() || pendingAttachments.isNotEmpty())
         Column(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp)
-                .border(1.dp, GhostBorder, RoundedCornerShape(24.dp))
-                .background(VoidLighter, RoundedCornerShape(24.dp))
-                .padding(horizontal = 6.dp, vertical = 6.dp),
+            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)
+                .border(1.dp, GhostBorder, RoundedCornerShape(22.dp))
+                .background(VoidLighter, RoundedCornerShape(22.dp))
+                .padding(horizontal = 6.dp, vertical = 4.dp),
         ) {
-            // model pill, inside the composer
+            // the model pill; incognito and web are icons in the top bar
             ModelPill(brainLabel, brainIsBox, phoneModels, onPickBox, onPickPhoneModel, onGetModel)
 
             Row(verticalAlignment = Alignment.Bottom) {
@@ -182,7 +163,7 @@ fun ChatScreen(
 
                 BasicTextField(
                     value = input, onValueChange = { input = it },
-                    modifier = Modifier.weight(1f).padding(horizontal = 6.dp, vertical = 10.dp),
+                    modifier = Modifier.weight(1f).padding(horizontal = 6.dp, vertical = 8.dp),
                     textStyle = MaterialTheme.typography.bodyMedium.copy(color = GhostText),
                     cursorBrush = SolidColor(TerminalGreen),
                     maxLines = 5,
@@ -326,10 +307,13 @@ private fun MessageBubble(msg: Message, selectable: Boolean = true) {
         // No bubble around nothing: while the model is still reasoning the answer text is empty,
         // and an empty bordered box under the thinking row read as a rendering bug.
         if (msg.text.isNotEmpty()) {
-            Box(Modifier
-                .background(if (isUser) VoidLighter else Void)
-                .border(1.dp, if (isUser) GhostBorder else GhostBorder, RectangleShape)
-                .padding(12.dp)) {
+            // The answer runs the full width with no frame (the frame and its padding cost a fifth
+            // of every line); the question keeps a light box so the turns stay easy to tell apart.
+            Box(if (isUser) Modifier
+                .background(VoidLighter)
+                .border(1.dp, GhostBorder, RectangleShape)
+                .padding(horizontal = 10.dp, vertical = 8.dp)
+                else Modifier.padding(horizontal = 2.dp, vertical = 2.dp)) {
                 // GHOST replies render as markdown; the USER echo stays LITERAL. Selection wraps
                 // COMPLETED messages only: a SelectionContainer over a multi-Text tree recomposing
                 // per token inside a LazyColumn is exactly the fragile construct that blanked the
@@ -350,12 +334,19 @@ private fun MessageBubble(msg: Message, selectable: Boolean = true) {
             // LocalClipboardManager is deprecated in favour of the suspend-based LocalClipboard;
             // the replacement needs a coroutine per copy for no behavioural gain here, so the old
             // one stays, deliberately and visibly, until the copy path is reworked.
-            @Suppress("DEPRECATION")
-            val clipboard = LocalClipboardManager.current
-            Text("[ copy ]", color = TerminalDim, style = MaterialTheme.typography.labelMedium,
-                modifier = Modifier
-                    .padding(top = 2.dp)
-                    .clickable { clipboard.setText(AnnotatedString(msg.text)) })
+            if (msg.status.isNotEmpty()) {
+                // an answer the box is still writing (the app was closed on it), or one stopped
+                Text("› " + msg.status, color = TerminalDim, style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.padding(top = 2.dp))
+            }
+            if (!isUser) {
+                @Suppress("DEPRECATION")
+                val clipboard = LocalClipboardManager.current
+                Text("[ copy ]", color = TerminalDim, style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier
+                        .clickable { clipboard.setText(AnnotatedString(msg.text)) }
+                        .padding(top = 2.dp, bottom = 2.dp))
+            }
         }
     }
 }

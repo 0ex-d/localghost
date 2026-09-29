@@ -68,7 +68,8 @@ object AppSettings {
     /** Web search before a question goes to the box: "off", "auto" (when the question looks like
      *  it needs the outside world), "on" (every question). The PHONE searches; the box never does.
      *  Off by default: nothing leaves the phone for a third party unless the person says so. */
-    fun webMode(ctx: Context): String = prefs(ctx).getString("web_mode", "off") ?: "off"
+    // "auto" unless changed: the phone searches when a question needs the outside world
+    fun webMode(ctx: Context): String = prefs(ctx).getString("web_mode", "auto") ?: "auto"
     fun setWebMode(ctx: Context, m: String) = prefs(ctx).edit().putString("web_mode", m).apply()
 
     /** Which engine the phone searches with: "duckduckgo" (default, no key, scraped HTML) or
@@ -83,6 +84,13 @@ object AppSettings {
     /** The location trail: a position every quarter hour, kept on the phone and handed to the box
      *  when there is one. On by default once location is allowed; the switch is on the welcome
      *  screen and in settings, and the permission itself is the second switch. */
+    /** Keep map tiles on the phone ahead of time (Wi-Fi only, once a day); off by default. */
+    fun mapDownload(ctx: Context): Boolean = prefs(ctx).getBoolean("map_download", false)
+    fun setMapDownload(ctx: Context, on: Boolean) = prefs(ctx).edit().putBoolean("map_download", on).apply()
+    /** How much map the phone keeps, in MB (250, 500, 1000, 2000). */
+    fun mapBudgetMB(ctx: Context): Int = prefs(ctx).getInt("map_budget_mb", 500)
+    fun setMapBudgetMB(ctx: Context, mb: Int) = prefs(ctx).edit().putInt("map_budget_mb", mb).apply()
+
     fun locationTrail(ctx: Context): Boolean = prefs(ctx).getBoolean("location_trail", true)
     fun setLocationTrail(ctx: Context, on: Boolean) = prefs(ctx).edit().putBoolean("location_trail", on).apply()
 

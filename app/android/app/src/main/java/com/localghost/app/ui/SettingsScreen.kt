@@ -81,6 +81,43 @@ fun SettingsScreen(
             modifier = Modifier.clickable { onOpenMap() }.padding(vertical = 6.dp))
 
         Spacer(Modifier.height(24.dp))
+        SectionLabel("MAPS ON THIS PHONE")
+        Spacer(Modifier.height(8.dp))
+        // The map fetches tiles from the box as you look; ticked, the phone keeps them ahead of
+        // time (Wi-Fi only, once a day), streets around where you have been first.
+        var mapTick by remember { mutableIntStateOf(0) }
+        val mapsOn = remember(mapTick) { com.localghost.app.settings.AppSettings.mapDownload(ctx) }
+        val mapBudget = remember(mapTick) { com.localghost.app.settings.AppSettings.mapBudgetMB(ctx) }
+        val mapStatus = remember(mapTick) { com.localghost.app.local.MapPrefetch.statusLine(ctx) }
+        toggleRow(
+            label = "download maps",
+            sub = if (mapsOn) "on Wi-Fi, once a day: streets around where you have been, then the coast and main roads outwards · $mapStatus"
+                else "off , tiles come from the box as you look (slow the first time anywhere) · $mapStatus",
+            checked = mapsOn,
+            onChange = { on ->
+                com.localghost.app.settings.AppSettings.setMapDownload(ctx, on)
+                if (on) { com.localghost.app.local.MapPrefetch.schedule(ctx); com.localghost.app.local.MapPrefetch.runNow(ctx) }
+                else com.localghost.app.local.MapPrefetch.cancel(ctx)
+                mapTick++
+            },
+        )
+        if (mapsOn) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 4.dp)) {
+                Text("keep up to", color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+                listOf(250, 500, 1000, 2000).forEach { mb ->
+                    Text(if (mb >= 1000) "${mb / 1000} GB" else "$mb MB",
+                        color = if (mb == mapBudget) TerminalGreen else GhostTextDim,
+                        style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.clickable {
+                            com.localghost.app.settings.AppSettings.setMapBudgetMB(ctx, mb); mapTick++
+                        }.padding(horizontal = 8.dp, vertical = 6.dp))
+                }
+            }
+            Text("[ download now ]", color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.clickable { com.localghost.app.local.MapPrefetch.runNow(ctx); mapTick++ }.padding(vertical = 6.dp))
+        }
+
+        Spacer(Modifier.height(24.dp))
         SectionLabel("PHRASES")
         Spacer(Modifier.height(8.dp))
         // Off until the phone lands somewhere that is not home and the person says yes; this is the

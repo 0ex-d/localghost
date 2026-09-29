@@ -13,7 +13,7 @@ project("localghost_llm")
 # the build-env provenance records it, BuildConfig.LLAMA_CPP_COMMIT carries it. To set or move it:
 #     app/android/tools/pin_llama.sh          (reads the signed mirror manifest, writes the lines below)
 set(LLAMA_CPP_TARBALL "llama.cpp-v0.5.0-7fe450e.tar.gz" CACHE STRING "llama.cpp source tarball on the mirror")
-set(LLAMA_CPP_SHA256  "" CACHE STRING "its SHA-256 (the pin)")
+set(LLAMA_CPP_SHA256  "a6861d549427f814dc591c439e08206f67ffaba0248344d421589abf18199e67" CACHE STRING "its SHA-256 (the pin): the box's own verified copy, xyntai 30 Sep 2026")
 set(LLAMA_CPP_TAG     "v0.5.0" CACHE STRING "for humans")
 set(LLAMA_CPP_COMMIT  "7fe450e" CACHE STRING "for humans: the upstream commit the tarball was cut from")
 set(LG_MIRROR "https://www.localghost.ai/mirror" CACHE STRING "the LocalGhost mirror")
@@ -25,7 +25,12 @@ endif()
 
 # where the tarball comes from: a local copy, or the mirror path the manifest gives for this hash
 if(LLAMA_CPP_TARBALL_PATH)
-    set(LLAMA_URL "file://${LLAMA_CPP_TARBALL_PATH}")
+    # a plain local path, not a file:// URL: on Windows "file://C:/..." is not a path CMake reads;
+    # FetchContent takes a local file as it is. Backslashes become forward slashes first.
+    file(TO_CMAKE_PATH "${LLAMA_CPP_TARBALL_PATH}" LLAMA_URL)
+    if(NOT EXISTS "${LLAMA_URL}")
+        message(FATAL_ERROR "no llama.cpp tarball at ${LLAMA_URL} (-PllamaTarball / llamaTarball in local.properties)")
+    endif()
 else()
     set(_manifest "${CMAKE_BINARY_DIR}/mirror-MANIFEST.txt")
     file(DOWNLOAD "${LG_MIRROR}/MANIFEST.txt" "${_manifest}" STATUS _st TLS_VERIFY ON TIMEOUT 60)
@@ -61,11 +66,16 @@ set(LG_CPU_ARCH "armv8.2-a+dotprod+fp16" CACHE STRING "arm64 -march for the phon
 set(GGML_CPU_ARM_ARCH    "${LG_CPU_ARCH}" CACHE STRING "" FORCE)
 
 include(FetchContent)
+# Android's SDK builds with CMake 3.22.1, which has no DOWNLOAD_EXTRACT_TIMESTAMP (new in 3.24): given
+# anyway, 3.22 reads it as part of URL_HASH and refuses the hash. The policy says the same thing on
+# the CMakes that know it, and nothing on the ones that do not.
+if(POLICY CMP0135)
+    cmake_policy(SET CMP0135 NEW)
+endif()
 FetchContent_Declare(
     llama_cpp
     URL      "${LLAMA_URL}"
     URL_HASH SHA256=${LLAMA_CPP_SHA256}   # CMake refuses the source on any mismatch
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(llama_cpp)
 

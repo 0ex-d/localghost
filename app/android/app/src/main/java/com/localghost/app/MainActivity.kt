@@ -316,6 +316,7 @@ class MainActivity : ComponentActivity() {
         if (com.localghost.app.sync.LocationLog.active(this)) {
             com.localghost.app.sync.LocationLog.schedule(this)
         }
+        com.localghost.app.local.MapPrefetch.schedule(this) // only when "download maps" is ticked
 
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) { ForegroundPoller.run(this@MainActivity) }
@@ -548,10 +549,15 @@ class MainActivity : ComponentActivity() {
         val plan = planAnswer?.plan
         // in auto mode the model's "this needs nothing from outside" is final; "on" searches anyway
         if (plan != null && !plan.search && mode != "on") wantWeb = false
+        // Without the box's plan, a follow-up ("how about now?") borrows the question before it,
+        // so the phone does not search the three words as they stand.
+        val searchText = if (plan == null) com.localghost.app.net.FollowUp.standalone(text,
+            messages.filter { it.role == Message.Role.USER }.map { it.text }.dropLast(1)) else text
+        val ownNeed = if (plan == null && searchText != text) searchText else ""
         if (wantWeb) {
             status("searching the web on this phone" + (if (engine.brave) " (Brave)" else "") +
-                (plan?.need?.takeIf { it.isNotBlank() }?.let { " for: $it" } ?: "") + "…")
-            webHits = com.localghost.app.net.WebSearch.search(text, here, engine, plan?.first, plan?.need ?: "")
+                ((plan?.need?.takeIf { it.isNotBlank() } ?: ownNeed.takeIf { it.isNotBlank() })?.let { " for: $it" } ?: "") + "…")
+            webHits = com.localghost.app.net.WebSearch.search(searchText, here, engine, plan?.first, plan?.need ?: ownNeed)
             // WHO READS THE PAGES: the box on its GPU reads them in seconds and gets the
             // paragraphs; a box on its CPU (or one that did not answer the plan in time) gets the
             // phone's model's notes instead, checked against the pages, with a verbatim quote each.
@@ -561,7 +567,7 @@ class MainActivity : ComponentActivity() {
                 com.localghost.app.local.LocalModel.usable(this), com.localghost.app.local.LocalModel.Speed.promptTps(this),
                 com.localghost.app.local.LocalModel.Speed.genTps(this), pages, pageTokens)
             if (route == com.localghost.app.local.PhoneReader.Route.PHONE_READS) {
-                val need = plan?.need?.takeIf { it.isNotBlank() } ?: com.localghost.app.net.WebSearch.cleanQuery(text)
+                val need = plan?.need?.takeIf { it.isNotBlank() } ?: com.localghost.app.net.WebSearch.cleanQuery(searchText)
                 val read = com.localghost.app.local.PhoneReader.digest(this, need, webHits) { status(it) }
                 webHits = read.hits
                 status("${read.digested} of $pages pages read into notes on this phone in ${read.seconds.toInt()} s " +
@@ -581,7 +587,7 @@ class MainActivity : ComponentActivity() {
         while (true) {
             more = null
             BoxClient.chat(incognito = incognitoState, chatId = if (incognitoState) 0L else currentChatId, messages.toList(), text, activeConvId, atts, chatCaps, imageB64 = imageB64, web = web,
-                here = fix?.let { it.lat to it.lon }, need = plan?.need ?: "", round = round,
+                here = fix?.let { it.lat to it.lon }, need = plan?.need ?: ownNeed, round = round,
                 spare = if (round == 1) (plan?.spare ?: emptyList()) else emptyList()).collect { chunk ->
                 when (chunk) {
                     is BoxClient.ChatChunk.Memories -> mems = chunk.ids
@@ -634,7 +640,7 @@ class MainActivity : ComponentActivity() {
             val again = more
             if (again == null || round != 1 || !streaming) break
             // round two: the searches the box asked for, all of them, merged with the first round
-            val second = com.localghost.app.net.WebSearch.search(text, here, engine, again, plan?.need ?: "", runAll = true)
+            val second = com.localghost.app.net.WebSearch.search(searchText, here, engine, again, plan?.need ?: ownNeed, runAll = true)
             webHits = com.localghost.app.net.WebSearch.merge(webHits, second)
             web = if (webHits.isNotEmpty()) com.localghost.app.net.WebSearch.toJson(webHits) else null
             status("${second.size} more found , asking your box again…")
@@ -991,6 +997,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun stopChat() {
+        // STOP ends the answer on the box too: closing the app no longer does (the box writes it
+        // to the end and saves it), so this is the one way to cut it short
+        val cid = currentChatId
+        if (streaming && cid > 0) lifecycleScope.launch { BoxClient.chatStop(this@MainActivity, cid) }
+        writingJob?.cancel()
         chatJob?.cancel()
         streaming = false
     }
@@ -1167,13 +1178,40 @@ class MainActivity : ComponentActivity() {
                 android.util.Log.w("LocalGhost", "box chat $id failed to load"); return@launch
             }
             messages.clear()
-            msgs.asReversed().forEach { m ->
-                messages.add(Message(
-                    if (m.role == "user") Message.Role.USER else Message.Role.GHOST, m.content))
-            }
+            msgs.asReversed().forEach { m -> messages.add(boxMessage(m)) }
             currentChatId = id
             AppSettings.setLastChatId(this@MainActivity, id)
             incognitoState = false
+            // the app was closed while the box answered: it kept writing; follow it to the end
+            msgs.firstOrNull()?.takeIf { it.role != "user" && it.state == "writing" }?.let { watchWriting(id, it.id) }
+        }
+    }
+
+    /** A saved message as the chat shows it: the answer with its thinking, its sources, and a
+     *  line when it is still being written or was stopped. */
+    private fun boxMessage(m: BoxClient.BoxChatMsg): Message = if (m.role == "user") Message(Message.Role.USER, m.content)
+        else Message(Message.Role.GHOST, m.content, reasoning = m.reasoning, web = m.sources,
+            status = when {
+                m.state == "writing" -> "the box is still writing this answer…"
+                m.state == "stopped" && m.content.isBlank() -> "stopped before the first word"
+                else -> ""
+            }) .let { if (m.state == "stopped" && m.content.isNotBlank()) it.copy(text = m.content + "\n\n*(stopped)*") else it }
+
+    private var writingJob: kotlinx.coroutines.Job? = null
+
+    /** Polls the answer the box is still writing (every 1.5 s) and shows it growing, until it is
+     *  done, the chat changes, or a new question starts streaming. */
+    private fun watchWriting(chatId: Long, msgId: Long) {
+        writingJob?.cancel()
+        writingJob = lifecycleScope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(1_500)
+                if (currentChatId != chatId || streaming) return@launch
+                val newest = BoxClient.boxChatMessages(this@MainActivity, chatId, limit = 1)?.firstOrNull() ?: continue
+                if (newest.id != msgId) return@launch
+                if (messages.lastOrNull()?.role == Message.Role.GHOST) messages[messages.size - 1] = boxMessage(newest)
+                if (newest.state != "writing") return@launch
+            }
         }
     }
 

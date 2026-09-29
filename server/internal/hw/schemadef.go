@@ -170,6 +170,12 @@ var schemaRegistry = []SchemaTable{
 		{"role", "TEXT", true, ""},
 		{"content", "TEXT", true, ""},
 		{"ts", "BIGINT", true, ""},
+		// an answer's thinking, the web sources it drew on (JSON, [{n,title,url,kind,fetched}]),
+		// and whether it is still being written (writing | done | stopped): the box keeps writing
+		// an answer after the phone goes away, and a reopened chat shows it whole (synthd answers.go)
+		{"reasoning", "TEXT", true, "''"},
+		{"sources", "TEXT", true, "''"},
+		{"state", "TEXT", true, "'done'"},
 	}, Indexes: []string{
 		"CREATE INDEX IF NOT EXISTS chat_messages_chat ON chat_messages (chat_id, id)",
 	}},

@@ -203,3 +203,43 @@ func (s *Server) handleChatPlan(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = io.Copy(w, io.LimitReader(resp.Body, 64<<10))
 }
+
+// handleChatStop , POST /v1/chat/stop {chatId} → {ok, stopped}: STOP in the app. The box writes an
+// answer to the end even when the phone goes away (so closing the app loses nothing); this is
+// the one way to end one early. What was written stays in the chat, marked stopped.
+func (s *Server) handleChatStop(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodPost {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	var req struct {
+		ChatID int64 `json:"chatId"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil || req.ChatID <= 0 {
+		s.appearsDown(w)
+		return
+	}
+	body, _ := json.Marshal(map[string]any{"chatId": req.ChatID})
+	runDir := fmt.Sprintf("%s/mnt/slot%d/run", s.cfg.StateDir, mounted)
+	up, err := http.NewRequestWithContext(r.Context(), http.MethodPost, "http://ghost/chat/stop", bytes.NewReader(body))
+	if err != nil {
+		s.appearsDown(w)
+		return
+	}
+	up.Header.Set("Content-Type", "application/json")
+	resp, err := streamsock.Client("ghost.synthd", runDir).Do(up)
+	if err != nil {
+		s.appearsDown(w)
+		return
+	}
+	defer resp.Body.Close()
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = io.Copy(w, io.LimitReader(resp.Body, 4096))
+}

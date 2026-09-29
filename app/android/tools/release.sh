@@ -34,10 +34,13 @@ echo "  manifest committed, release commit: $COMMIT"
 
 echo "> 3/6  Writing release local.properties (SDK path + EMPTY box values)..."
 # Public release bakes in NO box URL/token — the app reads them from encrypted storage at setup.
+# LG_LLAMA_TARBALL: a local copy of the pinned llama.cpp tarball (else the build fetches it from
+# the mirror); the build checks it against the pin in app/src/main/cpp/CMakeLists.txt either way.
 cat > local.properties <<PROPS
 sdk.dir=$ANDROID_HOME
 NAS_BASE_URL=
 DEVICE_TOKEN=
+${LG_LLAMA_TARBALL:+llamaTarball=$LG_LLAMA_TARBALL}
 PROPS
 
 echo "> 4/6  Building release APK..."

@@ -36,6 +36,18 @@ private val GLOSSARY = listOf(
             "display. Every enrolled device therefore sees the same state.",
             "Your settings aren't stored on the phone. They live on the box, so all your " +
             "devices agree, and a new phone just picks up where you left off."),
+        Term("Chat: saved, incognito, web",
+            "The two icons in the chat's top bar (the hat and glasses, and the globe). \"saved\": the conversation is stored on the box " +
+            "(questions, answers, the model's thinking and the web sources it used), and an answer keeps " +
+            "being written there if the app closes. \"incognito\": nothing is stored. Web: \"web off\" " +
+            "answers from your archive alone; \"web auto\" (the start) searches on the phone when a question needs " +
+            "the outside world (news, prices, weather, who is, how much); \"web on\" searches for every " +
+            "question. The phone searches (DuckDuckGo, or Brave with your key) and hands the findings to " +
+            "the box; the box itself never reaches the internet.",
+            "Tap the hat to switch to incognito, where the chat is not kept anywhere. Tap the globe to " +
+            "choose whether your phone looks things up online for the box: never, when it seems needed, " +
+            "or always. Closing the app no longer loses an answer: the box finishes it and it is there " +
+            "when you come back."),
         Term("On-phone model (offline)",
             "A small model your box serves to the phone, run locally via llama.cpp. Used only when the box is " +
             "unreachable, or when you force local mode. It has NO access to your life-index " +

@@ -23,7 +23,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.localghost.app.local.TransferRate
-import com.localghost.app.net.StageProgress
 import com.localghost.app.net.StageState
 import com.localghost.app.net.UnlockClock
 import com.localghost.app.net.UnlockClockStore
@@ -75,7 +74,7 @@ fun UnlockProgress(snapshot: UnlockSnapshot, modifier: Modifier = Modifier) {
         ProgressBar(est.fraction, failed = snapshot.failed != null)
         Spacer(Modifier.height(16.dp))
 
-        snapshot.stages.forEach { row -> StepLine(row, est, snapshot) }
+        StepLine(snapshot, est)
 
         snapshot.failed?.let {
             Spacer(Modifier.height(10.dp))
@@ -102,35 +101,30 @@ private fun ProgressBar(fraction: Float, failed: Boolean) {
     }
 }
 
+/** One line: "step 4 of 7 · starting database" and that step's time so far (the model's own
+ *  percent while it loads). The list of every step was one too many things to read. */
 @Composable
-private fun StepLine(row: StageProgress, est: UnlockEstimate, snap: UnlockSnapshot) {
-    val (mark, color) = when (row.state) {
-        StageState.PENDING -> "  " to GhostTextDim
-        StageState.RUNNING -> "> " to TerminalGreen
-        StageState.SKIPPED -> "- " to GhostTextDim // already warm: nothing to do
-        StageState.COMPLETE -> "✓ " to TerminalGreen
-        StageState.ERRORED -> "! " to Warning
+private fun StepLine(snap: UnlockSnapshot, est: UnlockEstimate) {
+    // the last stage (ready / locked) is the arrival, not a step to wait through
+    val steps = snap.stages.dropLast(1)
+    val cur = est.current
+    val idx = steps.indexOfFirst { it.stage == cur }
+    val failedAt = snap.stages.firstOrNull { it.state == StageState.ERRORED }?.stage
+    val text = when {
+        failedAt != null -> "stopped at step ${steps.indexOfFirst { it.stage == failedAt } + 1} of ${steps.size} · ${failedAt.label}"
+        snap.done || cur == null || idx < 0 -> "all ${steps.size} steps done"
+        else -> "step ${idx + 1} of ${steps.size} · ${cur.label}"
     }
     // the running step breathes, so a long one still looks alive
-    val pulse = if (row.state == StageState.RUNNING) {
-        val t = rememberInfiniteTransition(label = "step")
-        t.animateFloat(0.45f, 1f, infiniteRepeatable(tween(700), RepeatMode.Reverse), label = "pulse").value
-    } else 1f
-    val took = est.took[row.stage]
-    val right = when (row.state) {
-        StageState.SKIPPED -> "ready"
-        StageState.COMPLETE -> took?.let { dur(it) } ?: ""
-        StageState.RUNNING -> {
-            val pct = snap.model?.pct?.takeIf { row.stage == UnlockStage.MODEL && it in 1..99 }
-            listOfNotNull(pct?.let { "$it%" }, took?.let { dur(it) }).joinToString("  ")
-        }
-        else -> ""
-    }
+    val t = rememberInfiniteTransition(label = "step")
+    val pulse = if (!snap.done && failedAt == null) t.animateFloat(0.55f, 1f, infiniteRepeatable(tween(700), RepeatMode.Reverse), label = "pulse").value else 1f
+    val took = cur?.let { est.took[it] }
+    val pct = snap.model?.pct?.takeIf { cur == UnlockStage.MODEL && it in 1..99 }
+    val right = if (snap.done || failedAt != null) "" else listOfNotNull(pct?.let { "$it%" }, took?.let { dur(it) }).joinToString("  ")
     Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(mark + row.stage.label, color = color, fontFamily = FontFamily.Monospace,
+        Text(text, color = if (failedAt != null) Warning else TerminalGreen, fontFamily = FontFamily.Monospace,
             style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f).alpha(pulse))
-        Text(right, color = if (row.state == StageState.RUNNING) TerminalGreen else TerminalDim,
-            fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.labelMedium)
+        Text(right, color = TerminalDim, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.labelMedium)
     }
 }
 

@@ -2707,3 +2707,169 @@ not be set from here: it is the SHA-256 of the mirror's tarball, which this sand
 
 Tested against a fake box directory: it pins, and it refuses a tampered tarball. The native build
 itself needs the Android NDK on the build machine.
+
+## "How about now?" searched as it stood: the model was called "on the CPU" (oracled, synthd, app)
+
+After a BTC price question, "how about now?" came back with a Drake song. The box's model plans
+every web search: it reads the last turns and says what is needed, so "how about now?" becomes the
+BTC price. But synthd refuses to plan when oracled says the model is on the CPU (a plan there takes
+a minute), and oracled said so. The mirror's llama.cpp (v0.5.0) prints none of the startup lines
+oracled read the GPU from, so a model running at 52 tokens/s on the 4070 was reported
+"on the CPU". The phone then planned alone and searched the three words.
+
+The same wrong verdict had two other effects:
+- searchd stretched caption deadlines to CPU speed;
+- the phone read pages itself, as if the box were slow.
+
+- **oracled asks the driver** when the log says nothing: `nvidia-smi --query-compute-apps`, bounded
+  at 5 s. If the child's pid holds GPU memory, the model is on the GPU (`gpuproc.go`). A log that
+  did speak (0 layers offloaded) is not overridden. Tested with a stand-in nvidia-smi.
+- **The phone's own plan reads follow-ups** (`FollowUp.standalone`), for when the box cannot plan.
+  A short follow-up ("how about now?", "and in euros?", "what about ethereum?") borrows the previous
+  question plus what the new one adds. A new question stands as it is. 3 JUnit cases.
+- **The answer prompt names the follow-up.** When there is history, the model is asked to answer
+  "the next message of the conversation above, read as its next turn", with the need when there is
+  one, so web findings about the literal words do not outweigh the conversation.
+
+## An answer survives closing the app; its thinking and sources are saved (synthd, hw, secd, app)
+
+The answer was generated on the phone's connection and saved only at its end. Closing the app, or
+the phone locking it, stopped the model mid-sentence and saved nothing. Also, only the answer's
+text was ever saved, never the thinking or the web sources.
+
+- **`chat_messages` has three new columns:** `reasoning`, `sources` (JSON
+  `[{n,title,url,kind,fetched}]`) and `state` (`writing` | `done` | `stopped`). They come from the
+  schema registry, so a box gains them at its next unlock.
+- **synthd (`answers.go`).**
+  - It saves the question first and starts the answer's row (`writing`, with the sources) before the
+    first word. It sends the chat id in the first event, so a new chat is found again.
+  - It updates the row every 2 s while the model writes, and marks it `done` before the phone is
+    told.
+  - The generation runs on the box's own clock (at most 15 minutes), not the phone's connection.
+    Incognito still ends with the connection, since nothing is saved.
+  - A stream that ends early is kept as `stopped`. A synthd restart settles answers left `writing`.
+    A newer question in the same chat supersedes an older answer still running.
+  - History for the next question leaves out an answer still being written.
+- **STOP** (`POST /v1/chat/stop {chatId}` → synthd `/chat/stop`) is now the one way to end an answer
+  early. The app's STOP button calls it.
+- **`/v1/chats/messages`** returns `reasoning`, `sources` and `state` (only when not `done`).
+- **App.**
+  - A reopened chat shows each answer's thinking toggle and its numbered sources.
+  - An answer still `writing` shows "the box is still writing this answer…" and grows as the app
+    polls it every 1.5 s until it is done.
+  - The chat id is taken from the first event.
+
+Tested with Postgres 16:
+- `TestAnswerIsSavedWhileItIsWritten`: row started, partial saved, done with thinking, history
+  skipping the writing row, orphans settled.
+- `TestChatMessagesCarryThinkingSourcesAndState`.
+- `TestAnswerOutlivesThePhoneButNotStop` (race detector): the connection ending does not stop a
+  saved chat's answer; STOP does; incognito ends; supersede.
+- The SQL prepare check now covers 266 statements.
+
+Not tested: the whole stream end to end with a real model, and the app's polling on a phone.
+
+## More room for the chat's text (app)
+
+- Answers run the full width with no frame. Questions keep a light box with less padding.
+- The list's side margins went from 16 to 10 dp and the gap between messages from 12 to 8 dp.
+- The incognito and web lines (four lines of the screen) are now two short toggles on the model
+  pill's row inside the composer ("○ saved", "◉ web" / "◐ web auto" / "○ web off"). What they mean
+  is in the GLOSSARY ("Chat: saved, incognito, web").
+- The composer is tighter, "[ copy ]" is smaller and only under answers, and "retrieving from
+  index…" shows only until the answer's own status line takes over.
+
+## The phone's llama.cpp from a Windows build machine (app)
+
+- `CMakeLists.txt` takes the tarball as a plain local path (via `file(TO_CMAKE_PATH)`), not a
+  `file://` URL, which Windows paths break. A missing file now says so. Checked with CMake 3.28 and
+  a local tarball.
+- `build.gradle.kts` also reads `llamaTarball=` from `local.properties`, so the Windows machine
+  names its copied tarball once.
+- The order is: `-PllamaTarball`, then local.properties, then the box's kept copy, then the mirror.
+
+## Maps on the phone ahead of time, on Wi-Fi (app)
+
+The map fetches tiles from the box as you look: fast where you have been, slow the first time
+anywhere else. There is now a SETTINGS › MAPS ON THIS PHONE section:
+- **"download maps"** (off by default) turns it on;
+- **"keep up to"** 250 MB / 500 MB / 1 GB / 2 GB (500 MB by default);
+- **"[ download now ]"** starts a run;
+- a status line such as "312 MB of map on this phone · done 2 h ago: everything near you is here".
+
+- **`MapPrefetchWorker`.** It runs once a day, only on an unmetered network (Wi-Fi or ethernet,
+  never mobile data), and not on a low battery. It fetches:
+  - the world outlines (`/v1/geo/world`, 50m, 110m) and the coast and road indexes, all
+    ETag-checked;
+  - tiles in `MapPlan` order until the picked size is reached.
+
+  Tiles already on the phone are skipped, so each run carries on from the last. A run ends itself
+  after 8 minutes (under WorkManager's 10) and asks to run again in a minute when there is more.
+  Five failures in a row (the box locked, say) end it until the next day.
+- **`MapPlan` (pure).**
+  - The places come from the phone's recent fixes: the busiest tenth-of-a-degree cells, up to 3.
+  - First, every street tile within 25 km of each place, nearest first.
+  - Then the coast tiles and the major-road tiles together, nearest first from the main place,
+    so a small size covers home and its region and a bigger one reaches further.
+  - With no location on the phone yet, it fetches the outlines only and says so.
+- **The tile caches keep what was downloaded.** They trim at the picked size plus 50 MB when
+  downloads are on, instead of the fixed 200 MB (coast) and 400 MB (roads).
+
+Tested: 3 `MapPlanTest` cases:
+- streets around home first, then London's roads, Dover's coast, Paris and New York in distance
+  order, with inland cells skipped and streets beyond the radius left out;
+- the busiest places first;
+- distance.
+
+The worker itself is structure-checked only.
+
+## Chat: incognito and web as icons in the top bar; web starts on auto (app)
+
+- The chat's top bar has two icons before ＋, each with a small word under it:
+  - **a hat and glasses** for incognito ("saved", or "incognito" in amber);
+  - **a globe** for web ("web auto", "web on" or "web off"). Tapping it cycles auto → on → off.
+- The composer keeps only the model pill.
+- An incognito chat also shows "◉ incognito , this conversation is not saved anywhere" above the
+  conversation.
+- Web now starts on "auto" (it was "off"); a phone that already chose keeps its choice. Incognito
+  starts off, as before.
+- The icons are two new vector drawables (`ic_incognito`, `ic_web`), tinted by the app.
+
+## The unlock: one line, not the list; the keypad goes once the code is in (app)
+
+- The steps list is gone. One line says "step 4 of 7 · starting database", with that step's time
+  (and the model's percent while it loads) on the right.
+- The percentage, time left, bar and tidbit line stay.
+- After OK, the PIN screen swaps the keypad for the unlock alone: the ghost, "UNLOCKING", the bar.
+  A wrong code (or any failure) brings the keypad back with the reason and where it stopped.
+
+## The phone's llama.cpp pin is set (app)
+
+`LLAMA_CPP_SHA256` = `a6861d549427f814dc591c439e08206f67ffaba0248344d421589abf18199e67`, the
+SHA-256 xyntai recorded in `/opt/localghost/llama.cpp/.mirror-sha256` when `setup_llama.sh`
+verified `llama.cpp-v0.5.0-7fe450e.tar.gz` against the signed manifest. So the phone builds from
+the same bytes as the box. With the pin set, every build compiles the phone model's runtime and
+needs the Android NDK. The tarball comes from `-PllamaTarball`, then `llamaTarball=` in
+local.properties, then the box's kept copy, then the mirror, and CMake refuses any file whose
+hash differs.
+
+## The phone build on Android's CMake 3.22.1 (app)
+
+The first Windows build found the tarball on the mirror through the manifest, then failed with
+"URL_HASH is set to SHA256=…;DOWNLOAD_EXTRACT_TIMESTAMP;TRUE but must be ALGO=value".
+`DOWNLOAD_EXTRACT_TIMESTAMP` is new in CMake 3.24, and the Android SDK builds with 3.22.1, which
+took the option as part of the hash. It was tested here on 3.28 only. The option is gone; policy
+CMP0135 (the same setting) is set when the CMake knows it.
+
+Checked on 3.28 against a stub tarball: the project configures with the right hash and refuses a
+wrong one ("SHA256 hash … does not match expected value").
+
+## The phone's JNI bridge against llama.cpp v0.5.0 (app)
+
+The Windows build compiled the whole of llama.cpp v0.5.0, then stopped on one line of
+`llama_jni.cpp`: "no member named 'use_mmap' in 'llama_model_params'". The same release dropped
+`--mlock` from llama-server. The bridge now sets `use_mmap` through an overload that exists only
+when the field does (`prefer_mmap`), and otherwise leaves loading to the library's default, so it
+builds on either side of that change. The trick was checked with a host compiler against a struct
+with the field and one without. That was the only error in the file; the rest of the bridge's
+calls compiled against v0.5.0.

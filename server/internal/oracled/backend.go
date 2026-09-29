@@ -202,6 +202,12 @@ func (b *llamaBackend) Start(ctx context.Context) error {
 		return err
 	}
 	b.info.load.ready()
+	// A log with nothing to say about the GPU (the mirror's v0.5.0): ask the driver instead.
+	if !b.info.get().OnGPU() && b.proc != nil {
+		if mib, ok := gpuMiBOfPID(b.proc.Pid); ok && mib > 0 {
+			b.info.seenOnGPU(mib)
+		}
+	}
 	// The verdict, once, where a person looks: on the GPU with how many layers and how much VRAM,
 	// or a warning naming why not. tools/gpu.sh and the Box Status drill-in read the same facts.
 	info := b.info.get()

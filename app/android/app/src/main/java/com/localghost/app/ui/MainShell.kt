@@ -170,7 +170,8 @@ fun MainShell(
                 .padding(top = pad.calculateTopPadding())
                 .padding(top = 4.dp)) {
                 TopBar(title = dest.label, onMenu = { open() },
-                    onNewChat = if (dest == Dest.CHAT) onNewConversation else null)
+                    onNewChat = if (dest == Dest.CHAT) onNewConversation else null,
+                    chatToggles = dest == Dest.CHAT, incognito = incognito, onToggleIncognito = onToggleIncognito)
 
                 PermissionBanner(permState, onPermAction)
                 PhraseOfferBanner(onOpen = { dest = Dest.PHRASES })
@@ -284,7 +285,10 @@ fun MainShell(
 }
 
 @Composable
-private fun TopBar(title: String, onMenu: () -> Unit, onNewChat: (() -> Unit)? = null) {
+private fun TopBar(
+    title: String, onMenu: () -> Unit, onNewChat: (() -> Unit)? = null,
+    chatToggles: Boolean = false, incognito: Boolean = false, onToggleIncognito: () -> Unit = {},
+) {
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 18.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -298,8 +302,37 @@ private fun TopBar(title: String, onMenu: () -> Unit, onNewChat: (() -> Unit)? =
             modifier = Modifier.size(22.dp).padding(end = 8.dp),
         )
         Text(title, color = GhostText, style = MaterialTheme.typography.titleMedium)
+        Spacer(Modifier.weight(1f))
+        if (chatToggles) {
+            // INCOGNITO and WEB, one icon each, up here where they are seen before typing. Incognito
+            // starts off (the chat is saved on the box) and turns amber when on; web starts on
+            // "auto" (searched on this phone when a question needs the outside world) and cycles
+            // auto → on (every question) → off. The word under the globe says which.
+            val wctx = androidx.compose.ui.platform.LocalContext.current
+            var web by remember { mutableStateOf(com.localghost.app.settings.AppSettings.webMode(wctx)) }
+            Column(horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.clickable { onToggleIncognito() }.padding(horizontal = 8.dp)) {
+                androidx.compose.material3.Icon(painterResource(R.drawable.ic_incognito),
+                    contentDescription = if (incognito) "Incognito on: not saved" else "Incognito off: saved on the box",
+                    tint = if (incognito) Warning else GhostTextDim, modifier = Modifier.size(22.dp))
+                Text(if (incognito) "incognito" else "saved", color = if (incognito) Warning else TerminalDim,
+                    style = MaterialTheme.typography.labelSmall)
+            }
+            Column(horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier.clickable {
+                    web = when (web) { "auto" -> "on"; "on" -> "off"; else -> "auto" }
+                    com.localghost.app.settings.AppSettings.setWebMode(wctx, web)
+                }.padding(horizontal = 8.dp)) {
+                androidx.compose.material3.Icon(painterResource(R.drawable.ic_web),
+                    contentDescription = "Web search: $web",
+                    tint = when (web) { "on" -> TerminalGreen; "auto" -> TerminalDim; else -> GhostBorder },
+                    modifier = Modifier.size(22.dp))
+                Text("web $web", color = if (web == "on") TerminalGreen else TerminalDim,
+                    style = MaterialTheme.typography.labelSmall)
+            }
+            Spacer(Modifier.width(8.dp))
+        }
         if (onNewChat != null) {
-            Spacer(Modifier.weight(1f))
             Text("＋", color = TerminalGreen, style = MaterialTheme.typography.titleLarge,
                 modifier = Modifier.clickable { onNewChat() })
         }

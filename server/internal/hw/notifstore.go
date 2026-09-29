@@ -334,6 +334,11 @@ type ChatMsg struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
 	TS      int64  `json:"ts"`
+	// Reasoning is the model's thinking beside an answer; Sources the web findings it drew on
+	// (JSON as synthd saved it); State "writing" while the box is still producing it.
+	Reasoning string          `json:"reasoning,omitempty"`
+	Sources   json.RawMessage `json:"sources,omitempty"`
+	State     string          `json:"state,omitempty"`
 }
 
 // ChatMessages returns up to limit messages for a chat, NEWEST first, strictly older than beforeID
@@ -350,9 +355,16 @@ func (s *NotifStore) ChatMessages(slot int, chatID int64, limit int, beforeID in
 		beforeID = 1 << 62
 	}
 	rows, err := c.Query(
-		`SELECT id, role, content, ts FROM chat_messages WHERE chat_id = $1 AND id < $2
+		`SELECT id, role, content, ts, reasoning, sources, state FROM chat_messages WHERE chat_id = $1 AND id < $2
 		 ORDER BY id DESC LIMIT `+strconv.Itoa(limit),
 		strconv.FormatInt(chatID, 10), strconv.FormatInt(beforeID, 10))
+	if err != nil {
+		// a volume whose schema has not gained the answer columns yet reads the old way
+		rows, err = c.Query(
+			`SELECT id, role, content, ts FROM chat_messages WHERE chat_id = $1 AND id < $2
+			 ORDER BY id DESC LIMIT `+strconv.Itoa(limit),
+			strconv.FormatInt(chatID, 10), strconv.FormatInt(beforeID, 10))
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -371,6 +383,17 @@ func (s *NotifStore) ChatMessages(slot int, chatID int64, limit int, beforeID in
 		}
 		if v[3] != nil {
 			m.TS, _ = strconv.ParseInt(*v[3], 10, 64)
+		}
+		if len(v) >= 7 {
+			if v[4] != nil {
+				m.Reasoning = *v[4]
+			}
+			if v[5] != nil && json.Valid([]byte(*v[5])) {
+				m.Sources = json.RawMessage(*v[5])
+			}
+			if v[6] != nil && *v[6] != "done" {
+				m.State = *v[6]
+			}
 		}
 		out = append(out, m)
 	}

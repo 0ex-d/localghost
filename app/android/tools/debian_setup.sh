@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# One-time setup on Debian 13 to build the LocalGhost APK headlessly (no Android Studio).
-# Installs JDK 17, the Android command-line tools, and the exact SDK packages this project uses.
+# One-time setup on Debian 13 / Ubuntu 24.04 to build the LocalGhost APK headlessly (no Android
+# Studio). Installs JDK 21, the Android command-line tools, and the exact SDK packages this project
+# uses: platforms 37 and 36, build-tools 36.0.0, platform-tools (adb), NDK 28.2.13676358 and
+# CMake 3.22.1 (the last two build the phone model's runtime). Writes ~/.localghost_android_env and,
+# when missing, local.properties with sdk.dir. See BUILDING.md.
 set -euo pipefail
 
 ANDROID_HOME="${ANDROID_HOME:-$HOME/android-sdk}"
@@ -37,11 +40,14 @@ echo "> Accepting licenses + installing SDK packages this project needs..."
 yes | sdkmanager --sdk_root="$ANDROID_HOME" --licenses >/dev/null
 # Note: API 37 installs as "platforms;android-37.0" (not android-37). compileSdk = release(37)
 # resolves against it. If a build ever fails "looking for android-37", that .0 naming is why.
+# The NDK and CMake versions are the ones app/build.gradle.kts pins (ndkVersion, cmake version).
 sdkmanager --sdk_root="$ANDROID_HOME" \
     "platform-tools" \
     "platforms;android-37.0" \
     "platforms;android-36" \
-    "build-tools;36.0.0"
+    "build-tools;36.0.0" \
+    "ndk;28.2.13676358" \
+    "cmake;3.22.1"
 
 # Persist env for future shells.
 PROFILE="$HOME/.localghost_android_env"
@@ -55,78 +61,27 @@ echo "Done. Add this to your shell rc (or 'source' it before building):"
 echo "    source $PROFILE"
 echo
 # --- llama.cpp (our only external native dependency) ---
-# Pinned by IMMUTABLE COMMIT (not just the tag) and verified after fetch. The pin lives only in
-# CMakeLists.txt (LLAMA_CPP_TAG + LLAMA_CPP_COMMIT). This step pre-clones at that commit so the
-# native build runs offline and the exact source is part of the deploy, verifies it, resolves the
-# full SHA for the tag if the pin still has the placeholder, and checks GitHub for a newer release.
-REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo .)"
-CMAKE="$REPO_ROOT/app/src/main/cpp/CMakeLists.txt"
-LLAMA_REPO="https://github.com/ggml-org/llama.cpp"
-LLAMA_DIR="$REPO_ROOT/.cache/llama.cpp"
-LLAMA_TAG="$(grep -oE 'LLAMA_CPP_TAG[^"]*"[^"]+"' "$CMAKE" 2>/dev/null | grep -oE '"[^"]+"$' | tr -d '"')"
-LLAMA_COMMIT="$(grep -oE 'LLAMA_CPP_COMMIT[^"]*"[^"]+"' "$CMAKE" 2>/dev/null | grep -oE '"[^"]+"$' | tr -d '"')"
-
-if [ -n "$LLAMA_TAG" ]; then
-    echo "> llama.cpp pinned at tag $LLAMA_TAG, commit ${LLAMA_COMMIT:0:12} ..."
-
-    # Resolve the full 40-char SHA the tag points to (so we can verify and, if needed, fill the pin).
-    RESOLVED="$(git ls-remote "$LLAMA_REPO" "refs/tags/$LLAMA_TAG^{}" 2>/dev/null | awk '{print $1}' | head -1)"
-    [ -z "$RESOLVED" ] && RESOLVED="$(git ls-remote "$LLAMA_REPO" "refs/tags/$LLAMA_TAG" 2>/dev/null | awk '{print $1}' | head -1)"
-
-    if echo "$LLAMA_COMMIT" | grep -q "REPLACE_WITH_FULL"; then
-        if [ -n "$RESOLVED" ]; then
-            echo "  [action needed] LLAMA_CPP_COMMIT is a placeholder. Tag $LLAMA_TAG resolves to:"
-            echo "      $RESOLVED"
-            echo "  Set LLAMA_CPP_COMMIT = \"$RESOLVED\" in $CMAKE, then re-run, so the build verifies it."
-        else
-            echo "  [!] could not resolve $LLAMA_TAG from GitHub to fill the commit pin (offline?)."
-        fi
-    elif [ -n "$RESOLVED" ] && [ "$RESOLVED" != "$LLAMA_COMMIT" ]; then
-        echo "  [!] WARNING: pinned commit does not match what tag $LLAMA_TAG resolves to now."
-        echo "      pinned:   $LLAMA_COMMIT"
-        echo "      tag now:  $RESOLVED"
-        echo "      The tag may have been re-pointed. NOT changing the pin; investigate before bumping."
-    fi
-
-    # Fetch the exact pinned commit (skip if still placeholder).
-    if ! echo "$LLAMA_COMMIT" | grep -q "REPLACE_WITH_FULL"; then
-        mkdir -p "$LLAMA_DIR"
-        if [ ! -d "$LLAMA_DIR/.git" ]; then
-            ( cd "$LLAMA_DIR" && git init -q && git remote add origin "$LLAMA_REPO.git" )
-        fi
-        ( cd "$LLAMA_DIR" \
-            && git fetch -q --depth 1 origin "$LLAMA_COMMIT" \
-            && git checkout -q "$LLAMA_COMMIT" ) \
-            || echo "  fetch of $LLAMA_COMMIT failed (check the pin / connectivity)"
-        # Verify what we checked out.
-        if [ -d "$LLAMA_DIR/.git" ]; then
-            GOT="$(cd "$LLAMA_DIR" && git rev-parse HEAD 2>/dev/null)"
-            if [ "$GOT" = "$LLAMA_COMMIT" ]; then
-                echo "  verified: llama.cpp at $LLAMA_COMMIT"
-            else
-                echo "  [!] MISMATCH: got $GOT, expected $LLAMA_COMMIT. Do not build."
-            fi
-        fi
-    fi
-
-    # Inform about a newer release (does NOT bump).
-    LATEST="$(curl -fsSL https://api.github.com/repos/ggml-org/llama.cpp/releases/latest 2>/dev/null \
-        | grep -oE '"tag_name"[^,]*' | grep -oE 'b[0-9]+' | head -1)"
-    STAMP="$REPO_ROOT/.cache/llama-version-check.txt"; mkdir -p "$REPO_ROOT/.cache"
-    if [ -n "$LATEST" ]; then
-        echo "pinned_tag=$LLAMA_TAG pinned_commit=$LLAMA_COMMIT latest_tag=$LATEST checked=$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STAMP"
-        if [ "$LATEST" != "$LLAMA_TAG" ]; then
-            echo "  [i] newer llama.cpp available: $LATEST (pinned: $LLAMA_TAG). To adopt, update both"
-            echo "      LLAMA_CPP_TAG and LLAMA_CPP_COMMIT in $CMAKE, rebuild, re-test the JNI."
-        else
-            echo "  up to date with upstream latest ($LATEST)."
-        fi
+# Not cloned: the phone builds from the same source tarball as the box, the one on the LocalGhost
+# mirror, pinned by SHA-256 in app/src/main/cpp/CMakeLists.txt. The build fetches it from the mirror
+# at configure time (or takes a local copy: llamaTarball= in local.properties) and refuses any file
+# whose hash differs. Nothing is fetched from GitHub.
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+CMAKE="$(ls "$REPO_ROOT"/app/src/main/cpp/CMakeLists.txt "$REPO_ROOT"/app/android/app/src/main/cpp/CMakeLists.txt 2>/dev/null | head -1)"
+if [ -n "$CMAKE" ]; then
+    TB="$(sed -n 's/^set(LLAMA_CPP_TARBALL *"\([^"]*\)".*/\1/p' "$CMAKE")"
+    SHA="$(sed -n 's/^set(LLAMA_CPP_SHA256 *"\([^"]*\)".*/\1/p' "$CMAKE")"
+    if [ -n "$SHA" ]; then
+        echo "> llama.cpp: $TB, SHA-256 $SHA (fetched from the mirror by the first build)"
     else
-        echo "  (could not reach GitHub for a version check; offline is fine)"
+        echo "> llama.cpp: no pin yet , the APK builds without the phone model (app/android/tools/pin_llama.sh sets it)"
     fi
-else
-    echo "> (could not read LLAMA_CPP_TAG from $CMAKE; skipping llama.cpp pre-fetch)"
+    # sdk.dir for Gradle, when nothing wrote local.properties yet (release.sh writes its own)
+    LP="$(dirname "$(dirname "$(dirname "$(dirname "$(dirname "$CMAKE")")")")")/local.properties"
+    if [ ! -f "$LP" ]; then
+        echo "sdk.dir=$ANDROID_HOME" > "$LP"
+        echo "> wrote $LP (sdk.dir=$ANDROID_HOME)"
+    fi
 fi
 
 echo ""
-echo "The build also needs a local.properties pointing at the SDK. The release script writes it."
+echo "Build: cd app/android && ./gradlew assembleDebug   (or installDebug with the phone on USB)"

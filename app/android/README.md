@@ -21,14 +21,17 @@ compiled from this exact source, by us, and signed with our key. See VERIFY.md.
 - `ghost/` , provenance: signed source manifest and build environment (which records the pinned llama.cpp tag).
 
 ## Build
-- Day to day: open in Android Studio on Windows, run to the device. See COMPILE.md.
+See BUILDING.md: what to install and how on Windows (Android Studio) and Linux (command line),
+releases, and fixes for the errors a build can hit.
+- Day to day: Android Studio on Windows, run to the device.
 - Releases: built on Debian (the same box as the website), signed, and published with hashes. See
-  COMPILE.md (release section) and VERIFY.md.
+  BUILDING.md and VERIFY.md.
 
 ## External dependencies
-One, on the native side: llama.cpp, pinned to an exact tag in `app/src/main/cpp/CMakeLists.txt` (`LLAMA_CPP_TAG`) and fetched at
-build time (no submodule). Everything else is AndroidX/Compose via the version catalog
-(`gradle/libs.versions.toml`).
+One, on the native side: llama.cpp. It comes as a source tarball from the LocalGhost mirror (the
+same one the box builds from), pinned by SHA-256 in `app/src/main/cpp/CMakeLists.txt`
+(`LLAMA_CPP_SHA256`), and is fetched at build time with no submodule and nothing from GitHub.
+Everything else is AndroidX/Compose via the version catalog (`gradle/libs.versions.toml`).
 
 ## Tests
 `./gradlew test` , JVM, no device. Two focused suites: the lock-on-background decision (AuthGate)

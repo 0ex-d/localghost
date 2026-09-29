@@ -14,8 +14,8 @@ data class Message(
     val memoriesUsed: List<String> = emptyList(),
     val attachments: List<Attachment> = emptyList(),
     // The model's REASONING, streamed live and kept after the answer. Rendered collapsed behind a
-    // "thinking…" toggle; not persisted by the box (chat history reloads with it empty, which is
-    // honest , the box stores the conversation, not the scratchpad).
+    // "thinking…" toggle. The box saves it with the answer (from 30 Sep 2026), so a reopened chat
+    // shows it too; older answers reload without it.
     val reasoning: String = "",
     // What the PHONE found on the web for this turn and handed to the box, numbered in the order
     // the box saw them, so a "[2]" in the answer is a link the person can open. Kept with the

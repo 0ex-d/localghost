@@ -28,7 +28,23 @@ fun PinScreen(busy: Boolean, error: String?, progress: UnlockSnapshot?, onSubmit
     fun submit() { if (pin.isNotEmpty() && !busy) { onSubmit(pin); pin = "" } }
 
     GhostScaffold { pad ->
-        Column(
+        // Once the code is in, the keypad goes and the screen is the unlock alone: the bar, step x
+        // of y, the time left. A wrong code comes back with the keypad and the error.
+        if (busy && progress != null && progress.failed == null) {
+            Column(
+                Modifier.fillMaxSize().padding(pad).padding(horizontal = 32.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                androidx.compose.foundation.Image(
+                    painter = painterResource(R.drawable.ic_ghost), contentDescription = null,
+                    modifier = Modifier.size(56.dp))
+                Spacer(Modifier.height(12.dp))
+                Text("UNLOCKING", color = GhostText, style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(28.dp))
+                UnlockProgress(progress, modifier = Modifier.widthIn(max = 360.dp))
+            }
+        } else Column(
             Modifier.fillMaxSize().padding(pad)
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 24.dp).padding(top = 24.dp, bottom = 24.dp),
@@ -61,9 +77,7 @@ fun PinScreen(busy: Boolean, error: String?, progress: UnlockSnapshot?, onSubmit
                 modifier = Modifier.fillMaxWidth().widthIn(max = 300.dp).height(52.dp))
 
             if (busy && progress != null) {
-                // Streamed unlock: the stage list (checking, unsealing, mounting, starting...) ticks
-                // through as the box reports progress. Hot fills instantly, cold ticks once a second.
-                // Identical view for any account.
+                // a failed unlock: the bar where it stopped, with the reason (the keypad is back)
                 Spacer(Modifier.height(24.dp))
                 UnlockProgress(progress, modifier = Modifier.widthIn(max = 300.dp))
             } else if (busy) {

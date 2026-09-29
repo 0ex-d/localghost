@@ -53,9 +53,16 @@ fun cmakeVar(name: String): String = if (llamaCmake.exists())
 val llamaSha: String = cmakeVar("LLAMA_CPP_SHA256")
 val llamaPin: String = cmakeVar("LLAMA_CPP_TAG") + "-" + cmakeVar("LLAMA_CPP_COMMIT")
 val buildPhoneModel = Regex("^[0-9a-f]{64}$").matches(llamaSha)
-// -PllamaTarball wins; otherwise, on the box itself, the copy setup_llama.sh verified and kept
-// (CMake checks it against the pin all the same), so a build there needs no network at all
+// Where the tarball comes from, first found: -PllamaTarball; llamaTarball= in local.properties (a
+// Windows build machine: copy the tarball over from the box once and name it there, forward
+// slashes, e.g. llamaTarball=C:/Users/you/llama.cpp-v0.5.0-7fe450e.tar.gz); on the box itself,
+// the copy setup_llama.sh verified and kept. CMake checks it against the pin whichever it is, so a
+// build needs no network at all. Nothing found: CMake fetches it from the mirror.
 val llamaTarball: String = (findProperty("llamaTarball") as String?).orEmpty().ifEmpty {
+    rootProject.file("local.properties").takeIf { it.isFile }?.let { f ->
+        Properties().apply { f.inputStream().use { load(it) } }.getProperty("llamaTarball")?.trim()
+    }.orEmpty()
+}.ifEmpty {
     file("/opt/localghost/llama.cpp.mirror-dl/" + cmakeVar("LLAMA_CPP_TARBALL"))
         .takeIf { buildPhoneModel && cmakeVar("LLAMA_CPP_TARBALL").isNotEmpty() && it.isFile }?.path.orEmpty()
 }
@@ -144,6 +151,10 @@ android {
         includeInBundle = false
     }
     buildToolsVersion = "36.0.0"
+    // The NDK that builds the phone model's runtime, pinned like build-tools so Windows and Linux
+    // build with the same compiler (the first Windows build of llama.cpp v0.5.0 used this one).
+    // Install it with the SDK Manager or: sdkmanager "ndk;28.2.13676358" (see BUILDING.md).
+    ndkVersion = "28.2.13676358"
 }
 dependencies {
     implementation("androidx.health.connect:connect-client:1.1.0-alpha07")
