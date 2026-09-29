@@ -30,7 +30,7 @@ BIN="$(jget llamaBin)"; BIN="${BIN:-$M/bin/llama-server}"
 MODEL="$(jget modelPath)"; MODEL="${MODEL:-$M/ai-models/gemma-4-12b-it-Q4_K_M.gguf}"
 MMPROJ="$(jget mmprojPath)"; MMPROJ="${MMPROJ:-$M/ai-models/mmproj-F16.gguf}"
 EXTRA=()
-while IFS= read -r x; do [ -n "$x" ] && [ "$x" != "--mlock" ] && EXTRA+=("$x"); done < <(
+while IFS= read -r x || [ -n "$x" ]; do [ -n "$x" ] && [ "$x" != "--mlock" ] && EXTRA+=("$x"); done < <(
     tr -d '\n' < "$CONF" | sed -n 's/.*"extraArgs"[[:space:]]*:[[:space:]]*\[\([^]]*\)\].*/\1/p' |
     tr ',' '\n' | sed 's/^[[:space:]]*"//; s/"[[:space:]]*$//')
 [ "$SMALL" = 1 ] && EXTRA+=(-c 8192 --parallel 1)
