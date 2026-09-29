@@ -2501,3 +2501,18 @@ the wait.
 
 Not done yet: the app side of the unlock screen (the bar, the time left, the tidbits). It waits
 until the box is stable again.
+
+## The cause, found: `--mlock`
+
+With the new oracled deployed, the health line said it straight away: "llama-server exited (exit
+status 1) before it was ready; it said: error: invalid argument: --mlock". The mirror's llama.cpp
+(v0.5.0) no longer accepts `--mlock`, and xyntai's `conf/ghost.oracled.conf` passed it in
+`extraArgs`. Run by hand without it, the same binary loaded the 12B and the projector in 8 s and
+served. Nothing else was wrong with the engine.
+
+- **Fix on the box:** take `"--mlock"` out of `extraArgs` and restart oracled.
+- **So an engine update can't do this again:** when llama-server dies on "invalid argument: X" and X
+  came from the conf's `extraArgs`, oracled drops X (and its value, when the next element is one)
+  and starts again at once. It logs a warning naming the flag and telling you to take it out of the
+  conf. oracled's own arguments are never dropped. Also, update.sh now keeps the previous engine and
+  puts it back when the model doesn't come up.

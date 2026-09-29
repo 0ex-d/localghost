@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -219,6 +220,40 @@ func (b *llamaBackend) waitHealthy(ctx context.Context, within time.Duration) er
 		time.Sleep(500 * time.Millisecond)
 	}
 	return fmt.Errorf("llama-server not healthy within %s (still running); its last lines: %s", within, b.info.Why())
+}
+
+// reInvalidArg: llama-server refusing an argument it does not know ("error: invalid argument: --mlock").
+var reInvalidArg = regexp.MustCompile(`invalid argument: (\S+)`)
+
+// DropRejectedArg: the child died on an argument it does not know, and that argument came from
+// the conf's extraArgs (tuning, not something oracled needs): it is dropped for the next start and
+// named. True when something was dropped, so the caller starts again at once. A llama.cpp update
+// that retires a flag (v0.5.0 no longer knows --mlock, 29 Sep 2026) then costs one failed start,
+// not a box without a model. oracled's own arguments are never dropped; conf/ghost.oracled.conf
+// keeps the flag until the person takes it out.
+func (b *llamaBackend) DropRejectedArg(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	m := reInvalidArg.FindStringSubmatch(err.Error())
+	if m == nil {
+		return "", false
+	}
+	flag := strings.TrimRight(m[1], ".,;:'\"")
+	for i, a := range b.cfg.ExtraArgs {
+		if a != flag {
+			continue
+		}
+		n := 1
+		// its value too, when the next element is one ("-fa on", "--cache-type-k q8_0")
+		if i+1 < len(b.cfg.ExtraArgs) && !strings.HasPrefix(b.cfg.ExtraArgs[i+1], "-") {
+			n = 2
+		}
+		dropped := strings.Join(b.cfg.ExtraArgs[i:i+n], " ")
+		b.cfg.ExtraArgs = append(append([]string(nil), b.cfg.ExtraArgs[:i]...), b.cfg.ExtraArgs[i+n:]...)
+		return dropped, true
+	}
+	return "", false
 }
 
 // llamaReadyWithin: how long a start may take before oracled gives up on it. A 12B from a cold

@@ -2,6 +2,7 @@ package oracled
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,5 +41,27 @@ func TestStartReportsAChildThatDies(t *testing.T) {
 	err = b.Start(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "out of memory") || strings.Contains(err.Error(), "--no-webui") {
 		t.Fatalf("second start: %v", err)
+	}
+}
+
+// A flag from conf that this llama.cpp no longer knows is dropped (with its value when it has
+// one), and the start goes on without it; oracled's own arguments are never touched.
+func TestDropRejectedArg(t *testing.T) {
+	b := NewLlamaBackend(LlamaConfig{ExtraArgs: []string{"--threads", "4", "-c", "65536", "--flash-attn", "on", "--mlock"}})
+	err := errors.New(`llama-server exited (exit status 1) before it was ready; it said: error: invalid argument: --mlock`)
+	if d, ok := b.DropRejectedArg(err); !ok || d != "--mlock" {
+		t.Fatalf("dropped %q %v", d, ok)
+	}
+	if got := strings.Join(b.cfg.ExtraArgs, " "); got != "--threads 4 -c 65536 --flash-attn on" {
+		t.Fatalf("left %q", got)
+	}
+	if d, ok := b.DropRejectedArg(errors.New("error: invalid argument: --flash-attn")); !ok || d != "--flash-attn on" {
+		t.Fatalf("with its value: %q %v", d, ok)
+	}
+	if _, ok := b.DropRejectedArg(errors.New("error: invalid argument: --no-webui")); ok {
+		t.Fatal("dropped an argument that was not from conf")
+	}
+	if _, ok := b.DropRejectedArg(errors.New("CUDA error: out of memory")); ok {
+		t.Fatal("dropped something on an error that names no argument")
 	}
 }

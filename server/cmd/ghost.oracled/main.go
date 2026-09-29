@@ -144,6 +144,12 @@ func main() {
 			if ctx.Err() != nil {
 				return
 			}
+			if dropped, ok := llama.DropRejectedArg(err); ok {
+				// a tuning flag from conf this llama.cpp does not know: without it, at once
+				lg.Warn("llama-server does not know a flag from conf/ghost.oracled.conf extraArgs , starting without it; take it out of the conf", "fn", "main", "dropped", dropped, "try", try+1)
+				try--
+				continue
+			}
 			wait := backoff[len(backoff)-1]
 			if try < len(backoff) {
 				wait = backoff[try]
