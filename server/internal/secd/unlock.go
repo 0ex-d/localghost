@@ -1,8 +1,10 @@
 package secd
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"sync"
@@ -33,6 +35,26 @@ type unlockService struct {
 	// joins it instead of starting another
 	running bool
 	runSum  [32]byte
+	// runID is a random name for this unlock, handed ONLY to the POST that carried the PIN. The
+	// session token goes only to a poll that presents it, once (repeated to that run for
+	// tokenWindow, so a lost answer can be asked again), never to anyone else. Before this, every
+	// poll after a finished unlock minted a fresh token for whoever asked, with no PIN: any enrolled
+	// device, or any process on the box itself through secd's loopback port.
+	runID  string
+	token  string
+	doneAt time.Time
+	// timesPath is where the last cold unlocks' step times are kept, on the encrypted volume
+	// (replay.go); "" keeps nothing and a warm unlock replays the built-in profile.
+	timesPath string
+}
+
+// tokenWindow: how long after a finished unlock its run may collect the session token.
+const tokenWindow = 2 * time.Minute
+
+func newRunID() string {
+	b := make([]byte, 24)
+	_, _ = rand.Read(b)
+	return base64.RawURLEncoding.EncodeToString(b)
 }
 
 // modelLoad is oracled's load progress as the unlock poll carries it.
@@ -111,6 +133,7 @@ func (u *unlockService) Lock(slot int) ([]map[string]any, error) {
 	u.failed = ""
 	u.openSlot = profile.NoSlot
 	u.model = nil
+	u.runID, u.token, u.doneAt = "", "", time.Time{}
 	u.mu.Unlock()
 	return steps, err
 }
@@ -143,15 +166,18 @@ func (s *Server) handleUnlockStart(w http.ResponseWriter, r *http.Request) {
 	// to wait, and is not tried.
 	if u.running {
 		same := subtle.ConstantTimeCompare(sum[:], u.runSum[:]) == 1
+		run := u.runID
 		u.mu.Unlock()
 		if same {
-			writeJSON(w, map[string]any{"started": true})
+			writeJSON(w, map[string]any{"started": true, "run": run})
 			return
 		}
 		writeErr(w, http.StatusConflict, "an unlock is already running")
 		return
 	}
 	u.running, u.runSum = true, sum
+	run := newRunID()
+	u.runID, u.token, u.doneAt = run, "", time.Time{}
 	// reset for a fresh unlock
 	u.progress = map[profile.Stage]profile.StepState{}
 	u.done = false
@@ -170,19 +196,47 @@ func (s *Server) handleUnlockStart(w http.ResponseWriter, r *http.Request) {
 		u.mu.Unlock()
 	}()
 
-	writeJSON(w, map[string]any{"started": true})
+	writeJSON(w, map[string]any{"started": true, "run": run})
 }
 
 // run walks the stages, marking each running then complete, with a short delay so a cold unlock
 // shows a real progression. The hot path (already mounted) would mark them Skipped instantly.
 func (u *unlockService) run(pin string) {
-	emit := func(p profile.Progress) {
+	t0 := time.Now()
+	publish := func(p profile.Progress) {
 		u.mu.Lock()
 		u.progress[p.Stage] = p.State
 		u.mu.Unlock()
 	}
+	// A WARM box (already mounted) answers in about a second, and a second says someone opened it
+	// recently. So a warm unlock does its real work out of sight and then shows one of this box's
+	// last eight cold unlocks, step by step, at its own pace (replay.go): the same steps completing
+	// (never "skipped"), the same length within 8%, the same polls on the wire. A cold unlock shows
+	// itself as it happens and is recorded for the next warm one. Whether the box is warm is a fact
+	// about the box, not the PIN, so it is read before the PIN is.
+	warm := u.backend != nil && u.backend.Warm(profile.MainSlot)
+	var shadow []profile.Progress
+	ends := map[profile.Stage]time.Duration{} // when each step finished, from t0 (cold: to record)
+	emit := func(p profile.Progress) {
+		if p.State == profile.Complete || p.State == profile.Skipped {
+			ends[p.Stage] = time.Since(t0)
+		}
+		if warm {
+			shadow = append(shadow, p)
+			return
+		}
+		publish(p)
+	}
+	if warm {
+		publish(profile.Progress{Stage: profile.StageResolve, State: profile.Running})
+	}
 	slot, err := runUnlock(u.backend, pin, emit)
 	if err != nil || slot == profile.NoSlot {
+		// a failure shows as it is, when it happens (a reject has already waited out the common
+		// reject time in runUnlock, warm or cold)
+		for _, p := range shadow {
+			publish(p)
+		}
 		u.mu.Lock()
 		u.failed = "unlock failed"
 		if err != nil && err != errReject {
@@ -191,95 +245,67 @@ func (u *unlockService) run(pin string) {
 		u.mu.Unlock()
 		return
 	}
-	// The MODEL stage BLOCKS done: the unlock screen holds on "loading model" until oracled reports
-	// the model live, so the box the app lands on is fully ready , chat answers on the first message
-	// instead of dead-airing while a 12B pages into VRAM. The costs are named: a cold unlock takes
-	// model-load time longer (tens of seconds on this hardware, bounded at 3 minutes), and the API
-	// gate opens that much later, so background frame uploads start after the load instead of during
-	// it. A warm unlock pays one health round trip , milliseconds. NEVER-ABORT still holds: a model
-	// that misses the ceiling marks the stage Errored and the unlock completes anyway , the box
-	// archives and serves, chat degraded, exactly as /v1/status will say.
-	// This runs OUTSIDE u.mu , the poll handler takes that lock every second to render progress.
-	u.waitModelReady(emit, 3*time.Minute)
-	// READY completes LAST, after MODEL resolves , runUnlock deliberately does not emit it (see the
-	// DAEMONS comment there). Whatever MODEL resolved to , loaded, or Errored past the ceiling , the
-	// box is now as ready as it is going to get, and done opens the gate.
-	emit(profile.Progress{Stage: profile.StageReady, State: profile.Complete})
+	if warm {
+		replayUnlock(t0, pickUnlockTimes(loadUnlockTimes(u.timesPath)), publish, time.Sleep)
+	} else if cold, ok := coldTimes(ends); ok {
+		saveUnlockTimes(u.timesPath, appendUnlockTimes(loadUnlockTimes(u.timesPath), cold))
+	}
+	// THE MODEL IS OFF THE UNLOCK (1 Oct 2026). It used to hold the unlock on "loading model" until
+	// oracled said ready, 10 to 30 s of a cold unlock. oracled starts loading the moment the cohort
+	// is up, and the app now asks /v1/model before a chat and says "loading the model" while it
+	// loads. MODEL is reported skipped, warm or cold, so the stream is the same either way.
+	publish(profile.Progress{Stage: profile.StageModel, State: profile.Skipped})
+	publish(profile.Progress{Stage: profile.StageReady, State: profile.Complete})
 	u.mu.Lock()
 	u.done = true
 	u.openSlot = slot
+	u.doneAt = time.Now()
 	u.mu.Unlock()
 }
 
-// waitModelReady polls oracled's health port until the model reports live (Code 0), the deadline
-// passes, or nothing answers. Emits the MODEL stage: Running while loading, Complete when live,
-// Errored past the deadline. Synchronous by design , see run().
-//
-// It also reads oracled's /load each second (phase, percent, time left, measured from llama-server's
-// own progress) for the app's bar, and uses it: while the percent keeps rising the wait is extended
-// a minute at a time (a cold 12B on a slow disk is not a broken one), up to ten minutes in all; a
-// load that has FAILED and not started again within 40 s ends the wait at once, and the unlock
-// completes without the model (oracled keeps retrying on its own).
-func (u *unlockService) waitModelReady(emit func(profile.Progress), within time.Duration) {
-	emit(profile.Progress{Stage: profile.StageModel, State: profile.Running})
-	start := time.Now()
-	deadline := start.Add(within)
-	hardCap := start.Add(10 * time.Minute)
-	client := &http.Client{Timeout: 2 * time.Second}
-	lastDetail := "no response from ghost.oracled"
-	lastPct := -1
-	var failedSince time.Time
-	for time.Now().Before(deadline) {
-		resp, err := client.Get(oracledHealthURL + "/health")
-		if err == nil {
-			var body struct {
-				Code   int    `json:"code"`
-				Detail string `json:"detail"`
-			}
-			derr := json.NewDecoder(resp.Body).Decode(&body)
-			_ = resp.Body.Close()
-			if derr == nil {
-				if body.Code == 0 {
-					u.mu.Lock()
-					u.model = &modelLoad{Phase: "ready", Pct: 100, ElapsedMs: time.Since(start).Milliseconds()}
-					u.mu.Unlock()
-					emit(profile.Progress{Stage: profile.StageModel, State: profile.Complete})
-					secdLog.Info("model ready", "fn", "waitModelReady", "waitedMs", time.Since(start).Milliseconds())
-					return
-				}
-				if body.Detail != "" {
-					lastDetail = body.Detail
-				}
-			}
-		}
-		if lp, ok := fetchModelLoad(client); ok {
-			u.mu.Lock()
-			u.model = &lp
-			u.mu.Unlock()
-			if lp.Pct > lastPct {
-				lastPct = lp.Pct
-				if ext := time.Now().Add(time.Minute); ext.After(deadline) {
-					deadline = ext
-					if deadline.After(hardCap) {
-						deadline = hardCap
-					}
-				}
-			}
-			if lp.Phase == "failed" {
-				if failedSince.IsZero() {
-					failedSince = time.Now()
-				} else if time.Since(failedSince) > 40*time.Second {
-					break
-				}
-			} else {
-				failedSince = time.Time{}
-			}
-		}
-		time.Sleep(1 * time.Second)
+// modelState is the box model's state for the app: ready, or loading with oracled's own progress
+// (phase, percent, time left), or not up yet. GET /v1/model; the app asks before a chat.
+type modelState struct {
+	Ready     bool   `json:"ready"`
+	Phase     string `json:"phase"`
+	Pct       int    `json:"pct"`
+	EtaMs     int64  `json:"etaMs"`
+	ElapsedMs int64  `json:"elapsedMs"`
+	Detail    string `json:"detail,omitempty"`
+}
+
+// modelStatus asks oracled's health port (code 0 = the model answers) and its /load.
+func modelStatus(c *http.Client) modelState {
+	st := modelState{Phase: "starting", Detail: "the model service is starting"}
+	resp, err := c.Get(oracledHealthURL + "/health")
+	if err != nil {
+		return st
 	}
-	secdLog.Warn("model did not become ready , unlock completes without it (box serves, chat degraded)",
-		"fn", "waitModelReady", "waited", time.Since(start).Round(time.Second).String(), "last", lastDetail)
-	emit(profile.Progress{Stage: profile.StageModel, State: profile.Errored})
+	var body struct {
+		Code   int    `json:"code"`
+		Detail string `json:"detail"`
+	}
+	derr := json.NewDecoder(resp.Body).Decode(&body)
+	_ = resp.Body.Close()
+	if derr == nil && body.Code == 0 {
+		return modelState{Ready: true, Phase: "ready", Pct: 100}
+	}
+	if derr == nil && body.Detail != "" {
+		st.Detail = body.Detail
+	}
+	if lp, ok := fetchModelLoad(c); ok {
+		st.Phase, st.Pct, st.EtaMs, st.ElapsedMs = lp.Phase, lp.Pct, lp.EtaMs, lp.ElapsedMs
+	}
+	return st
+}
+
+// handleModel , GET /v1/model , the box model's state (session required).
+func (s *Server) handleModel(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodGet {
+		s.appearsDown(w)
+		return
+	}
+	writeJSON(w, modelStatus(&http.Client{Timeout: 2 * time.Second}))
 }
 
 // oracledHealthURL is ghost.oracled's loopback health listener (its fixed health port).
@@ -326,17 +352,26 @@ func (s *Server) handleUnlockPoll(w http.ResponseWriter, r *http.Request) {
 	}
 	if u.done {
 		if u.failed == "" && u.openSlot >= 0 {
-			// correct PIN: reflect the mount and issue a FRESH session token for the app to carry.
+			// correct PIN: reflect the mount, and hand the session token to THIS run's poller only
 			s.mu.Lock()
 			s.mounted = u.openSlot
 			s.mu.Unlock()
-			if tok, err := s.session.Issue(); err == nil {
-				resp["token"] = tok
-				// Hand the app the expiry so it can persist the token and, as the 2-day window
-				// closes, show a "reopen to check notifications" state , the box cannot poll or
-				// notify a session it can no longer authenticate, so the app must prompt a re-unlock.
-				resp["expiresAt"] = s.session.ExpiresAt().UTC().Format(time.RFC3339)
-				resp["ttlSeconds"] = int(SessionTTL.Seconds())
+			run := r.URL.Query().Get("run")
+			mine := run != "" && u.runID != "" && subtle.ConstantTimeCompare([]byte(run), []byte(u.runID)) == 1
+			if mine && time.Since(u.doneAt) < tokenWindow {
+				if u.token == "" {
+					if tok, err := s.session.Issue(); err == nil {
+						u.token = tok
+					}
+				}
+				if u.token != "" && s.session.Valid(u.token) {
+					resp["token"] = u.token
+					// Hand the app the expiry so it can persist the token and, as the 2-day window
+					// closes, show a "reopen to check notifications" state , the box cannot poll or
+					// notify a session it can no longer authenticate, so the app must prompt a re-unlock.
+					resp["expiresAt"] = s.session.ExpiresAt().UTC().Format(time.RFC3339)
+					resp["ttlSeconds"] = int(SessionTTL.Seconds())
+				}
 			}
 		} else {
 			// wrong PIN (or failed unlock): revoke any live token, so the foreground AND the poller

@@ -329,7 +329,7 @@ func (p *Pipeline) processOne(path string) (string, error) {
 	case KindPhoto:
 		kindStr = "photo"
 		if cfgFmt == "jpeg" || cfgFmt == "png" || cfgFmt == "gif" {
-			prevPath, thumbPath = p.makePreviews(raw, hash, meta.Orientation)
+			prevPath, thumbPath = p.makePreviews(raw, archPath, hash, meta.Orientation)
 		} else {
 			p.log.Info("photo archived without preview (decoder does not handle this still format)",
 				"fn", "processOne", "hash", hash, "mime", sniff.MIME)
@@ -343,7 +343,7 @@ func (p *Pipeline) processOne(path string) (string, error) {
 		if jpg, gerr := p.grabVideoFrame(archPath); gerr != nil {
 			p.log.Info("video archived (no still preview)", "fn", "processOne", "hash", hash, "mime", sniff.MIME, "note", gerr.Error())
 		} else {
-			prevPath, thumbPath = p.makePreviews(jpg, hash, 1)
+			prevPath, thumbPath = p.makePreviews(jpg, "", hash, 1)
 		}
 	default:
 		p.log.Warn("archived unrecognised media type", "fn", "processOne", "hash", hash, "ext", ext)
@@ -397,15 +397,17 @@ func (p *Pipeline) processOne(path string) (string, error) {
 	return "", nil
 }
 
-// makePreviews decodes once and writes the 1600px preview and 320px thumb as JPEG q80.
-func (p *Pipeline) makePreviews(raw []byte, hash string, orientation int) (prev, thumb string) {
+// makePreviews decodes once and writes the 1600px preview and 320px thumb as JPEG q80. src is the
+// file on the volume the bytes came from ("" for a frame ffmpeg grabbed): a damaged original is
+// re-read from there, never from a copy in a temporary directory.
+func (p *Pipeline) makePreviews(raw []byte, src, hash string, orientation int) (prev, thumb string) {
 	img, _, err := image.Decode(bytes.NewReader(raw))
 	if err != nil {
 		// Go's decoder is strict: a JPEG with a damaged segment ("missing 0xff00 sequence", "bad
 		// Huffman code") is refused whole, though most of the picture is fine and every phone shows
 		// it. ffmpeg's decoder is tolerant: re-encode through it once (44 of 32,856 frames on the
 		// reference box had no preview, no caption and no place in the gallery for this).
-		if fixed, ferr := p.redecode(raw); ferr == nil {
+		if fixed, ferr := p.redecode(src); ferr == nil {
 			if img, _, err = image.Decode(bytes.NewReader(fixed)); err == nil {
 				p.log.Info("preview decoded through ffmpeg (damaged original)", "fn", "makePreviews", "hash", hash)
 			}
@@ -811,7 +813,7 @@ func (p *Pipeline) derive(path string, forcePreviews bool) (Frame, bool, error) 
 		prevPath, thumbPath = existing()
 		if forcePreviews || prevPath == "" || thumbPath == "" {
 			if raw, rerr := os.ReadFile(path); rerr == nil {
-				if pv, tv := p.makePreviews(raw, hash, meta.Orientation); pv != "" {
+				if pv, tv := p.makePreviews(raw, path, hash, meta.Orientation); pv != "" {
 					prevPath, thumbPath, previewed = pv, tv, true
 				}
 			} else {
@@ -823,7 +825,7 @@ func (p *Pipeline) derive(path string, forcePreviews bool) (Frame, bool, error) 
 		prevPath, thumbPath = existing()
 		if forcePreviews || prevPath == "" || thumbPath == "" {
 			if jpg, gerr := p.grabVideoFrame(path); gerr == nil {
-				if pv, tv := p.makePreviews(jpg, hash, 1); pv != "" {
+				if pv, tv := p.makePreviews(jpg, "", hash, 1); pv != "" {
 					prevPath, thumbPath, previewed = pv, tv, true
 				}
 			}
@@ -901,8 +903,12 @@ func (p *Pipeline) videoMeta(path string) exif.Meta {
 func (p *Pipeline) SetFFmpeg(bin, lib string) { p.ffmpegBin, p.ffmpegLib = bin, lib }
 
 // redecode re-encodes a still image ffmpeg can read but Go cannot (a damaged JPEG, a HEIC on a build
-// with the decoder) as a clean JPEG, or fails.
-func (p *Pipeline) redecode(raw []byte) ([]byte, error) {
+// with the decoder) as a clean JPEG, or fails. It reads the original where it lies on the encrypted
+// volume ([src]) and the JPEG comes back on a pipe: the picture is never copied anywhere else.
+func (p *Pipeline) redecode(src string) ([]byte, error) {
+	if src == "" {
+		return nil, fmt.Errorf("no original on the volume to re-read")
+	}
 	ff, env := p.ffmpegBin, []string(nil)
 	if ff != "" {
 		env = append(os.Environ(), "LD_LIBRARY_PATH="+p.ffmpegLib)
@@ -912,21 +918,11 @@ func (p *Pipeline) redecode(raw []byte) ([]byte, error) {
 			return nil, err
 		}
 	}
-	// Written to a file first: ffmpeg probes stdin by content and a damaged JPEG fails the probe
+	// A named file, not stdin: ffmpeg probes stdin by content and a damaged JPEG fails the probe
 	// ("Invalid data found when processing input"); named and told to ignore decode errors, it reads
-	// what is there. -f mjpeg names the demuxer for whatever the bytes are called.
-	tmp, err := os.CreateTemp("", "lg-redecode-*.jpg")
-	if err != nil {
-		return nil, err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(raw); err != nil {
-		tmp.Close()
-		return nil, err
-	}
-	tmp.Close()
+	// what is there. The name is the archived original's (hash.ext), already on the volume.
 	cmd := exec.Command(ff, "-hide_banner", "-loglevel", "error", "-err_detect", "ignore_err",
-		"-i", tmp.Name(), "-frames:v", "1", "-f", "image2", "-c:v", "mjpeg", "-q:v", "2", "pipe:1")
+		"-i", src, "-frames:v", "1", "-f", "image2", "-c:v", "mjpeg", "-q:v", "2", "pipe:1")
 	cmd.Env = env
 	cmd.WaitDelay = 5 * time.Second
 	out, err := cmd.Output()

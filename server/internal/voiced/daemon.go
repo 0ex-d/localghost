@@ -60,8 +60,54 @@ type Daemon struct {
 	Open  func() (DB, error) // lazily connects; the loop reconnects after a failure
 	Find  func(mount string) (Engine, string, bool)
 
-	mu   sync.Mutex
-	stat Stat
+	mu      sync.Mutex
+	stat    Stat
+	working string // the note whisper is on now
+}
+
+// State is what the phone is told beside each waiting note: why nothing is being transcribed, or
+// which note is being transcribed now. voiced rewrites it every 15 s at <mount>/voiced/state.json
+// and secd adds it to /v1/voice/notes. An old file means voiced is not running.
+type State struct {
+	Engine  string `json:"engine,omitempty"`
+	Why     string `json:"why,omitempty"`
+	Working string `json:"working,omitempty"`
+	Pending int    `json:"pending"`
+	At      int64  `json:"at"` // unix ms of the write
+}
+
+// StateFresh: how old the state file may be before voiced counts as not running.
+const StateFresh = 90 * time.Second
+
+// StatePath is the state file on the volume.
+func StatePath(mount string) string { return filepath.Join(mount, "voiced", "state.json") }
+
+// ReadState reads the state file; ok is false when there is none.
+func ReadState(mount string) (State, bool) {
+	var st State
+	b, err := os.ReadFile(StatePath(mount))
+	if err != nil || json.Unmarshal(b, &st) != nil {
+		return st, false
+	}
+	return st, true
+}
+
+func (d *Daemon) writeState() {
+	d.mu.Lock()
+	st := State{Engine: d.stat.Engine, Why: d.stat.Why, Working: d.working, Pending: d.stat.Pending, At: time.Now().UnixMilli()}
+	d.mu.Unlock()
+	b, _ := json.Marshal(st)
+	p := StatePath(d.Mount)
+	if err := os.WriteFile(p+".tmp", b, 0o640); err == nil {
+		_ = os.Rename(p+".tmp", p)
+	}
+}
+
+func (d *Daemon) setWorking(id string) {
+	d.mu.Lock()
+	d.working = id
+	d.mu.Unlock()
+	d.writeState()
 }
 
 func (d *Daemon) inbox() string    { return filepath.Join(d.Mount, "voiced", "inbox") }
@@ -96,6 +142,20 @@ func (d *Daemon) Run(ctx context.Context) {
 			_ = os.Remove(filepath.Join(d.work(), e.Name()))
 		}
 	}
+	// the state file is kept fresh on its own clock, so a long transcription does not look like a
+	// dead daemon to the phone
+	go func() {
+		st := time.NewTicker(15 * time.Second)
+		defer st.Stop()
+		for {
+			d.writeState()
+			select {
+			case <-ctx.Done():
+				return
+			case <-st.C:
+			}
+		}
+	}()
 	var db DB
 	t := time.NewTicker(15 * time.Second)
 	defer t.Stop()
@@ -292,6 +352,8 @@ func (d *Daemon) TranscribeNext(ctx context.Context, db DB, eng Engine) (did boo
 		return false, nil
 	}
 	id, rel := *rows.Vals[0][0], *rows.Vals[0][1]
+	d.setWorking(id)
+	defer d.setWorking("")
 	res, terr := d.transcribeFile(ctx, filepath.Join(d.Mount, rel), id, eng)
 	if terr != nil {
 		if ctx.Err() != nil {

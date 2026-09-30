@@ -317,29 +317,21 @@ func isWebP(path string) bool {
 	return string(h[0:4]) == "RIFF" && string(h[8:12]) == "WEBP"
 }
 
-// decodeWebP decodes through dwebp (the webp package) into a temporary PNG.
+// decodeWebP decodes through dwebp (the webp package), the PNG on a pipe ("-o -"): the picture is
+// read where it lies on the encrypted volume and never written anywhere else.
 func decodeWebP(path string) (image.Image, error) {
 	bin, err := exec.LookPath("dwebp")
 	if err != nil {
 		return nil, err
 	}
-	tmp, err := os.CreateTemp("", "lg-phash-*.png")
-	if err != nil {
-		return nil, err
-	}
-	tmp.Close()
-	defer os.Remove(tmp.Name())
-	cmd := exec.Command(bin, "-quiet", path, "-o", tmp.Name())
+	var out, errb bytes.Buffer
+	cmd := exec.Command(bin, "-quiet", path, "-o", "-")
+	cmd.Stdout, cmd.Stderr = &out, &errb
 	cmd.WaitDelay = 5 * time.Second
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("dwebp: %v %s", err, strings.TrimSpace(string(out)))
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("dwebp: %v %s", err, strings.TrimSpace(errb.String()))
 	}
-	f, err := os.Open(tmp.Name())
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	img, _, err := image.Decode(f)
+	img, _, err := image.Decode(&out)
 	return img, err
 }
 

@@ -31,6 +31,7 @@ import (
 
 	"github.com/LocalGhostDao/localghost/server/internal/ctlsock"
 	"github.com/LocalGhostDao/localghost/server/internal/ghosthealth"
+	"github.com/LocalGhostDao/localghost/server/internal/harden"
 	"github.com/LocalGhostDao/localghost/server/internal/hw"
 	"github.com/LocalGhostDao/localghost/server/internal/poltergres"
 	"github.com/LocalGhostDao/localghost/server/internal/rotlog"
@@ -41,6 +42,7 @@ import (
 const service = "ghost.voiced"
 
 func main() {
+	harden.NoDump() // same-user processes cannot read this one through /proc; no core file
 	port := flag.Int("health-port", envPort("GHOST_HEALTH_PORT"), "loopback health/status port (required)")
 	flag.Parse()
 	if *port <= 0 {

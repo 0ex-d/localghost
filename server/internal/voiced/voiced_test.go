@@ -230,3 +230,28 @@ func TestTranscribeWithFakeWhisper(t *testing.T) {
 		t.Fatalf("failure not reported with whisper's words: %v", err)
 	}
 }
+
+func TestStateFile(t *testing.T) {
+	mount := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(mount, "voiced"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := ReadState(mount); ok {
+		t.Fatal("a state with no file")
+	}
+	d := &Daemon{Mount: mount}
+	d.stat.Why = "no speech engine on this box"
+	d.stat.Pending = 1
+	d.setWorking("")
+	st, ok := ReadState(mount)
+	if !ok || st.Why != "no speech engine on this box" || st.Pending != 1 || st.Working != "" || time.Since(time.UnixMilli(st.At)) > time.Minute {
+		t.Fatalf("%+v %v", st, ok)
+	}
+	d.setWorking("0123456789abcdef0123456789abcdef")
+	if st, _ = ReadState(mount); st.Working != "0123456789abcdef0123456789abcdef" {
+		t.Fatalf("working %+v", st)
+	}
+	if _, err := os.Stat(StatePath(mount) + ".tmp"); err == nil {
+		t.Fatal("tmp file left behind")
+	}
+}

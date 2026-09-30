@@ -525,10 +525,19 @@ private fun VoiceRecorder(hint: String, saveLabel: String?, onSave: (VoiceCaptur
 /** A note's line under its check-in, or in the notes list: length, then the words or where it is. */
 private fun voiceStatus(v: BoxClient.VoiceNoteRow, onPhone: Boolean): String = when (v.status) {
     "done" -> v.transcript.ifBlank { "(nothing the box could hear)" }
-    "pending" -> "on the box, waiting to be transcribed"
+    "pending" -> pendingWhy(v.id, BoxClient.voiceQueue)
     "failed" -> "not transcribed: " + v.error.ifBlank { "the speech engine failed" }
     "missing" -> if (onPhone) "on the phone, waiting to reach the box" else "not on the box"
     else -> v.status
+}
+
+/** A waiting note's line, with the box's reason when it has one (an older box sends none). */
+internal fun pendingWhy(id: String, q: BoxClient.VoiceQueue?): String = when {
+    q == null -> "on the box, waiting to be transcribed"
+    q.working == id -> "on the box, being transcribed now"
+    !q.running -> "on the box, waiting: the box's voice service is not running"
+    q.why.isNotBlank() -> "on the box, waiting: " + q.why
+    else -> "on the box, in line to be transcribed"
 }
 
 /** One voice note: when, how long, what was said (tap to read it all), play, delete. */
@@ -593,22 +602,8 @@ private fun OtdYearCard(y: BoxClient.OtdYear) {
         }
         if (y.photos.isNotEmpty()) {
             Spacer(Modifier.height(8.dp))
-            androidx.compose.foundation.lazy.LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                items(y.photos, key = { it }) { hash ->
-                    var bmp by remember(hash) { mutableStateOf<android.graphics.Bitmap?>(null) }
-                    LaunchedEffect(hash) {
-                        bmp = BoxClient.frameThumb(ctx, hash)?.let {
-                            android.graphics.BitmapFactory.decodeByteArray(it, 0, it.size)
-                        }
-                    }
-                    bmp?.let {
-                        androidx.compose.foundation.Image(
-                            bitmap = it.asImageBitmap(),
-                            contentDescription = null,
-                            modifier = Modifier.size(84.dp).border(1.dp, GhostBorder, RectangleShape))
-                    } ?: Box(Modifier.size(84.dp).border(1.dp, GhostBorder, RectangleShape))
-                }
-            }
+            // a tap opens the day's photos as a slideshow, from the one tapped
+            ThumbStrip(y.photos, title = "${y.year}")
         }
         if (y.notes.isNotEmpty()) {
             Spacer(Modifier.height(6.dp))
@@ -696,22 +691,11 @@ private fun MemoryEditor(initTitle: String, initBody: String, onSave: (String, S
     }
 }
 
-/** The cover frames of an outing, thumbnails off /v1/frames/thumb, loaded as they scroll in. */
+/** The cover frames of an outing, thumbnails off /v1/frames/thumb, loaded as they scroll in; a
+ *  tap opens them as a slideshow (a video plays). */
 @Composable
 private fun CoverStrip(hashes: List<String>) {
-    val ctx = LocalContext.current
-    androidx.compose.foundation.lazy.LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        items(hashes, key = { it }) { hash ->
-            var bmp by remember(hash) { mutableStateOf<android.graphics.Bitmap?>(null) }
-            LaunchedEffect(hash) {
-                bmp = BoxClient.frameThumb(ctx, hash)?.let { android.graphics.BitmapFactory.decodeByteArray(it, 0, it.size) }
-            }
-            bmp?.let {
-                androidx.compose.foundation.Image(bitmap = it.asImageBitmap(), contentDescription = null,
-                    modifier = Modifier.size(84.dp).border(1.dp, GhostBorder, RectangleShape))
-            } ?: Box(Modifier.size(84.dp).border(1.dp, GhostBorder, RectangleShape))
-        }
-    }
+    ThumbStrip(hashes)
 }
 
 /** The taste: one sentence, then the likes by category with their share of photo days, then the

@@ -321,7 +321,7 @@ straight onto the unlocked volume (it fetches only what is missing, here the pol
 the cut takes a couple of GB of RAM for a few minutes beside whatever the model is using):
 
     sudo ./tools/ns.sh ./tools/fetch_geo.sh /var/lib/ghost/mnt/slot0/geo
-    sudo ./tools/ns.sh chown -R coder:coder /var/lib/ghost/mnt/slot0/landtiles /var/lib/ghost/mnt/slot0/geo
+    sudo ./tools/ns.sh chown -R coder:coder /var/lib/ghost/mnt/slot0/landtiles /var/lib/ghost/mnt/slot0/geo   # ghostd:ghostd after own_user.sh
 
 Without the mirror, on your own authority (this file is not checked against a signed manifest), fetch
 the shapefile and copy it in, then ask framed to cut it into one-degree tiles:
@@ -356,7 +356,7 @@ with `GHOST_MIRROR_UPSTREAM=1`.
 
     sudo GHOST_GEO_ROADS=europe-latest.osm.pbf ./tools/ns.sh ./tools/fetch_geo.sh /var/lib/ghost/mnt/slot0/geo   # one continent first
     sudo GHOST_GEO_ROADS=all ./tools/ns.sh ./tools/fetch_geo.sh /var/lib/ghost/mnt/slot0/geo                     # the eight continents
-    sudo ./tools/ns.sh chown -R coder:coder /var/lib/ghost/mnt/slot0/roadtiles /var/lib/ghost/mnt/slot0/geo
+    sudo ./tools/ns.sh chown -R coder:coder /var/lib/ghost/mnt/slot0/roadtiles /var/lib/ghost/mnt/slot0/geo   # ghostd:ghostd after own_user.sh
 
 The cut runs in the foreground of that script: hours for Europe, a day for the world is the honest
 guess (three passes over every byte, then a lookup per road vertex), 2 GB of RAM plus whatever page
@@ -422,6 +422,22 @@ spine in one tap.
 The lock test matters as much as the unlock: lock from the app, watch the spin-down mirror the mount
 tick-up, then confirm the box answers 503 to everything and a wrong PIN is indistinguishable from a
 dead box. That indistinguishability is the product.
+
+## 8b. A user of their own for the daemons , root, once, with the box locked
+
+The daemons run as the service user from step 1. When that is an account people log in as (coder
+here), anything else running as it (a shell, an editor, a website on the same machine) can read the
+decrypted volume through /proc/<daemon pid>/root. Give the daemons a system user nobody logs in as:
+
+    # lock from the app first (SETTINGS › LOCK BOX NOW)
+    sudo ./tools/own_user.sh            # makes ghostd, points ghost.secd at it, restarts secd
+    # unlock from the app: that one unlock hands the volume to ghostd (a few seconds more)
+    sudo journalctl -u ghost.secd | grep "volume handed to its own user"
+    sudo ./tools/privacy_check.sh       # "the cohort has a user of its own"
+
+The service user keeps building and deploying (redeploy.sh builds as it); it loses only the door.
+Undo: copy /etc/systemd/system/ghost.secd.service.before-own-user back, daemon-reload, restart,
+lock and unlock.
 
 ## Undo
 

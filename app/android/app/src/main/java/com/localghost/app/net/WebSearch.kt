@@ -663,7 +663,9 @@ object WebSearch {
         }
 
         fun weather(lat: Double, lon: Double, label: String): Hit? {
-            val url = "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f".format(java.util.Locale.US, lat, lon) +
+            // two decimals (about a kilometre): the forecast grid is coarser than that, and the
+            // phone's own fix at four (11 m) told Open-Meteo which house asked
+            val url = "https://api.open-meteo.com/v1/forecast?latitude=%.2f&longitude=%.2f".format(java.util.Locale.US, lat, lon) +
                 "&current=temperature_2m,apparent_temperature,relative_humidity_2m,precipitation,weather_code,wind_speed_10m" +
                 "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,sunrise,sunset" +
                 "&forecast_days=4&timezone=auto"

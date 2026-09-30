@@ -25,11 +25,13 @@ import (
 	"time"
 
 	"github.com/LocalGhostDao/localghost/server/internal/ctlsock"
+	"github.com/LocalGhostDao/localghost/server/internal/harden"
 	"github.com/LocalGhostDao/localghost/server/internal/secd"
 	"github.com/LocalGhostDao/localghost/server/internal/svcconf"
 )
 
 func main() {
+	harden.NoDump() // same-user processes cannot read this one through /proc; no core file
 	addr := flag.String("addr", "127.0.0.1:8443", "listen address (behind nginx, which terminates public TLS)")
 	stateDir := flag.String("state", "/var/lib/ghost", "unencrypted state dir (certs, models)")
 	disk := flag.String("disk", os.Getenv("GHOST_DISK"), "the raw LUKS data disk to mount on unlock (e.g. /dev/nvme1n1); defaults to $GHOST_DISK")

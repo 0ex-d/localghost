@@ -75,6 +75,8 @@ class MapPrefetchWorker(ctx: Context, params: WorkerParameters) : CoroutineWorke
             failedInARow = 0
             used += b.size
             fetched++
+            // SETTINGS shows this live while it runs
+            if (fetched % 10 == 0) MapPrefetch.note(ctx, "running", "$fetched tiles so far this run")
         }
         MapPrefetch.note(ctx, "done", if (used >= budget) "the size you picked is full" else "everything near you is here")
         return Result.success()
@@ -106,14 +108,22 @@ object MapPrefetch {
         WorkManager.getInstance(ctx).enqueueUniquePeriodicWork(PERIODIC, ExistingPeriodicWorkPolicy.KEEP, req)
     }
 
-    /** [ download now ]: one run as soon as the phone is on Wi-Fi. */
+    /**
+     * [ download now ]: a run now, on Wi-Fi. It used to be KEEP with the daily run's constraints,
+     * so a press did nothing while an earlier run sat waiting (a low battery, a backoff after a
+     * partial run) and nothing on screen said so. Now a press replaces whatever was waiting, asks
+     * only for Wi-Fi (the person asked for it, the battery is theirs to judge), and the status
+     * line says "queued" until it starts, then counts the tiles as they land.
+     */
     fun runNow(ctx: Context) {
         val req = OneTimeWorkRequestBuilder<MapPrefetchWorker>()
-            .setConstraints(constraints())
+            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.UNMETERED).build())
             .setBackoffCriteria(BackoffPolicy.LINEAR, 1, TimeUnit.MINUTES)
             .build()
-        WorkManager.getInstance(ctx).enqueueUniqueWork(NOW, ExistingWorkPolicy.KEEP, req)
+        WorkManager.getInstance(ctx).enqueueUniqueWork(NOW, ExistingWorkPolicy.REPLACE, req)
+        note(ctx, "queued", "starts on Wi-Fi")
     }
+
 
     fun cancel(ctx: Context) {
         WorkManager.getInstance(ctx).cancelUniqueWork(PERIODIC)

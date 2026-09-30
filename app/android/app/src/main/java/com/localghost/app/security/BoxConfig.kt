@@ -78,8 +78,14 @@ object BoxConfig {
 
     /** Store an arbitrary named secret, encrypted with the same keystore-backed AES-GCM as the
      *  config fields. Used by DeviceCert for the device cert + private key delivered via the QR. */
-    fun writeSecret(ctx: Context, name: String, value: String) {
-        prefs(ctx).edit().putString("secret.$name", encrypt(value)).apply()
+    fun writeSecret(ctx: Context, name: String, value: String, now: Boolean = false) {
+        val e = prefs(ctx).edit().putString("secret.$name", encrypt(value))
+        if (now) e.commit() else e.apply()
+    }
+
+    /** Remove a named secret (the QR's private key, once it is in the Keystore). */
+    fun removeSecret(ctx: Context, name: String) {
+        prefs(ctx).edit().remove("secret.$name").commit()
     }
 
     fun readSecret(ctx: Context, name: String): String? =

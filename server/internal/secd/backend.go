@@ -1,6 +1,7 @@
 package secd
 
 import (
+	"crypto/rand"
 	"time"
 
 	"github.com/LocalGhostDao/localghost/server/internal/profile"
@@ -73,8 +74,17 @@ func runUnlock(b UnlockBackend, pin string, emit func(profile.Progress)) (openSl
 
 	// RESOLVE
 	emit(profile.Progress{Stage: profile.StageResolve, State: profile.Running})
+	t0 := time.Now()
 	slot, _, rerr := b.Resolve(pin)
 	if rerr != nil || slot == profile.NoSlot {
+		// EVERY reject answers at the same moment: a wrong PIN, a throttled one, the wipe PIN
+		// arming, the main PIN confirming a wipe (whose erase runs inside Resolve). Their own times
+		// differ (0 ms throttled, the KDF's ~200 ms, the KDF plus a TPM evict), and anyone timing
+		// RESOLVE could tell them apart (found 30 Sep 2026). A wipe that runs past the floor still
+		// shows; that one is fixed by erasing first and fast (the notes' item 3).
+		if wait := rejectFloor() - time.Since(t0); wait > 0 {
+			time.Sleep(wait)
+		}
 		emit(profile.Progress{Stage: profile.StageResolve, State: profile.Errored})
 		if rerr != nil {
 			return profile.NoSlot, rerr
@@ -180,4 +190,12 @@ func zeroise(b []byte) {
 	for i := range b {
 		b[i] = 0
 	}
+}
+
+// rejectFloor is when a rejected PIN is answered, from the start of RESOLVE: 1.5 s plus up to
+// half a second, picked per attempt. A variable so tests can shorten it.
+var rejectFloor = func() time.Duration {
+	var b [2]byte
+	_, _ = rand.Read(b[:])
+	return 1500*time.Millisecond + time.Duration(int(b[0])<<8|int(b[1]))%500*time.Millisecond
 }

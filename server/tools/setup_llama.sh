@@ -217,7 +217,7 @@ echo "-- EXISTING volume? Seed it now while unlocked (via /tmp: the repo lives u
 echo "   EMPTY inside secd's mount namespace , ProtectHome , so ns.sh cannot see the repo path):"
 echo "     cp $REPO_BIN/llama-server /tmp/llama-server"
 echo "     sudo ./tools/ns.sh cp /tmp/llama-server /var/lib/ghost/mnt/slot0/bin/llama-server"
-echo "     sudo ./tools/ns.sh chown coder /var/lib/ghost/mnt/slot0/bin/llama-server"
+echo "     sudo ./tools/ns.sh chown <the daemons' user, coder or ghostd> /var/lib/ghost/mnt/slot0/bin/llama-server"
 echo "     rm /tmp/llama-server"
 fi
 

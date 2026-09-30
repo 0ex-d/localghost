@@ -130,8 +130,8 @@ object PhoneReader {
                 val body = if (h.kind == "note") h.excerpt else h.excerpt.ifBlank { h.snippet }
                 sb.append(body.take(900)).append("\n")
             }
-            sb.append("\nAnswer the question from these notes in two to five sentences, citing the notes by number like [1]. ")
-                .append("If they do not settle it, say so.")
+            sb.append("\nAnswer the question in two to five sentences, from these notes where they help, citing the notes by number like [1]. ")
+                .append("Where the notes do not cover it, answer from what you know and say that part is not from the notes.")
             return sb.toString()
         }
     }
@@ -177,10 +177,13 @@ object PhoneReader {
         WebSearch.Hit(h.title, h.url, h.snippet, notes, "note", h.source, h.published, emptyList(), quote)
 
     /** No box: the phone's model answers from what it read. Streams through [onText]. */
-    suspend fun answerAlone(ctx: Context, question: String, read: List<WebSearch.Hit>, onText: (String) -> Boolean): String? {
+    suspend fun answerAlone(ctx: Context, question: String, read: List<WebSearch.Hit>,
+                            history: List<Pair<Boolean, String>> = emptyList(), onText: (String) -> Boolean): String? {
         val useful = read.filter { it.excerpt.isNotBlank() || it.quote.isNotBlank() }
             .map { if (it.kind == "note" && it.excerpt.isBlank()) WebSearch.Hit(it.title, it.url, it.snippet, it.quote, "page", it.source, it.published) else it }
         val prompt = if (useful.isEmpty()) question else Plan.answerPrompt(question, useful)
-        return LocalModel.complete(ctx, LocalModel.LIFEBOAT_SYSTEM, prompt, maxTokens = 320, temperature = 0.3f, onText = onText)?.text
+        // the conversation so far rides in front, so "and in euros?" is read after the question it follows
+        return LocalModel.complete(ctx, LocalModel.LIFEBOAT_SYSTEM, Transcript.withHistory(prompt, history),
+            maxTokens = 320, temperature = 0.3f, onText = onText)?.text
     }
 }

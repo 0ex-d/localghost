@@ -14,8 +14,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -331,20 +329,17 @@ private fun MessageBubble(msg: Message, selectable: Boolean = true) {
             }
             // Whole-message copy , selection handles fragments, this grabs the FULL raw text
             // (markdown markers included, so a copied reply pastes as valid markdown elsewhere).
-            // LocalClipboardManager is deprecated in favour of the suspend-based LocalClipboard;
-            // the replacement needs a coroutine per copy for no behavioural gain here, so the old
-            // one stays, deliberately and visibly, until the copy path is reworked.
             if (msg.status.isNotEmpty()) {
                 // an answer the box is still writing (the app was closed on it), or one stopped
                 Text("› " + msg.status, color = TerminalDim, style = MaterialTheme.typography.labelSmall,
                     modifier = Modifier.padding(top = 2.dp))
             }
             if (!isUser) {
-                @Suppress("DEPRECATION")
-                val clipboard = LocalClipboardManager.current
+                // marked sensitive: no paste preview, not kept in the keyboard's clipboard history
+                val ctx = androidx.compose.ui.platform.LocalContext.current
                 Text("[ copy ]", color = TerminalDim, style = MaterialTheme.typography.labelSmall,
                     modifier = Modifier
-                        .clickable { clipboard.setText(AnnotatedString(msg.text)) }
+                        .clickable { copySensitive(ctx, "LocalGhost answer", msg.text) }
                         .padding(top = 2.dp, bottom = 2.dp))
             }
         }

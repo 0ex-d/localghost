@@ -288,6 +288,11 @@ if confirm_word "APPLY"; then
     echo "      sudo ./tools/setup_llama.sh --models /path/with/ggufs"
     echo "    See tools/README.md steps 6-8 for models, the DB bundle, and the"
     echo "    first-unlock checks (including the PTT cold-power-cycle if the TPM is in lockout)."
+    if [ "$(getent passwd "$SVC_USER" | cut -d: -f7)" != /usr/sbin/nologin ]; then
+        echo "    The daemons run as $SVC_USER, an account people log in as: anything run as"
+        echo "    $SVC_USER could read the vault. After the first unlock, lock the box and run"
+        echo "      sudo ./tools/own_user.sh     (the daemons get a user of their own, ghostd)"
+    fi
 else
     echo "  Not applied. Re-run tools/setup.sh when ready; nothing was changed."
 fi

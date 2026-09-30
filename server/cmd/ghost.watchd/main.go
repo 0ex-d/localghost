@@ -5,12 +5,15 @@
 // drives (start-cohort / stop-cohort / restart <name> / status).
 //
 // Lifecycle:
+//
 //   - secd mounts the volume, starts pg+redis, then execs ghost.watchd --mount <path> [--user <name>]
+//
 //   - watchd opens its log + socket, registers the cohort, waits for secd's start-cohort
+//
 //   - on SIGTERM (secd stopping it, as part of a clean lock), watchd tears the WHOLE cohort down and
 //     confirms every process dead before exiting , the property secd's unmount depends on.
 //
-//	ghost.watchd --mount /var/lib/ghost/mnt/slot0 --user ghost
+//     ghost.watchd --mount /var/lib/ghost/mnt/slot0 --user ghost
 package main
 
 import (
@@ -24,14 +27,16 @@ import (
 	"syscall"
 
 	"github.com/LocalGhostDao/localghost/server/internal/ctlsock"
+	"github.com/LocalGhostDao/localghost/server/internal/harden"
 	"github.com/LocalGhostDao/localghost/server/internal/hw"
+	"github.com/LocalGhostDao/localghost/server/internal/poltergres"
 	"github.com/LocalGhostDao/localghost/server/internal/rotlog"
 	"github.com/LocalGhostDao/localghost/server/internal/svcconf"
-	"github.com/LocalGhostDao/localghost/server/internal/poltergres"
 	"github.com/LocalGhostDao/localghost/server/internal/watchd"
 )
 
 func main() {
+	harden.NoDump() // same-user processes cannot read this one through /proc; no core file
 	mount := flag.String("mount", "", "path to the mounted encrypted volume (required)")
 	runUser := flag.String("user", "", "run daemons as this user (empty = inherit watchd's user)")
 	flag.Parse()

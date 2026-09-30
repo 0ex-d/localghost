@@ -33,6 +33,7 @@ type Server struct {
 	mounted        int // currently mounted slot, -1 if locked
 	unlock         *unlockService
 	session        *sessionManager // the one live session token (foreground + poller share it)
+	retired        retiredCerts    // device certificates replaced by a rotation: answered as if down
 	mute           *hw.MuteStore   // notification mute read/write (in-volume Postgres/Redis), per scope
 	notif          *hw.NotifStore  // notification produce/read/seen/delete (in-volume Postgres/Redis)
 	// closing: a lock, halt or shutdown is tearing the volume down. Uploads are refused from the
@@ -84,6 +85,7 @@ type Config struct {
 	StateDir string // unencrypted: /var/lib/ghost (certs, models)
 	Disk     string // the raw LUKS-formatted data disk, e.g. /dev/nvme1n1 (used by the TPM backend)
 	RunUser  string // if set (--user <name>), watchd runs the ghost.*d cohort as this user
+	CaDir    string // the box CA for device key rotation (rekey.go); empty: /etc/ghost/ca
 }
 
 // StatusView is the front-door state ghost-cli reads over secd's control socket. It works even when
@@ -187,6 +189,7 @@ func New(cfg Config) (*Server, error) {
 		models:  models.NewRegistry(filepath.Join(cfg.StateDir, "models")),
 		mounted: -1,
 	}
+	s.retired.path = filepath.Join(cfg.StateDir, "devices", "retired")
 	s.session = newSessionManager(SessionTTL)
 	// Wire the notification mute store. The mute lives in the in-volume Postgres/Redis, per scope
 	// (global "*" + per-service). The mount path for a slot is <stateDir>/mnt/slot<N> (matching
@@ -205,6 +208,8 @@ func New(cfg Config) (*Server, error) {
 	// newDefaultBackend is build-tag-selected: the simulation in the default build, the real TPM +
 	// dm-crypt + Postgres/Redis backend with -tags tpm. This is the seam where unlock meets hardware.
 	s.unlock = newUnlockService(newDefaultBackend(cfg))
+	// the last cold unlocks' step times live on the encrypted volume, beside the data they open
+	s.unlock.timesPath = filepath.Join(cfg.StateDir, "mnt", fmt.Sprintf("slot%d", profile.MainSlot), "secd", "unlock-times.json")
 
 	// Reconcile mount state at startup. The dm-crypt mount is KERNEL state: it survives a secd process
 	// restart (secd has no unmount-on-exit). If slot 0 is already mounted , e.g. secd crashed, or was
@@ -246,6 +251,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/frames/preview", s.handleFramePreview)       // full-size for the pinch-zoom viewer
 	mux.HandleFunc("/v1/frames/original", s.handleFrameOriginal)     // untouched archive bytes, mime-typed
 	mux.HandleFunc("/v1/frames/exists", s.handleFramesExists)        // pre-upload dedup by content hash
+	mux.HandleFunc("/v1/frames/kinds", s.handleFramesKinds)          // photo or video, for a strip of hashes
 	mux.HandleFunc("/v1/sync/cursor", s.handleSyncCursor)            // device sync position, survives reinstall
 	mux.HandleFunc("/v1/frames/tag", s.handleFrameTag)               // user tag corrections (tombstoned removes)
 	mux.HandleFunc("/v1/services/summary", s.handleServicesSummary)  // latest sample + 24h blob per target
@@ -298,6 +304,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/chat/stop", s.handleChatStop)       // STOP: ends the answer being written for a chat (closing the app does not)
 	mux.HandleFunc("/v1/chat/plan", s.handleChatPlan)       // what the question needs from the web, from the model, before the phone searches
 	mux.HandleFunc("/v1/locations", s.handleLocations)
+	mux.HandleFunc("/v1/trail/key", s.handleTrailKey)                // the phone's trail key, kept in the vault
+	mux.HandleFunc("/v1/device/rekey", s.handleRekey)                // the phone's own key, a new certificate for it
+	mux.HandleFunc("/v1/device/rekey/confirm", s.handleRekeyConfirm) // over the new one: the QR's retires
+	mux.HandleFunc("/v1/model", s.handleModel)                       // the box model: ready, or loading and how far
 	mux.HandleFunc("/v1/models", s.handleModels)
 	mux.HandleFunc("/v1/models/", s.handleModelBytes) // /v1/models/{id}
 	mux.HandleFunc("/v1/openapi.json", s.handleOpenAPI)
@@ -305,6 +315,11 @@ func (s *Server) Handler() http.Handler {
 	// phone finished enrolment. Mark it (best-effort) so provisioning can stop rotating the QR. This
 	// wraps every route and changes no response , purely a side signal.
 	observed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// a certificate replaced by a rotation (rekey.go) reaches nothing, the unlock included
+		if s.retired.has(certID(r)) {
+			s.appearsDown(w)
+			return
+		}
 		if verifiedClient(r) {
 			s.noteVerifiedDevice()
 		}

@@ -150,7 +150,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	secdLog.Info("chat streamed", "fn", "handleChat", "took", time.Since(t0).Round(time.Millisecond).String())
+	secdLog.Debug("chat streamed", "fn", "handleChat", "took", time.Since(t0).Round(time.Millisecond).String())
 }
 
 // handleChatPlan , POST /v1/chat/plan {prompt, history} → {ok, search, need, shape, fresh,

@@ -85,30 +85,52 @@ func (a *Accounts) AuthorizesLock(pin string) bool {
 // Every path returns Reject or Open , the armed state is never observable, so this adds no oracle to
 // the appears-down model.
 func (a *Accounts) Unlock(id, pin string) Decision {
-	if err := a.gate.CheckAllowed(id); err != nil {
-		return Decision{Outcome: Throttled, Err: err}
+	// The KDF runs on EVERY attempt, throttled or not, so the time an attempt takes says nothing
+	// about the limiter's state (30 Sep 2026: a throttled attempt answered at once and an
+	// evaluated one after the KDF, and the limiter's state was itself a tell, below).
+	throttled := a.gate.CheckAllowed(id)
+	res := a.reg.Resolve(pin)
+	isMain := res.Valid && res.Open != NoSlot && res.Wipe != WipeAll
+
+	// The one exception to the limiter: the main PIN confirming a live armed wipe. The wipe PIN
+	// now counts as a failure, so a coercer's run of guesses before it must not be able to hold
+	// the confirmation off until the arm lapses.
+	if throttled != nil && !(isMain && a.armedLive(id)) {
+		return Decision{Outcome: Throttled, Err: throttled}
 	}
 
-	res := a.reg.Resolve(pin)
 	if !res.Valid {
 		a.gate.RecordFailure(id)
 		a.disarm(id) // a wrong PIN cancels any pending wipe
 		return Decision{Outcome: Reject}
 	}
-	a.gate.RecordSuccess(id)
 
 	if res.Wipe == WipeAll {
-		// Wipe PIN: ARM, do not erase. Looks exactly like a wrong PIN.
+		// Wipe PIN: ARM, do not erase. It presents as a wrong PIN, so the limiter counts it as
+		// one. It used to reset the failure count like a success, and that was an oracle: three
+		// wrong guesses, a candidate, one more guess at once , throttled after a wrong candidate,
+		// evaluated after the wipe PIN, which then shows in the time the guess takes.
 		a.arm(id)
+		a.gate.RecordFailure(id)
 		return Decision{Outcome: Reject}
 	}
 
 	// Main PIN. If a wipe is armed and still live on this device, the main PIN confirms it.
 	if a.consumeArmed(id) {
 		_ = a.wiper.PanicWipe(allSlots())
+		a.gate.RecordFailure(id) // presents as a wrong PIN, counts as one
 		return Decision{Outcome: Reject, Wiped: true}
 	}
+	a.gate.RecordSuccess(id)
 	return Decision{Outcome: Open, OpenSlot: res.Open}
+}
+
+// armedLive reports whether a live armed wipe exists for the device, without consuming it.
+func (a *Accounts) armedLive(id string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	exp, ok := a.armed[id]
+	return ok && a.now().Before(exp)
 }
 
 // arm sets (or refreshes) a pending wipe for a device.

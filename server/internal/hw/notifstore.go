@@ -576,6 +576,34 @@ func (s *NotifStore) FramesHave(slot int, hashes []string) (map[string]bool, err
 	return have, nil
 }
 
+// FrameKinds says what each of the given frames is ("photo" or "video"), so the app can open a
+// strip of hashes (On This Day, an outing's covers) in the right viewer. Unknown hashes are left
+// out. At most 200; the caller has validated them to lowercase hex.
+func (s *NotifStore) FrameKinds(slot int, hashes []string) (map[string]string, error) {
+	out := map[string]string{}
+	if len(hashes) == 0 {
+		return out, nil
+	}
+	if len(hashes) > 200 {
+		hashes = hashes[:200]
+	}
+	c, err := s.pg(slot)
+	if err != nil {
+		return nil, err
+	}
+	in := "'" + strings.Join(hashes, "','") + "'" // caller validated: lowercase hex only, no quoting risk
+	rows, err := c.Query("SELECT hash, kind FROM frames WHERE hash IN (" + in + ")")
+	if err != nil {
+		return nil, err
+	}
+	for _, v := range rows.Vals {
+		if len(v) > 1 && v[0] != nil && v[1] != nil {
+			out[*v[0]] = *v[1]
+		}
+	}
+	return out, nil
+}
+
 // FrameThumbPath returns the on-volume path of a frame's thumbnail ("" if none , e.g. videos).
 // FramePreviewPath , the big derived JPEG for the full-screen viewer (falls back to the thumb when
 // a preview was never rendered).
@@ -871,6 +899,48 @@ func (s *NotifStore) getCursor(slot int, device string) (int64, error) {
 		return 0, nil
 	}
 	return id, nil
+}
+
+// MoveDevice follows a phone to its new certificate (a device key rotation, secd rekey.go): its
+// notification push position, its photo and video sync positions and its name move from the old
+// device key to the new one, so the rotation re-sends nothing and the devices screen still knows
+// the phone. Frames and voice notes keep the key they arrived under (that is their provenance).
+func (s *NotifStore) MoveDevice(slot int, from, to string) error {
+	if from == "" || to == "" || from == to {
+		return nil
+	}
+	if cur, err := s.getCursor(slot, from); err == nil && cur > 0 {
+		if have, _ := s.getCursor(slot, to); cur > have {
+			if err := s.setCursor(slot, to, cur); err != nil {
+				return err
+			}
+		}
+	}
+	c, err := s.pg(slot)
+	if err != nil {
+		return err
+	}
+	if err := c.Exec(`INSERT INTO sync_cursors (device, kind, ts, id, updated_at)
+		SELECT $1, kind, ts, id, updated_at FROM sync_cursors WHERE device = $2
+		ON CONFLICT (device, kind) DO UPDATE SET
+			ts = GREATEST(sync_cursors.ts, EXCLUDED.ts),
+			id = CASE WHEN EXCLUDED.ts >= sync_cursors.ts THEN EXCLUDED.id ELSE sync_cursors.id END`, to, from); err != nil {
+		return err
+	}
+	if err := c.Exec("DELETE FROM sync_cursors WHERE device = $1", from); err != nil {
+		return err
+	}
+	if err := c.Exec(`INSERT INTO device_names (device, name, model, first_seen, stable_id)
+		SELECT $1, name, model, first_seen, stable_id FROM device_names WHERE device = $2
+		ON CONFLICT (device) DO NOTHING`, to, from); err != nil {
+		return err
+	}
+	if err := c.Exec("DELETE FROM device_names WHERE device = $1", from); err != nil {
+		return err
+	}
+	s.cursorMirrorClear(slot, from)
+	s.cursorMirrorClear(slot, to)
+	return nil
 }
 
 func (s *NotifStore) setCursor(slot int, device string, id int64) error {

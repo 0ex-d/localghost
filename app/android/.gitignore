@@ -8,21 +8,24 @@ build/
 # build; delete it to make CMake start fresh.
 .cxx/
 .externalNativeBuild/
- 
+
 # Kotlin 2.x compiler session data
 .kotlin/
 
-# Android / IDE local config
+# Android / IDE local config (local.properties holds sdk.dir and llamaTarball, per machine)
 local.properties
 .idea/
 *.iml
+captures/
 
-
-# Keystores and signing — never commit these
+# Keystores and signing , never commit these
 *.jks
 *.keystore
 keystore.properties
 
-# OS noise
-.DS_Store.cache/
+# Local caches
 .cache/
+
+# OS noise
+.DS_Store
+Thumbs.db

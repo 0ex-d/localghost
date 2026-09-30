@@ -119,8 +119,11 @@ object BoxClient {
         // the stage stream; we then poll once a second and render progress. This code cannot infer
         // whether the opened account is real or a decoy: the poll shape is identical for every
         // account. Whatever the PIN triggered happened on the box.
+        var run = ""
         try {
             val resp = BoxHttp.postJson(ctx, "/v1/unlock", JSONObject().put("pin", pin))
+            // the box names this unlock; only a poll that names it gets the session token
+            run = resp.optString("run", "")
             // A correct PIN returns a fresh session token + its expiry. Persist both so the app can
             // carry the token (foreground + notification poller) and know when to prompt a re-unlock.
             // A wrong PIN / failed unlock returns no token; leave any prior session in place to expire.
@@ -141,7 +144,7 @@ object BoxClient {
         }
         while (true) {
             val (states, model) = try {
-                pollUnlock(ctx)
+                pollUnlock(ctx, run)
             } catch (e: Exception) {
                 emit(UnlockSnapshot.failed("lost contact with the box: ${e.message}"))
                 return@flow
@@ -164,8 +167,8 @@ object BoxClient {
     }
 
     /** Poll the box for the current unlock stage states, mapping the JSON to the app enums. */
-    private suspend fun pollUnlock(ctx: Context): Pair<Map<UnlockStage, StageState>, ModelLoad?> {
-        val resp = BoxHttp.getJson(ctx, "/v1/unlock/poll")
+    private suspend fun pollUnlock(ctx: Context, run: String): Pair<Map<UnlockStage, StageState>, ModelLoad?> {
+        val resp = BoxHttp.getJson(ctx, "/v1/unlock/poll" + if (run.isNotEmpty()) "?run=" + java.net.URLEncoder.encode(run, "UTF-8") else "")
         // THE KEY EXCHANGE HAPPENS HERE, not on the unlock POST. The box issues the session token once,
         // on the poll that reports a successful unlock (token + expiresAt ride alongside the stages).
         // This parse used to read ONLY the stages and drop the token on the floor , the box unlocked,
@@ -216,6 +219,68 @@ object BoxClient {
      *  model. Returns false (not enrolled / unreachable) rather than throwing. */
     suspend fun reachable(ctx: Context): Boolean = try {
         BoxHttp.getJson(ctx, "/v1/health").optBoolean("ok", false)
+    } catch (e: Exception) {
+        false
+    }
+
+    /** The box model's state (GET /v1/model): ready, or loading and how far. It loads after the
+     *  unlock, so chat asks before it sends. Null on any error or from a box without the route
+     *  (chat then sends at once, as it always did). */
+    suspend fun modelStatus(ctx: Context): ModelWait.Box? = try {
+        ModelWait.Box.fromJson(BoxHttp.getJson(ctx, "/v1/model"))
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        null
+    }
+
+    /** The phone's trail key as the box's vault keeps it (GET /v1/trail/key): [have] false when the
+     *  box has none for this phone. Null when the box could not be asked. */
+    class TrailKeyAnswer(val have: Boolean, val pub: ByteArray?, val priv: ByteArray?)
+
+    suspend fun trailKeyGet(ctx: Context): TrailKeyAnswer? = try {
+        val o = BoxHttp.getJson(ctx, "/v1/trail/key")
+        if (!o.optBoolean("have", false)) TrailKeyAnswer(false, null, null)
+        else {
+            val pub = com.localghost.app.sync.TrailSeal.unb64(o.optString("public"))?.takeIf { it.size == 32 }
+            val priv = com.localghost.app.sync.TrailSeal.unb64(o.optString("private"))?.takeIf { it.size == 32 }
+            if (pub == null || priv == null) null else TrailKeyAnswer(true, pub, priv)
+        }
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        null
+    }
+
+    /** Hands the phone's trail key to the box's vault (POST /v1/trail/key). True when kept. */
+    suspend fun trailKeyPut(ctx: Context, pub: ByteArray, priv: ByteArray): Boolean = try {
+        BoxHttp.postJson(ctx, "/v1/trail/key", org.json.JSONObject()
+            .put("public", com.localghost.app.sync.TrailSeal.b64(pub))
+            .put("private", com.localghost.app.sync.TrailSeal.b64(priv))).optBoolean("ok", false)
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        false
+    }
+
+    /** A certificate for a key the phone made itself (POST /v1/device/rekey): [spki] its public key,
+     *  [sig] ECDSA-SHA256 over "localghost rekey v1\n" + spki. The certificate's PEM, or null. */
+    suspend fun deviceRekey(ctx: Context, spki: ByteArray, sig: ByteArray): String? = try {
+        val r = BoxHttp.postJson(ctx, "/v1/device/rekey", org.json.JSONObject()
+            .put("spki", java.util.Base64.getEncoder().encodeToString(spki))
+            .put("sig", java.util.Base64.getEncoder().encodeToString(sig)))
+        r.optString("cert", "").takeIf { r.optBoolean("ok", false) && it.contains("BEGIN CERTIFICATE") }
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        null
+    }
+
+    /** Over the new certificate: the box retires the one it replaced. */
+    suspend fun deviceRekeyConfirm(ctx: Context): Boolean = try {
+        BoxHttp.postJson(ctx, "/v1/device/rekey/confirm", org.json.JSONObject()).optBoolean("ok", false)
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
     } catch (e: Exception) {
         false
     }
@@ -615,6 +680,14 @@ object BoxClient {
      *  later. Nothing is skipped on uncertainty (the cursor never passes an unconfirmed photo) and
      *  nothing is uploaded blind: "upload everything on failure" re-sent a whole camera roll to a
      *  box that was only busy (29 Sep 2026). */
+    /** photo or video for each of [hashes] the box knows (POST /v1/frames/kinds); empty when the
+     *  box does not answer or predates the endpoint (everything then opens as a photo). */
+    suspend fun frameKinds(ctx: Context, hashes: List<String>): Map<String, String> = try {
+        val body = org.json.JSONObject().put("hashes", org.json.JSONArray().apply { hashes.take(200).forEach { put(it) } })
+        val k = BoxHttp.postJson(ctx, "/v1/frames/kinds", body).optJSONObject("kinds")
+        k?.keys()?.asSequence()?.associateWith { k.optString(it) } ?: emptyMap()
+    } catch (_: Exception) { emptyMap() }
+
     suspend fun framesHave(ctx: Context, hashes: List<String>): Set<String>? = try {
         if (hashes.isEmpty()) return emptySet() // nothing to ask , skip the round trip entirely
         val body = org.json.JSONObject().put("hashes", org.json.JSONArray(hashes))
@@ -769,9 +842,18 @@ object BoxClient {
         o.optString("day"), o.optLong("taken_at"), o.optLong("duration_ms"), o.optString("status"),
         o.optString("transcript"), o.optString("lang"), o.optString("error"))
 
+    /** Why a note waits, as the box last said: [working] the note being transcribed now; [why] no
+     *  speech engine (etc.); [running] false when ghost.voiced is not running. Null: not asked yet. */
+    data class VoiceQueue(val running: Boolean, val why: String, val working: String)
+
+    @Volatile var voiceQueue: VoiceQueue? = null
+        private set
+
     /** The newest voice notes on the box, with their transcripts. Null when the box did not answer. */
     suspend fun voiceNotes(ctx: Context, n: Int = 60): List<VoiceNoteRow>? = try {
-        val a = BoxHttp.getJson(ctx, "/v1/voice/notes?n=$n").optJSONArray("notes") ?: org.json.JSONArray()
+        val r = BoxHttp.getJson(ctx, "/v1/voice/notes?n=$n")
+        voiceQueue = r.optJSONObject("queue")?.let { VoiceQueue(it.optBoolean("running"), it.optString("why"), it.optString("working")) }
+        val a = r.optJSONArray("notes") ?: org.json.JSONArray()
         (0 until a.length()).mapNotNull { i -> a.optJSONObject(i)?.let { voiceRow(it) } }
     } catch (_: Exception) { null }
 
@@ -1193,13 +1275,48 @@ object BoxClient {
         val r = BoxHttp.getJson(ctx, "/v1/geo/world/index")
         if (!r.has("cuts")) null
         else {
-            val a = r.optJSONArray("cuts") ?: org.json.JSONArray()
-            (0 until a.length()).mapNotNull { i ->
-                val o = a.optJSONObject(i) ?: return@mapNotNull null
-                WorldCut(o.optString("res", ""), o.optLong("bytes"), o.optString("etag", ""))
-            }
+            // kept, so the next open knows the cuts before the box answers (worldIndexOnPhone)
+            ctx.getSharedPreferences("ghost_geo", Context.MODE_PRIVATE).edit().putString("world_index", r.toString()).apply()
+            parseCuts(r)
         }
     } catch (_: Exception) { null }
+
+    private fun parseCuts(r: org.json.JSONObject): List<WorldCut> {
+        val a = r.optJSONArray("cuts") ?: org.json.JSONArray()
+        return (0 until a.length()).mapNotNull { i ->
+            val o = a.optJSONObject(i) ?: return@mapNotNull null
+            WorldCut(o.optString("res", ""), o.optLong("bytes"), o.optString("etag", ""))
+        }
+    }
+
+    // --- THE MAP FROM THE PHONE'S DISK, no network: what the map draws the moment it opens, before
+    // the box is asked whether anything changed (the network versions below revalidate) ---
+
+    /** The world cuts the box listed last time, or null. */
+    fun worldIndexOnPhone(ctx: Context): List<WorldCut>? = runCatching {
+        val s = ctx.getSharedPreferences("ghost_geo", Context.MODE_PRIVATE).getString("world_index", null) ?: return null
+        parseCuts(org.json.JSONObject(s))
+    }.getOrNull()
+
+    /** A world cut already on the phone, with the ETag it came under; (null, "") when there is none. */
+    fun worldGeoJsonOnPhone(ctx: Context, res: String = ""): Pair<java.io.File?, String> {
+        val key = if (res.isEmpty()) "default" else res
+        val cache = java.io.File(ctx.filesDir, "world-$key.geojson")
+        val tag = ctx.getSharedPreferences("ghost_geo", Context.MODE_PRIVATE).getString("world_etag_$key", "") ?: ""
+        return Pair(if (cache.exists()) cache else null, tag)
+    }
+
+    /** The coast index on the phone, or null. */
+    fun landTileIndexOnPhone(ctx: Context): ByteArray? {
+        val f = java.io.File(java.io.File(ctx.filesDir, "landtiles"), "index.bin")
+        return if (f.exists()) com.localghost.app.ui.LandTileGeom.index(runCatching { f.readBytes() }.getOrNull()) else null
+    }
+
+    /** The road index on the phone (raw, as [roadTileIndex] returns it), or null. */
+    fun roadTileIndexOnPhone(ctx: Context): ByteArray? {
+        val f = java.io.File(java.io.File(ctx.filesDir, "roadtiles"), "index.bin")
+        return if (f.exists()) runCatching { f.readBytes() }.getOrNull() else null
+    }
 
     /** One world cut ON DISK plus the ETag it was fetched under, revalidated against the box and
      *  never parsed here. The map reads it with its own byte scanner (org.json on a 24MB GeoJSON is

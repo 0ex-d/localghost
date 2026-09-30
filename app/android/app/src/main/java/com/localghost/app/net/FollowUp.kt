@@ -32,4 +32,26 @@ object FollowUp {
         val base = prev.trimEnd('?', '.', '!', ' ')
         return if (content.isEmpty()) base else base + " " + content.joinToString(" ")
     }
+
+    /**
+     * Whether a follow-up may take the question before it to the web in auto mode: only when that
+     * question would have gone by itself ([fresh], the auto rule). "and now?" after "what did I
+     * talk about with Maria on Tuesday?" matched "now" and sent Tuesday's question, Maria and all,
+     * to the search engine (free-time notes, 30 Sep 2026). In "on" mode the person asked for every
+     * question to be searched, and this does not apply.
+     */
+    fun mayBorrow(earlier: List<String>, fresh: (String) -> Boolean): Boolean {
+        val prev = earlier.lastOrNull { it.isNotBlank() } ?: return true
+        return fresh(prev)
+    }
+
+    private val firstPerson = Regex("\\b(i|i'm|im|i've|i'd|i'll|me|my|mine|myself|we|we're|our|ours|us)\\b", RegexOption.IGNORE_CASE)
+
+    /**
+     * A question about the person themselves ("how many times did I go to the gym?", "who is my
+     * dentist?"). In auto mode, when the box's model did not plan the search (the plan is what
+     * says "this needs nothing from outside"), such a question is not sent to a search engine:
+     * without the plan, auto matched "how many" and sent it as it stood.
+     */
+    fun looksPersonal(q: String): Boolean = firstPerson.containsMatchIn(q)
 }

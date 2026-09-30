@@ -76,6 +76,7 @@ import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import com.localghost.app.local.LocalModel
 import com.localghost.app.local.ModelStore
+import com.localghost.app.local.PhoneBenchWords
 import com.localghost.app.local.ModelDownloadWorker
 import com.localghost.app.net.PhoneModel
 import com.localghost.app.ui.ModelRowState
@@ -102,6 +103,8 @@ private sealed interface Screen {
 // Do not auto-kick a full sync more than once every 5 minutes, no matter how often the app is
 // foregrounded or unlocked. Manual SYNC NOW bypasses this; the 15-min periodic worker is unaffected.
 private const val AUTO_SYNC_COOLDOWN_MS = 5 * 60 * 1000L
+// the screen stays on this long after the last touch while the app is open
+private const val SCREEN_ON_MS = 60_000L
 
 class MainActivity : ComponentActivity() {
 
@@ -135,6 +138,9 @@ class MainActivity : ComponentActivity() {
     private var localOnly by mutableStateOf(false)
     private var localModeActive by mutableStateOf(false)  // box-down or forced, shown in chat
     private var localModelPresent by mutableStateOf(false)
+    private var trailJob: kotlinx.coroutines.Job? = null
+    // the phone model's load state, mirrored for the chat's model pill (loading… / ready)
+    private var phoneModelState by mutableStateOf(LocalModel.State.ABSENT)
     private var boxReachable by mutableStateOf(true)
     private var conversations by mutableStateOf<List<Conversation>>(emptyList())
     private var activeConvId by mutableStateOf<String?>(null)
@@ -283,6 +289,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // No picture of the app in RECENTS, and none shown while it comes back: Android keeps a
+        // screenshot of the last frame and draws it until the app's first new frame, which flashed
+        // the unlocked screen (chat, memories) before the gate. The app locks itself on stop; with
+        // this the phone shows a plain card instead of what was on screen.
+        setRecentsScreenshotEnabled(false)
         intent?.getStringExtra("nav")?.let { pendingNav = it }
         com.localghost.app.net.BoxClient.appCtx = applicationContext
         sync = sync.copy(paused = AppSettings.syncPaused(this))
@@ -301,6 +312,8 @@ class MainActivity : ComponentActivity() {
         PollWorker.schedule(this)
         SyncWorker.schedule(this)          // 15-min background sync, Wi-Fi only
         CrashHandler.pending(this)?.let { screen = Screen.Crash(it) }
+        // what a killed app left in its cache (a capture in flight is minutes old at most)
+        Thread { com.localghost.app.security.CacheSweep.sweep(cacheDir, minAgeMs = 10 * 60_000L) }.start()
 
         // Welcome first, once: every permission asked before any code is scanned, and the two
         // things that need no box (the lock-screen phrase, the trail) switched on. Then setup vs
@@ -317,6 +330,7 @@ class MainActivity : ComponentActivity() {
             com.localghost.app.sync.LocationLog.schedule(this)
         }
         com.localghost.app.local.MapPrefetch.schedule(this) // only when "download maps" is ticked
+        lifecycleScope.launch { LocalModel.stateFlow.collect { phoneModelState = it } }
 
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) { ForegroundPoller.run(this@MainActivity) }
@@ -328,7 +342,7 @@ class MainActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
         )
         setContent {
-            LocalGhostTheme {
+            com.localghost.app.ui.PrivateTheme { // the theme, and no keyboard learning in any field
                 // Computed once: the phone's own name, used to prefill the device-name field at enrolment.
                 val phoneDefault = remember { phoneName() }
                 // If the box is slow, the background enrol from a scan can still be running when the 2s
@@ -394,8 +408,9 @@ class MainActivity : ComponentActivity() {
                         brainLabel = brainLabel(),
                         brainIsBox = brainIsBox(),
                         phoneModels = phoneModelChoices(),
-                        onPickBox = { forceLocalMode = false },
-                        onPickPhoneModel = { id -> activateModel(id); forceLocalMode = true },
+                        onPickBox = { forceLocalMode = false; LocalModel.pin(false) },
+                        // picked in the chat: loaded now and kept loaded while it is the one talked to
+                        onPickPhoneModel = { id -> activateModel(id); forceLocalMode = true; LocalModel.pin(true); LocalModel.preload(this) },
                         catalogModels = offeredModels,
                         modelRowState = ::modelRowState,
                         onDownloadModel = ::downloadModel,
@@ -541,6 +556,9 @@ class MainActivity : ComponentActivity() {
         // with both rounds' findings , once, never a loop.
         val here = fix?.let { com.localghost.app.net.WebSearch.Here(it.lat, it.lon) }
         val engine = com.localghost.app.net.WebSearch.Engine(AppSettings.searchEngine(this), AppSettings.braveKey(this))
+        // THE MODEL LOADS AFTER THE UNLOCK: a question asked in the first seconds after a cold one
+        // waits here, with the load shown in the answer's place, and goes once the model answers
+        waitForBoxModel(::status)
         var wantWeb = com.localghost.app.net.WebSearch.shouldSearch(mode, text)
         val planAnswer: BoxClient.PlanAnswer? = if (wantWeb) {
             status("asking your box what to look for…")
@@ -554,6 +572,12 @@ class MainActivity : ComponentActivity() {
         val searchText = if (plan == null) com.localghost.app.net.FollowUp.standalone(text,
             messages.filter { it.role == Message.Role.USER }.map { it.text }.dropLast(1)) else text
         val ownNeed = if (plan == null && searchText != text) searchText else ""
+        // without the box's plan, auto does not send a question about the person to the web
+        if (plan == null && mode == "auto" && com.localghost.app.net.FollowUp.looksPersonal(searchText)) wantWeb = false
+        // a follow-up does not carry a private question to the web (auto only)
+        if (mode == "auto" && searchText != text && !com.localghost.app.net.FollowUp.mayBorrow(
+                messages.filter { it.role == Message.Role.USER }.map { it.text }.dropLast(1),
+                com.localghost.app.net.WebSearch::looksFresh)) wantWeb = false
         if (wantWeb) {
             status("searching the web on this phone" + (if (engine.brave) " (Brave)" else "") +
                 ((plan?.need?.takeIf { it.isNotBlank() } ?: ownNeed.takeIf { it.isNotBlank() })?.let { " for: $it" } ?: "") + "…")
@@ -648,6 +672,24 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** Waits (up to [ModelWait.BOX_WAIT_MS]) while the box's model loads, showing how far it is.
+     *  Returns at once when it is ready or the box cannot say (an older box, a dropped call). */
+    private suspend fun waitForBoxModel(status: (String) -> Unit) {
+        var m = BoxClient.modelStatus(this) ?: return
+        if (m.ready) return
+        val t0 = System.currentTimeMillis()
+        while (!m.ready) {
+            status(com.localghost.app.net.ModelWait.boxLine(m))
+            if (System.currentTimeMillis() - t0 > com.localghost.app.net.ModelWait.BOX_WAIT_MS) {
+                status(com.localghost.app.net.ModelWait.boxGaveUp(m))
+                return
+            }
+            kotlinx.coroutines.delay(com.localghost.app.net.ModelWait.POLL_MS)
+            m = BoxClient.modelStatus(this) ?: return
+        }
+        status("your box's model is ready , asking your box…")
+    }
+
     private suspend fun generateLocal(text: String) {
         // THE LIFEBOAT: no box (or local forced). The phone's own model answers; when the web mode
         // says so, the phone searches, its model reads the pages into notes, and answers from them.
@@ -663,8 +705,18 @@ class MainActivity : ComponentActivity() {
             streaming = false
             return
         }
-        say("", "loading the phone's model…")
-        if (!com.localghost.app.local.LocalModel.ensureLoaded(this)) {
+        if (forceLocalMode) LocalModel.pin(true) // being talked to: keep it
+        // loading: the seconds so far against how long this phone's last load took, every second
+        val ticker = if (LocalModel.state != LocalModel.State.READY) lifecycleScope.launch {
+            val t0 = System.currentTimeMillis()
+            val last = LocalModel.Speed.loadMs(this@MainActivity)
+            while (true) {
+                say("", com.localghost.app.net.ModelWait.phoneLine(System.currentTimeMillis() - t0, last))
+                kotlinx.coroutines.delay(1_000)
+            }
+        } else null
+        val loaded = try { com.localghost.app.local.LocalModel.ensureLoaded(this) } finally { ticker?.cancel() }
+        if (!loaded) {
             say("The phone's model would not load (${com.localghost.app.local.LocalModel.state.name.lowercase()}). MODELS in the menu says more.")
             streaming = false
             return
@@ -675,7 +727,13 @@ class MainActivity : ComponentActivity() {
             say("", "no box , searching the web on this phone…")
             val fix = com.localghost.app.sync.LocationLog.last(this)?.takeIf { System.currentTimeMillis() / 1000 - it.ts < 6 * 3600 }
             val engine = com.localghost.app.net.WebSearch.Engine(AppSettings.searchEngine(this), AppSettings.braveKey(this))
-            val found = com.localghost.app.net.WebSearch.search(text, fix?.let { com.localghost.app.net.WebSearch.Here(it.lat, it.lon) }, engine)
+            // a follow-up ("how about now?") searched with the question before it
+            val earlier = messages.filter { it.role == Message.Role.USER }.map { it.text }.dropLast(1)
+            val q = com.localghost.app.net.FollowUp.standalone(text, earlier)
+            // a follow-up does not carry a private question to the web (auto only)
+            val found = if (mode == "auto" && (com.localghost.app.net.FollowUp.looksPersonal(q) ||
+                    (q != text && !com.localghost.app.net.FollowUp.mayBorrow(earlier, com.localghost.app.net.WebSearch::looksFresh)))) emptyList()
+                else com.localghost.app.net.WebSearch.search(q, fix?.let { com.localghost.app.net.WebSearch.Here(it.lat, it.lon) }, engine)
             if (found.isNotEmpty()) {
                 val read = com.localghost.app.local.PhoneReader.digest(this, com.localghost.app.net.WebSearch.cleanQuery(text), found) { say("", it) }
                 hits = read.hits
@@ -683,13 +741,22 @@ class MainActivity : ComponentActivity() {
             }
         }
         var reply = ""
-        val answer = com.localghost.app.local.PhoneReader.answerAlone(this, text, hits) { whole ->
+        // the conversation so far (the question itself and this answer's placeholder left out)
+        val history = messages.dropLast(1).filter { it.text.isNotBlank() }
+            .let { if (it.lastOrNull()?.role == Message.Role.USER && it.last().text == text) it.dropLast(1) else it }
+            .map { (it.role == Message.Role.USER) to it.text }
+        val answer = com.localghost.app.local.PhoneReader.answerAlone(this, text, hits, history) { whole ->
             // called on the model's thread: the transcript is changed on the main one
             reply = whole
             runOnUiThread { say(whole, "", hits) }
             streaming
         }
-        answer?.let { say(it, "", hits) }
+        // the numbers under the answer: what this phone just did
+        val st = LocalModel.last
+        val speed = if (answer != null && st != null && st.genMs > 0)
+            "on this phone · wrote ${st.genTokens} tokens at ${PhoneBenchWords.tps(st.genTokens, st.genMs)} tok/s · read ${st.promptTokens} at ${PhoneBenchWords.tps(st.promptTokens, st.promptMs)} tok/s"
+            else ""
+        answer?.let { say(it, speed, hits) }
         if (answer == null && reply.isEmpty()) say("The phone's model gave no answer.")
         streaming = false
     }
@@ -806,7 +873,12 @@ class MainActivity : ComponentActivity() {
         else -> {
             val id = activeModel
             val name = offeredModels.firstOrNull { it.id == id }?.name ?: "on-phone"
-            "phone · $name"
+            "phone · $name" + when (phoneModelState) {
+                LocalModel.State.LOADING -> " · loading…"
+                LocalModel.State.READY -> " · ready"
+                LocalModel.State.FAILED -> " · did not load"
+                else -> ""
+            }
         }
     }
 
@@ -866,8 +938,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun activateModel(id: String) {
-        ModelStore.setActive(this, id)
-        LocalModel.unload()   // drop the old handle; next generate loads the new one
+        // only a DIFFERENT model drops the loaded one; picking the same one again keeps it
+        if (ModelStore.activeId(this) != id) {
+            ModelStore.setActive(this, id)
+            LocalModel.unload()
+        }
         refreshModels()
     }
 
@@ -952,6 +1027,7 @@ class MainActivity : ComponentActivity() {
         localOnly = true
         error = null
         tearDownCache()          // no history , clean local slate
+        openTrailOnPhone()       // a phone with no box: its own trail, behind its own unlock
         localModeActive = true
         localModelPresent = LocalModel.isModelPresent(this)
         screen = Screen.Shell
@@ -979,6 +1055,10 @@ class MainActivity : ComponentActivity() {
     // loadables, jobs. Called on lock, on local-only entry, and after re-pair, so nothing from an
     // unlocked session lingers on the phone once the box goes dark.
     private fun tearDownCache() {
+        com.localghost.app.sync.TrailKeys.forget() // the trail's key leaves memory with the session
+        LocalModel.pin(false) // locked: the weights go after the idle minutes
+        com.localghost.app.security.CacheSweep.sweep(cacheDir) // captures, video and voice fetched to play
+        com.localghost.app.ui.clearMapMemory() // the map's last view of the box's data
         messages.clear()
         pendingAttachments = emptyList()
         lifeContext = null
@@ -1013,7 +1093,10 @@ class MainActivity : ComponentActivity() {
         // The trail's backlog goes first: a few KB of points that may have waited since before
         // this box existed. Its own worker also flushes every quarter hour; this is the moment a
         // session appears, so the map is current when the person opens it.
-        lifecycleScope.launch(Dispatchers.IO) { com.localghost.app.sync.LocationLog.flush(this@MainActivity) }
+        lifecycleScope.launch(Dispatchers.IO) {
+            trailJob?.join() // sealed points need the box to hold this phone's key first
+            com.localghost.app.sync.LocationLog.flush(this@MainActivity)
+        }
         // and any voice note still on the phone (made away from home, or a take the app died holding)
         lifecycleScope.launch(Dispatchers.IO) { com.localghost.app.voice.VoiceNotes.uploadPending(this@MainActivity) }
         // Cooldown: even across lock/unlock cycles (which reset autoSyncTried), do not kick a fresh
@@ -1101,6 +1184,7 @@ class MainActivity : ComponentActivity() {
             // After this the phone cannot reach or authenticate to the box; re-pairing needs a fresh
             // enrolment QR from the box at home, which is the intended cost.
             BoxConfig.clear(this@MainActivity)
+            DeviceCert.forget(this@MainActivity) // and the device keys in the Keystore
             CrashHandler.clear(this@MainActivity)
 
             tearDownCache()        // in-memory UI state
@@ -1222,7 +1306,7 @@ class MainActivity : ComponentActivity() {
         // to the box PIN with zero extra taps and zero extra fingerprints. The OS vouches for the
         // recency (the cipher only inits inside the window); nothing here trusts a timestamp we
         // recorded ourselves.
-        if (AppLock.tryGateCipher() != null) { screen = Screen.Pin; return }
+        if (AppLock.tryGateCipher() != null) { openTrailAfterGate(); screen = Screen.Pin; return }
         // Outside the window: the windowed-key prompt pattern , authenticate WITHOUT a CryptoObject
         // (duration-bound keys do not do per-use crypto binding), then retry the cipher, which the
         // just-completed authentication now allows.
@@ -1232,11 +1316,44 @@ class MainActivity : ComponentActivity() {
             .authenticate(CancellationSignal(), mainExecutor,
                 object : BiometricPrompt.AuthenticationCallback() {
                     override fun onAuthenticationSucceeded(r: BiometricPrompt.AuthenticationResult) {
-                        if (AppLock.tryGateCipher() != null) screen = Screen.Pin
+                        if (AppLock.tryGateCipher() != null) { openTrailAfterGate(); screen = Screen.Pin }
                         else error = "authentication did not open the gate , try again"
                     }
                     override fun onAuthenticationError(code: Int, msg: CharSequence) { error = msg.toString() }
                 })
+    }
+
+    /** The gate just saw the phone's owner: a trail key still kept on this phone (one made before
+     *  the box had it) opens into memory now, inside the Keystore's window, so the PIN unlock that
+     *  follows can hand it to the box ([com.localghost.app.sync.TrailKeys]). Off the UI thread. */
+    private fun openTrailAfterGate() {
+        if (com.localghost.app.sync.TrailKeys.where(this) != "phone") return
+        val app = applicationContext
+        Thread { com.localghost.app.sync.TrailKeys.onDeviceAuth(app) }.start()
+    }
+
+    /**
+     * LOCAL-ONLY on a phone whose trail key is kept here (no box has it): the trail opens with the
+     * phone's own unlock. Silent when the phone was unlocked in the last 30 s, a prompt otherwise.
+     * A phone whose key is in a box's vault never opens its trail here: that takes the box PIN.
+     */
+    private fun openTrailOnPhone() {
+        if (com.localghost.app.sync.TrailKeys.where(this) != "phone" || com.localghost.app.sync.TrailKeys.isOpen()) return
+        val app = applicationContext
+        Thread {
+            if (com.localghost.app.sync.TrailKeys.onDeviceAuth(app)) return@Thread
+            runOnUiThread {
+                BiometricPrompt.Builder(this)
+                    .setTitle("Open your trail").setSubtitle("Where this phone has been is sealed to your phone's lock")
+                    .setAllowedAuthenticators(BIOMETRIC_STRONG or DEVICE_CREDENTIAL).build()
+                    .authenticate(CancellationSignal(), mainExecutor,
+                        object : BiometricPrompt.AuthenticationCallback() {
+                            override fun onAuthenticationSucceeded(r: BiometricPrompt.AuthenticationResult) {
+                                Thread { com.localghost.app.sync.TrailKeys.onDeviceAuth(app) }.start()
+                            }
+                        })
+            }
+        }.start()
     }
 
     // A friendly default for THIS phone's device name at enrolment: the name the user gave the phone
@@ -1301,17 +1418,23 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun submit(pin: String) {
+        // The box sets the pace: a warm box replays one of its own last cold unlocks, step by step
+        // (secd, replay.go), so the phone shows what the box streams and adds no floor of its own.
         busy = true; error = null; unlockProgress = UnlockSnapshot.initial()
+        holdScreenOn()
         lifecycleScope.launch {
-            // Stream unlock progress: a hot account fills the stages in instantly, a cold one ticks
-            // through them once a second. The view is identical for any account.
+            // Stream unlock progress: a cold account ticks through its stages once a second, a warm
+            // one replays a cold one. The view is identical for any account.
             var ok = false
             BoxClient.submitPinStreaming(this@MainActivity, pin).collect { snap ->
                 unlockProgress = snap
+                holdScreenOn() // a long unlock must not let the screen go dark
                 if (snap.done) ok = true
                 if (snap.failed != null) error = snap.failed
             }
             busy = false; unlockProgress = null
+            // the app went to the background meanwhile and locked itself (onStop): the gate stays
+            if (screen !is Screen.Pin) return@launch
             if (ok) {
                 refreshGrants()
                 sync = sync.copy(notificationsMuted = NotifyState.isMuted(this@MainActivity))
@@ -1328,6 +1451,13 @@ class MainActivity : ComponentActivity() {
                 }
                 refreshChats()
                 flushShare()
+                // the device key: the phone's own replaces the QR's, once (DeviceCert, secd rekey.go);
+                // then the trail's key, fetched from the vault (or handed to it) and held until the
+                // app locks. In this order: the trail key is filed on the box under the certificate.
+                trailJob = lifecycleScope.launch(Dispatchers.IO) {
+                    runCatching { DeviceCert.rotateIfNeeded(this@MainActivity) }
+                    com.localghost.app.sync.TrailKeys.onBoxUnlocked(this@MainActivity)
+                }
                 maybeAutoSync()
                 // Each load is independent. Against the real box one endpoint can fail (a daemon down,
                 // a network blip) without the others, so wrap each Loadable load so a failure lands as
@@ -1361,7 +1491,28 @@ class MainActivity : ComponentActivity() {
     // --- grants ---
     private fun granted(p: String) =
         ContextCompat.checkSelfPermission(this, p) == PackageManager.PERMISSION_GRANTED
-    override fun onResume() { super.onResume(); permTick++; authGate.onResume() }
+    override fun onResume() { super.onResume(); permTick++; authGate.onResume(); holdScreenOn() }
+
+    // --- the screen stays on for a minute after the last touch while the app is open ---
+    // The phone's own timeout (often 15 or 30 s) is too short to read an answer or watch an unlock.
+    // FLAG_KEEP_SCREEN_ON is set on every touch and cleared a minute later; the phone's timeout
+    // then applies as usual. Off at once when the app leaves the screen.
+    private val screenOnHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val screenOnEnd = Runnable { window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
+
+    private fun holdScreenOn() {
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        screenOnHandler.removeCallbacks(screenOnEnd)
+        screenOnHandler.postDelayed(screenOnEnd, SCREEN_ON_MS)
+    }
+
+    override fun onUserInteraction() { super.onUserInteraction(); holdScreenOn() }
+
+    override fun onPause() {
+        super.onPause()
+        screenOnHandler.removeCallbacks(screenOnEnd)
+        window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    }
 
     private fun hasImages() = granted(Manifest.permission.READ_MEDIA_IMAGES)
     private fun hasVideo() = granted(Manifest.permission.READ_MEDIA_VIDEO)

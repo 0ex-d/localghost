@@ -7,6 +7,12 @@ package oracled
 // list, so a caption of a WebP preview came back "http 400" , with the reason in a body nobody read,
 // five times, then parked. Now: an image the model cannot read is converted first (dwebp, which the
 // same package as cwebp installs, else ffmpeg), and every refusal carries llama-server's own words.
+//
+// SIZE (30 Sep 2026). The mirror's llama.cpp v0.5.0 ABORTS on a full-size phone photo (a 3.3 MB
+// JPEG killed it mid-caption on 29 Sep; a tiny one was fine), taking chat down with it. So nothing
+// reaches it whole any more: every image is decoded here and sent as a baseline JPEG, upright (its
+// EXIF orientation applied, which stb_image ignores), its long side at most ImageMaxSide. An image
+// that cannot be decoded here or by a converter is not sent at all; the job parks with the reason.
 
 import (
 	"bytes"
@@ -15,13 +21,28 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/gif" // decoders for image.Decode
+	"image/jpeg"
+	_ "image/png"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/LocalGhostDao/localghost/server/internal/exif"
+	"github.com/LocalGhostDao/localghost/server/internal/imgfit"
 )
+
+// ImageMaxSide is the longest side, in pixels, of any image the model is shown (conf imageMaxSide).
+// 1024 keeps a photo's detail for a caption and its image tokens well inside one batch.
+var ImageMaxSide = 1024
+
+// imageMaxPixels refuses a decode bomb: a header claiming more than this is not decoded here.
+const imageMaxPixels = 120_000_000
 
 // imageKind names an image by its first bytes (the file name says nothing reliable).
 func imageKind(raw []byte) string {
@@ -65,18 +86,19 @@ func dwebpPNG(ctx context.Context, path, kind string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	tmp, err := os.CreateTemp("", "lg-img-*.png")
-	if err != nil {
-		return nil, err
-	}
-	tmp.Close()
-	defer os.Remove(tmp.Name())
-	cmd := exec.CommandContext(ctx, bin, "-quiet", path, "-o", tmp.Name())
+	// "-o -": the PNG comes back on a pipe. The picture is decoded from where it lies on the
+	// encrypted volume and never written anywhere else, not even a temporary file.
+	var out, errb bytes.Buffer
+	cmd := exec.CommandContext(ctx, bin, "-quiet", path, "-o", "-")
+	cmd.Stdout, cmd.Stderr = &out, &errb
 	cmd.WaitDelay = 5 * time.Second
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("dwebp: %v %s", err, strings.TrimSpace(string(out)))
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("dwebp: %v %s", err, strings.TrimSpace(errb.String()))
 	}
-	return os.ReadFile(tmp.Name())
+	if out.Len() == 0 {
+		return nil, errors.New("dwebp produced nothing")
+	}
+	return out.Bytes(), nil
 }
 
 // ffmpegJPEG decodes anything ffmpeg can (WebP, and HEIC/AVIF on builds that have them) to a JPEG.
@@ -86,7 +108,10 @@ func ffmpegJPEG(ctx context.Context, path, kind string) ([]byte, error) {
 		return nil, err
 	}
 	var out, errb bytes.Buffer
-	cmd := exec.CommandContext(ctx, bin, "-v", "error", "-i", path, "-frames:v", "1", "-f", "image2", "-c:v", "mjpeg", "pipe:1")
+	// scaled on the way out, so a HEIC or a JPEG Go refuses is small before it is decoded again here
+	side := strconv.Itoa(ImageMaxSide)
+	scale := "scale=w='min(iw," + side + ")':h='min(ih," + side + ")':force_original_aspect_ratio=decrease"
+	cmd := exec.CommandContext(ctx, bin, "-v", "error", "-i", path, "-frames:v", "1", "-vf", scale, "-f", "image2", "-c:v", "mjpeg", "pipe:1")
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	cmd.WaitDelay = 5 * time.Second
 	if err := cmd.Run(); err != nil {
@@ -95,30 +120,66 @@ func ffmpegJPEG(ctx context.Context, path, kind string) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
-// imageForModel is the data URI of the image at path in a format llama-server reads, converting when
-// it has to. An image nothing here can convert is an error that says so , the job parks with a reason.
+// imageForModel is the data URI of the image at path as the model is shown it: decoded, turned
+// upright, fitted to ImageMaxSide and sent as a JPEG. What the standard library cannot decode (WebP,
+// HEIC, the odd JPEG it refuses) goes through a converter first. An image nothing here can decode is
+// an error that says so , the job parks with a reason, and the engine never sees the file whole.
 func imageForModel(ctx context.Context, path string) (string, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("read image: %w", err)
 	}
 	kind := imageKind(raw)
+	var tried []string
 	if modelReads(kind) {
-		return dataURI(raw), nil
+		b, err := fitDecoded(raw, ImageMaxSide)
+		if err == nil {
+			return dataURI(b), nil
+		}
+		tried = append(tried, "decode: "+err.Error())
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
-	var tried []string
 	for _, conv := range converters {
 		b, err := conv(ctx, path, kind)
-		if err == nil && modelReads(imageKind(b)) {
-			return dataURI(b), nil
-		}
 		if err != nil {
 			tried = append(tried, err.Error())
+			continue
 		}
+		f, err := fitDecoded(b, ImageMaxSide)
+		if err != nil {
+			tried = append(tried, "decode converted: "+err.Error())
+			continue
+		}
+		return dataURI(f), nil
 	}
-	return "", fmt.Errorf("image is %s, which llama-server cannot read, and it could not be converted (%s) , install the webp package (dwebp) or ffmpeg", kind, strings.Join(tried, "; "))
+	return "", fmt.Errorf("image is %s and could not be decoded to fit the model (%s) , install the webp package (dwebp) or ffmpeg; it is not sent whole, a full-size photo crashes llama-server", kind, strings.Join(tried, "; "))
+}
+
+// fitDecoded decodes raw (JPEG, PNG or GIF), applies a JPEG's EXIF orientation, scales it so its
+// long side is at most maxSide, and encodes a baseline JPEG.
+func fitDecoded(raw []byte, maxSide int) ([]byte, error) {
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Width <= 0 || cfg.Height <= 0 || cfg.Width*cfg.Height > imageMaxPixels {
+		return nil, fmt.Errorf("%dx%d is not a size to decode", cfg.Width, cfg.Height)
+	}
+	img, _, err := image.Decode(bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	orient := 0
+	if imageKind(raw) == "jpeg" {
+		orient = exif.Parse(raw).Orientation
+	}
+	out := imgfit.Orient(imgfit.Downscale(img, maxSide), orient)
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, out, &jpeg.Options{Quality: 90}); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // llamaRefusal is llama-server's reason for a non-200: the message of its JSON error body, or the

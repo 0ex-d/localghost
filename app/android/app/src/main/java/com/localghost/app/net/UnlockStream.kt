@@ -34,10 +34,10 @@ enum class UnlockStage(val label: String) {
 
     companion object {
         /**
-         * The fixed order every unlock walks. Same for all accounts. MODEL sits before READY and
-         * BLOCKS it: the box holds done until oracled reports the model live, so the app lands on a
-         * box whose chat answers immediately. Cold unlocks pay the load time here, visibly, once;
-         * warm unlocks tick MODEL off in one poll.
+         * The fixed order every unlock walks. Same for all accounts. Since 30 Sep 2026 the box
+         * marks MODEL skipped and loads the model after READY, off the unlock's path; chat shows
+         * that load while it lasts ([BoxClient.modelStatus]). A box from before still runs MODEL
+         * here and sends its load's own estimate ([ModelLoad]).
          */
         val order = listOf(RESOLVE, UNSEAL, MOUNT, START_DB, START_CACHE, DAEMONS, MODEL, READY)
 
@@ -96,6 +96,9 @@ data class UnlockSnapshot(
     val failed: String? = null,
     /** The model's load while MODEL runs (oracled measures it; the poll carries it), else null. */
     val model: ModelLoad? = null,
+    /** The shortest this unlock may LOOK (ms from the PIN). 0: no floor, the default since the box
+     *  replays a cold unlock itself on a warm one (secd, replay.go). */
+    val floorMs: Long = 0,
 ) {
     companion object {
         /** A full snapshot from a flat map of stage -> state, filling unreached stages as PENDING. */

@@ -29,7 +29,9 @@ FETCH="$REPO/tools/mirror_fetch.sh"
 WDIR="${GHOST_WHISPER_DIR:-/opt/localghost/whisper.cpp}"
 SRC_DL="$WDIR.mirror-dl"
 TO="${GHOST_SPEECH_INSTALL_TO:-}"
-OWNER="${GHOST_SPEECH_OWNER:-coder}"
+# the daemons' user, as ghost.secd's unit names it (coder on a box from before tools/own_user.sh)
+UNIT_USER="$(sed -n 's/^ExecStart=.* --user \([a-z_][a-z0-9_-]*\).*/\1/p' /etc/systemd/system/ghost.secd.service 2>/dev/null | head -1)"
+OWNER="${GHOST_SPEECH_OWNER:-${UNIT_USER:-coder}}"
 BUILD_ONLY=0
 TARBALL=""
 while [ $# -gt 0 ]; do

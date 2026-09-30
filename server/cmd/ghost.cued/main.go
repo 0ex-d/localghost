@@ -24,9 +24,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/LocalGhostDao/localghost/server/internal/harden"
+	"github.com/LocalGhostDao/localghost/server/internal/poltergres"
 	"log"
 	"log/slog"
-	"github.com/LocalGhostDao/localghost/server/internal/poltergres"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -104,6 +105,7 @@ func (n notifSurfacer) Surface(c synth.Candidate) error {
 }
 
 func main() {
+	harden.NoDump() // same-user processes cannot read this one through /proc; no core file
 	port := flag.Int("health-port", envPort("GHOST_HEALTH_PORT"), "loopback health port")
 	mount := flag.String("mount", os.Getenv("GHOST_MOUNT"), "encrypted volume mount path")
 	flag.Parse()

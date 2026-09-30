@@ -29,6 +29,7 @@ import (
 
 	"github.com/LocalGhostDao/localghost/server/internal/ctlsock"
 	"github.com/LocalGhostDao/localghost/server/internal/ghosthealth"
+	"github.com/LocalGhostDao/localghost/server/internal/harden"
 	"github.com/LocalGhostDao/localghost/server/internal/oracle"
 	"github.com/LocalGhostDao/localghost/server/internal/oracled"
 	"github.com/LocalGhostDao/localghost/server/internal/rotlog"
@@ -49,6 +50,9 @@ type conf struct {
 	ModelName  string   `json:"modelName"`  // reported in responses
 	LlamaPort  int      `json:"llamaPort"`  // loopback port for the private llama-server
 	ExtraArgs  []string `json:"extraArgs"`  // tuning flags appended verbatim (threads, ctx, cache types, mlock...)
+	// the longest side, in pixels, of an image the model is shown (0: 1024). A full-size phone
+	// photo aborts the mirror's llama.cpp v0.5.0; oracled scales every image down first.
+	ImageMaxSide int `json:"imageMaxSide"`
 }
 
 func defaultConf(mount string) conf {
@@ -76,6 +80,7 @@ func runDirOf(mount string) string {
 }
 
 func main() {
+	harden.NoDump() // same-user processes cannot read this one through /proc; no core file
 	port := flag.Int("health-port", envPort("GHOST_HEALTH_PORT"), "loopback health port")
 	mount := flag.String("mount", os.Getenv("GHOST_MOUNT"), "encrypted volume mount path")
 	flag.Parse()
@@ -124,7 +129,12 @@ func main() {
 		ModelName:  cfg.ModelName,
 		// the last load's measured times, beside the conf: the next unlock's time-left estimate
 		LoadTimesPath: filepath.Join(filepath.Dir(confPath), "ghost.oracled.load.json"),
+		// the images the engine died on, beside the conf (strikes.go)
+		StrikesPath: filepath.Join(filepath.Dir(confPath), "ghost.oracled.image-strikes"),
 	})
+	if s := cfg.ImageMaxSide; s >= 256 && s <= 2048 {
+		oracled.ImageMaxSide = s
+	}
 	var modelReady atomic.Bool
 	var modelWhy atomic.Value // why the model is not up, for the health line
 	modelWhy.Store("model loading")
@@ -295,7 +305,7 @@ func main() {
 	})
 	srv := ghosthealth.NewServer(service, rep)
 	// /load , the model's load progress (phase, percent, time left), on the loopback health port:
-	// secd reads it every second while an unlock waits on the model and passes it to the app's bar
+	// secd reads it for GET /v1/model, which chat polls while the model loads after an unlock
 	srv.Handle("/load", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(llama.Load())

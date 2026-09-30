@@ -140,7 +140,7 @@ func (s *Server) handleVoiceUpload(w http.ResponseWriter, r *http.Request) {
 		s.appearsDown(w)
 		return
 	}
-	secdLog.Info("voice note spooled", "fn", "handleVoiceUpload", "id", id[:8], "kind", m.Kind, "bytes", n)
+	secdLog.Debug("voice note spooled", "fn", "handleVoiceUpload", "id", id[:8], "kind", m.Kind, "bytes", n)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
@@ -183,7 +183,23 @@ func (s *Server) handleVoiceNotes(w http.ResponseWriter, r *http.Request) {
 		s.appearsDown(w)
 		return
 	}
-	writeJSON(w, map[string]any{"notes": notes})
+	out := map[string]any{"notes": notes}
+	if mount, ok := s.voiceMount(); ok {
+		out["queue"] = voiceQueue(mount, time.Now())
+	}
+	writeJSON(w, out)
+}
+
+// voiceQueue is what the phone shows beside a waiting note: being transcribed now, why not (no
+// speech engine), or that ghost.voiced is not running (its state file is missing or old).
+func voiceQueue(mount string, now time.Time) map[string]any {
+	st, ok := voiced.ReadState(mount)
+	running := ok && now.Sub(time.UnixMilli(st.At)) < voiced.StateFresh
+	q := map[string]any{"running": running}
+	if running {
+		q["engine"], q["why"], q["working"] = st.Engine, st.Why, st.Working
+	}
+	return q
 }
 
 // handleVoiceAudio , GET /v1/voice/audio?id= , the note's WAV as it was recorded (Range works).
@@ -259,6 +275,6 @@ func (s *Server) handleVoiceDelete(w http.ResponseWriter, r *http.Request) {
 	for _, ext := range []string{".wav", ".json"} { // still in the inbox, not yet archived
 		_ = os.Remove(filepath.Join(mount, "voiced", "inbox", req.ID+ext))
 	}
-	secdLog.Info("voice note deleted", "fn", "handleVoiceDelete", "id", req.ID[:8], "found", found)
+	secdLog.Debug("voice note deleted", "fn", "handleVoiceDelete", "id", req.ID[:8], "found", found)
 	writeJSON(w, map[string]any{"ok": true, "found": found})
 }

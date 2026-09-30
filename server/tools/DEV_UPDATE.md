@@ -2873,3 +2873,347 @@ when the field does (`prefer_mmap`), and otherwise leaves loading to the library
 builds on either side of that change. The trick was checked with a host compiler against a struct
 with the field and one without. That was the only error in the file; the rest of the bridge's
 calls compiled against v0.5.0.
+
+## The phone model stays loaded, remembers the chat, and answers (app)
+
+- Picking the phone model in chat loads it once and keeps it (`LocalModel.pin`, `preload`). It was
+  loaded again for each message, and the idle timer unloaded it between them. The weights go when
+  another model is picked, when the app locks, or after the idle minutes once unpinned.
+- The chat's pill says "loading…" and then "ready" (`LocalModel.stateFlow`).
+- The phone model sees the conversation so far (`Transcript.withHistory`), so a follow-up works
+  on the phone as on the box.
+- It answered "I don't know" too often. The lifeboat prompt now asks for its best answer from what
+  it knows, and to hand over only questions about the person's own photos, notes, places and
+  history. With web notes, the prompt asks it to cite the notes and to say which part is not from
+  them, instead of refusing.
+- Under a phone answer, one line gives its speed (tokens a second, from llama.cpp's own counts).
+
+Not tested on the phone: whether the 2-bit model answers better with the new prompts. The 4-bit
+model is the better test.
+
+## The phone model's benchmark (app)
+
+MODELS › BENCHMARK runs two fixed tests with the phone model and shows the numbers the runtime
+measured (`PhoneBench`, `LocalModel.benchmark`):
+- **reading:** a passage of about 450 tokens (the cost of web notes and history);
+- **writing:** up to 160 tokens of answer.
+
+It shows:
+- the load time;
+- read and write speed in tokens a second;
+- "first word after about …" and "a whole answer in about …" for a typical 250-token question and
+  200-token answer;
+- the device, SoC and threads.
+
+The last 8 runs are kept on the phone, newest first, one line each.
+
+Tested: 5 `PhoneBenchTest` cases (the numbers, the words, the storage round trip). The run
+itself is structure-checked only.
+
+## Unlock: never quicker than 5 to 10 s; the screen stays on; tidbits (app)
+
+- **The floor.** Every unlock now stays on screen for at least a random 5 to 10 s, picked per
+  unlock. A box someone already opened answers "ready" at once, which told a watcher it had been
+  unlocked before. Until the floor passes, the screen walks the steps in order and never back past
+  one it has shown. The bar moves with the floor, and the time left counts down to it.
+  `UnlockClock` learns from the real times, not the padded ones.
+- "ready , it was already open" is gone for the same reason.
+- A failed unlock is not padded.
+- If the app goes to the background during the padding, it locks as usual and the unlock does not
+  open the shell behind the gate.
+- **The screen stays on** for a minute after the last touch while the app is open, and for the
+  whole of an unlock (`FLAG_KEEP_SCREEN_ON`, cleared a minute after the last touch and at once when
+  the app leaves the screen).
+- **Tidbits.** Under the step line, what the box is doing now is always shown. Under that, a "did
+  you know?" tip turns every 6 s. There are 10 new tips, for:
+  - incognito and web;
+  - answers that survive closing the app;
+  - follow-ups;
+  - saved thinking and sources;
+  - maps on the phone;
+  - the benchmark;
+  - the pinned phone model;
+  - the slideshow;
+  - the box staying offline.
+  While padding, the model's real phase is not shown.
+
+Tested: 4 new `UnlockClockTest` cases:
+- a warm box walks the steps to the floor;
+- padding never steps back, and learning uses the real times;
+- the time left is never under the floor before done;
+- a failure is not padded.
+
+## No flash of the last screen before the PIN (app)
+
+Coming back to the app showed the unlocked screen (chat, memories) for a moment before the gate.
+It was Android's recents snapshot: the system keeps a picture of the last frame and draws it
+until the app draws again. The app locked itself correctly on stop, but the picture was taken
+first. `setRecentsScreenshotEnabled(false)` stops it: recents shows a plain card, and the return
+shows no stale frame.
+
+Not testable off the phone. Check: open chat, go home, come back. The gate should show, with
+nothing before it.
+
+## Voice notes waited: no speech engine yet; the phone now says why (voiced, secd, app)
+
+The check-in's note was safe on the box (archived, 1 pending, 0 failed). There was no
+whisper-cli or speech model because the mirror's `whisper` and `speech` sets had not been
+installed. `sudo ./tools/update.sh speech` built whisper.cpp v1.9.4 (927cfce) and put
+`ggml-large-v3-turbo-q5_0.bin` on the volume; voiced picks the note up on its next pass.
+
+So the phone says why:
+- voiced writes `voiced/state.json` every 15 s: the engine, why not, the note being transcribed
+  now, and the pending count;
+- secd adds it to `/v1/voice/notes` as `queue` (`running` is false when the file is older than
+  90 s);
+- a waiting note reads, in order of what applies:
+  - "being transcribed now";
+  - "waiting: no speech engine on this box (…)";
+  - "waiting: the box's voice service is not running";
+  - "in line to be transcribed".
+
+Tested: `TestStateFile` (voiced) and `TestVoiceQueue` (fresh, stale, missing).
+
+## Captions come back: every image is fitted before llama-server sees it (oracled)
+
+The mirror's llama.cpp v0.5.0 aborted on a full-size photo (the 3.3 MB JPEG in the probe; a tiny
+one was fine), which killed chat with it. Now nothing reaches it whole:
+- every image is decoded in oracled with Go's standard library;
+- its EXIF orientation is applied (stb_image ignores it, so the model saw portraits sideways);
+- it is scaled to 1024 px on its long side (`imageMaxSide` in the conf, 256 to 2048) and sent as a
+  baseline JPEG;
+- WebP, HEIC and JPEGs Go refuses go through dwebp or ffmpeg first (ffmpeg scales on the way out),
+  then the same fit;
+- an image nothing can decode is not sent at all; its job parks with the reason;
+- a header claiming more than 120 megapixels is not decoded.
+
+The downscale and orientation code moved from framed into `internal/imgfit`, shared by both.
+
+**Strikes.** If llama-server dies while an image is in flight, that image gets a strike
+(`ghost.oracled.image-strikes`, beside the conf, on the volume). At 2 strikes it is refused before
+it is sent, so one bad photo cannot take chat down again and again. Two, not one: the engine can
+die for another reason. Deleting the file forgives every image.
+
+Tested:
+- a 3000×2000 JPEG with orientation 6 goes out as 682×1024;
+- the conf size is used;
+- WebP is converted, then fitted;
+- a broken JPEG is refused;
+- `TestStrikesStopAPoisonImage`: the engine dies twice, the third try is refused without being
+  sent, the count survives a restart, and a failure without a death counts nothing.
+
+Not tested: the real engine with a fitted photo. `tools/llama_probe.sh` does that on the box.
+
+Order on the box:
+1. deploy this drop (`redeploy.sh`), then unlock;
+2. put the projector back and restart oracled:
+   ```
+   D=/proc/$(pidof ghost.secd | cut -d' ' -f1)/root/var/lib/ghost/mnt/slot0/ai-models
+   sudo mv $D/mmproj-F16.gguf.off $D/mmproj-F16.gguf
+   sudo ghost-ctl restart-daemon ghost.oracled
+   ```
+3. give the caption jobs that parked while it was text-only another go:
+   `sudo ghost-cli ghost.searchd unpark kind=caption`.
+
+## The map opens from the phone; it reopens where you left it; download now works (app)
+
+The first open waited on a chain of round trips before any tile could draw:
+1. the newest photo;
+2. the list of world cuts;
+3. two world revalidations;
+4. the coast index, then the road index;
+5. sixty days of tracks.
+
+That happened even with every tile already on the phone. Now:
+- the coast and road indexes and the largest world cut already on the phone are drawn at once,
+  from disk; the box is asked afterwards, each part on its own, and only what changed is swapped
+  in;
+- the world-cut list is kept on the phone (`worldIndexOnPhone`);
+- **the map reopens where it was left** (`MapCamera`: centre and zoom in the phone's preferences),
+  so the tiles it needs are the ones on disk;
+- the last view's photo dots, place names, newest photo and day tracks are kept in memory and drawn
+  at once on the next open (`MapMemory`), then refreshed from the box. They are the box's data,
+  so they are dropped when the app locks, like the rest of the session;
+- when the box does not answer, the drawn world stays; the plain cut is not swapped in.
+
+**[ download now ]:**
+- It used `KEEP` with the daily run's constraints, so a press did nothing while an earlier run
+  waited, on a low battery or in backoff, and nothing on screen changed.
+- Now a press replaces whatever waits and needs only Wi-Fi.
+- The status line reads "queued … starts on Wi-Fi" until the run starts.
+- While it runs, the worker notes its count every 10 tiles, and SETTINGS refreshes the line every
+  3 s.
+
+Structure-checked only; not run on a phone.
+
+## Memories: every photo opens; On This Day is a slideshow (app, secd)
+
+- A tap on any photo in MEMORIES (On This Day and an outing's or a day's covers) opens
+  `MediaSlideshow` at that photo:
+  - full screen, swipe between them;
+  - a slideshow that turns every 4 s until a swipe or a tap pauses it;
+  - "[ ▶ slideshow ] / [ ❚❚ pause ]", "3 / 12 · 2019", "[ zoom ]" into the pinch-zoom viewer;
+  - thumb first, then the box's preview.
+- Videos show ▶ on their thumbnail and in the slideshow, and play in the video player.
+- To know which hashes are videos, the phone asks the new `POST /v1/frames/kinds`
+  (`{"hashes":[…]}` → `{"kinds":{hash:"photo"|"video"}}`, at most 200, hashes checked to the
+  character as for `/v1/frames/exists`). An older box does not answer it, and everything then
+  opens as a photo.
+
+Tested: `TestFrameKinds` (Postgres) and `TestCleanHashes`. The screens are structure-checked
+only.
+
+## Privacy fixes from the 30 Sep notes (secd, profile, watchd, hw, synthd, app, tools)
+
+Eleven of the twelve patches in the privacy field notes are applied (the phone-side unlock replay,
+0004, is replaced by the box-side one below):
+
+- **The session token goes only to the unlock that carried the PIN.** `POST /v1/unlock` answers
+  with a run id; `/v1/unlock/poll?run=` hands the fresh token to that run alone, within two
+  minutes. Before, anything on 127.0.0.1 (a website on the same machine) could read it after any
+  unlock. `unlock_token_test.go`.
+- **The wipe PIN counts as a wrong PIN in the limiter** and the KDF always runs, so the time to
+  the next guess no longer names it. `oracle_probe_test.go`.
+- **Temporary files on the volume.** watchd sets `TMPDIR=<mount>/tmp` for the cohort and all it
+  runs. `tmpdir_test.go`.
+- **The phone at rest.** No keyboard learning on private fields (`PrivateInput.kt`), sensitive
+  copies marked as such, the cache swept at lock (`CacheSweep.kt`), notifications of the daemons
+  private on the lock screen, no cloud backup or device transfer (`data_extraction_rules`).
+- **What leaves the phone.** Weather is asked at two decimals (about a kilometre), the web plan
+  never carries the person's own details, and on auto a follow-up never borrows a private question
+  for a web search (`FollowUp.mayBorrow`, `looksPersonal`).
+- **No core dumps.** `LimitCORE=0` in the unit and `harden.NoDump` in every daemon (a crashed
+  process holds decrypted data; systemd-coredump wrote it to the OS disk).
+- **Redis passwords off every command line.** An auth file, `REDISCLI_AUTH`, ACLs on stdin.
+  `redisargv_test.go`.
+- **Logs keep counts, not what was asked** (secd activity and synthd's web plan at Debug).
+- **Every rejected PIN is answered at the same moment** (1.5 to 2 s from the request, `rejectFloor`).
+  `reject_time_test.go`.
+- **`tools/privacy_check.sh`**: what this box shows the rest of the machine.
+
+## The model loads after the unlock; a warm unlock replays a cold one (secd, app)
+
+The unlock no longer waits for the model. MODEL is marked skipped and READY follows DAEMONS;
+oracled loads the model in the background, and chat shows that load (next section). On xyntai
+that takes the model's 12 s or so out of a cold unlock (modelled from the stages, not yet timed on
+the box).
+
+A warm unlock (the volume already open) would then answer in a second, and a second says "this
+box was open already". So secd keeps the step times of its last eight cold unlocks, on the
+encrypted volume (`<mount>/secd/unlock-times.json`, root's, 0600, written only when that is a
+mount point), and a warm unlock runs in a shadow and plays one of them back to the poll: picked
+with crypto/rand, stretched or shrunk by up to 8%, every step Running then Complete at its own
+time. A failed warm unlock is not played back (the reject floor covers it). Until eight cold
+unlocks are kept, a built-in shape stands in. The phone's own 5 to 10 s floor is gone; it shows
+what the box streams.
+
+The phone's clock learns a skipped step as next to nothing at once, so the time left no longer
+counts 20 s of model that the box no longer loads during the unlock.
+
+Tested: `replay_test.go` (a cold unlock is kept, a warm one replays it at about the same length
+with every step completed, a warm reject is not replayed, the scale stays within 8%, the times
+never land off the volume), `UnlockClockTest.aSkippedModelIsLearnedAtOnce`.
+
+## Chat shows the model loading (secd, app)
+
+`GET /v1/model` (session) answers `{"ready", "phase", "pct", "etaMs", "elapsedMs", "detail"}` from
+oracled's health port and its `/load`. Before a box chat, the phone asks it; while the model loads,
+the answer's place shows "your box is loading its model into the GPU · 42% · about 10 s left ,
+your question goes as soon as it is ready", once a second, for up to three minutes, then asks
+anyway and says so. A box without the route answers nothing usable and chat sends at once, as
+before. The phone's own model shows its load the same way, against how long its last load took.
+
+Tested: `TestModelStatus`, `ModelWaitTest`.
+
+## Pictures never go through a temporary directory (oracled, searchd, framed)
+
+- oracled and searchd decode WebP with `dwebp … -o -`: the PNG comes back on a pipe.
+- framed re-reads a damaged JPEG from where it lies in the archive (`redecode(src)`), not from a
+  copy; a frame ffmpeg grabbed has no original and is never re-read.
+- No `os.CreateTemp` is left in the image paths; `TMPDIR` on the volume stays as the fallback for
+  what the tools do by themselves.
+
+Tested: `TestWebPNeverTouchesTemp`, `TestDecodeWebPNeverTouchesTemp` (a fake dwebp that insists on
+`-o -`, and an empty `TMPDIR` afterwards), `TestDamagedJPEGPreviewGoesThroughFFmpeg`,
+`TestRedecodeNeedsTheOriginal`.
+
+## A user of their own for the daemons (hw, tools)
+
+The private mount namespace hides the vault from the host, not from the daemons' own user:
+`/proc/<pid>/root` of any daemon is a door into it for that user. On xyntai that user is coder,
+so anything else running as coder could read the vault.
+
+`sudo ./tools/own_user.sh` (with the box locked) makes a system user, `ghostd` (no home, no shell,
+no password), points ghost.secd's unit at it (`--user ghostd`, the old unit kept beside it) and
+restarts secd. The next unlock hands the volume over, once, before Postgres starts
+(`internal/hw/adopt.go`):
+
+1. a Postgres superuser named `ghostd`, made in single-user mode as the old owner, so the peer
+   line in pg_hba keeps a bootstrap identity;
+2. every file the old user owns on the volume chowned (lchown, links never followed; root's files
+   stay root's);
+3. the database directory and the volume root last: the root's owner is what says "handed over",
+   so a walk cut short is finished by the next unlock.
+
+It refuses a run user named like an app role (ghost, ghost_ro, ghost_rw), and it refuses while
+Postgres or Redis still run as the old user. The scripts that chown onto the volume follow the
+unit's user (`setup_whisper.sh`, `phone_model.sh`; update.sh already followed the volume).
+`privacy_check.sh` says whether the cohort's user is a login account and whether the volume still
+belongs to someone else. tools/README.md, step 8b.
+
+Tested: `TestAdoptVolumeEndToEnd` (a real Postgres: initdb as one user, handed to another, the new
+user's peer login is a superuser; refused under a live database), `TestChownOwnedWalk`,
+`TestPreviousOwner`, `TestRunUserMustNotBeAnAppRole`. Run it with
+`GHOST_ADOPT_USERS=old,new` as root.
+
+## The phone's trail is sealed (app, secd)
+
+Where the phone has been (the spool waiting for the box, and the last two days it draws itself)
+is sealed point by point to an X25519 key (`sync/TrailSeal.kt`): a one-off key per point,
+HKDF-SHA256, AES-256-GCM, "s1:" and base64 per line. The worker seals with the public half and
+holds nothing that opens what it wrote.
+
+Where the private half lives (`sync/TrailKeys.kt`):
+- **box**: in the vault, `<mount>/secd/trail/<device>.json` (root's, 0600). `POST /v1/trail/key`
+  hands it over once; `GET /v1/trail/key` gives it back after a PIN unlock; the app holds it in
+  memory and forgets it when it locks. Local-only mode never opens the trail of a phone whose key
+  is in a vault.
+- **phone** (no box yet): wrapped by an AndroidKeyStore RSA key that opens only within 30 s of the
+  phone's own unlock. Wrapping needs no unlock, so the key is made the first time a point is
+  recorded and nothing is written in the clear. The first PIN unlock of a box hands it over and
+  deletes the phone's copy.
+
+secd opens sealed points before it spools a location batch (`openLocationBatch`), so framed reads
+plain points and never sees a key; a batch sealed to a key the box does not hold is answered 409
+and the phone keeps it. The last point, which the worker compares every fix with, and the point
+the country was last looked up at are sealed to the phone's hardware (`security/DeviceSealed.kt`,
+readable in the background); the country for the phrases stays plain. The map's last view is
+sealed like the trail. Lines written before this build are sealed the first time a key is there.
+
+Tested: `TrailSealTest` and `trailkey_test.go` (each side opens what the other sealed: a vector
+from each language), `TestTrailKeyAndSealedUpload` (409 before the key, the spool gets plain
+points after, another device cannot read the key), `TestLocationBatchOpened`. The Keystore parts
+are structure-checked only.
+
+## The QR's key goes into the Keystore, then is replaced (app, secd)
+
+The enrolment QR carries a device certificate and its private key, which the box made. Now:
+
+1. **Keystore.** The key is imported into AndroidKeyStore, non-exportable, and the app's wrapped
+   copy is deleted. A phone enrolled before moves it the first time it connects.
+2. **Rotation.** After the first PIN unlock the phone makes a P-256 key inside the Keystore and
+   sends `POST /v1/device/rekey {"spki","sig"}` (ECDSA-SHA256 over "localghost rekey v1\n" and the
+   key). secd checks the proof, signs a certificate with the box CA (`/etc/ghost/ca`, same name as
+   the one presented) and keeps a pending hand-over on the OS disk.
+3. The phone switches to the new certificate and sends `POST /v1/device/rekey/confirm` over it.
+   secd retires the QR's certificate (`<state>/devices/retired`, fingerprints only, 0600), moves the
+   phone's trail key, notification position, sync positions and name to the new device key, and
+   from then on answers the old certificate as if the box were down, the PIN entry included. A
+   photographed QR is worth nothing after the first unlock.
+
+Until the confirmation both certificates work, so a lost answer is finished by the next unlock.
+
+Tested: `TestDeviceKeyRotation` (a bad proof refused, the certificate signed by the CA for the
+phone's key with the old name, the old certificate working until the confirmation and down after,
+the trail key moved, a second confirmation harmless, retired across a restart). The phone side is
+structure-checked only.

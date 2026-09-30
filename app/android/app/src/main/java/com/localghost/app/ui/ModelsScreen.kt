@@ -13,6 +13,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.RectangleShape
@@ -80,6 +82,7 @@ fun ModelsScreen(
             Text(line, color = if (built) TerminalDim else Warning, style = MaterialTheme.typography.labelMedium)
             Spacer(Modifier.height(6.dp))
         }
+        item { BenchmarkBlock() }
         if (models.isEmpty()) {
             item { EmptyLine("the box is offering no phone-runnable models yet.") }
         } else {
@@ -157,3 +160,60 @@ private fun ModelRow(
 }
 
 private fun gb(bytes: Long): String = "%.1f GB".format(bytes / 1_000_000_000.0)
+
+
+/**
+ * BENCHMARK: how this phone runs its model, measured by the runtime (PhoneBench). The latest run in
+ * full (load, read and write speeds, what a typical answer feels like, the phone and threads), the
+ * earlier ones a line each, so a new model or a new build can be compared with the last.
+ */
+@Composable
+private fun BenchmarkBlock() {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val usable = remember { com.localghost.app.local.LocalModel.usable(ctx) }
+    if (!usable) return
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    var runs by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(com.localghost.app.local.LocalModel.benchRuns(ctx)) }
+    var step by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<String?>(null) }
+    var failed by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth()) {
+        SectionLabel("BENCHMARK")
+        Spacer(Modifier.height(6.dp))
+        val s = step
+        if (s != null) {
+            Text("› $s (keep this screen open)", color = TerminalGreen, style = MaterialTheme.typography.labelMedium)
+        } else {
+            Text(if (runs.isEmpty()) "[ run the benchmark ]" else "[ run it again ]", color = TerminalGreen,
+                style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.clickable {
+                    failed = false
+                    step = "starting…"
+                    scope.launch {
+                        val r = com.localghost.app.local.LocalModel.benchmark(ctx) { now -> step = now }
+                        step = null
+                        if (r != null) runs = com.localghost.app.local.LocalModel.benchRuns(ctx) else failed = true
+                    }
+                }.padding(vertical = 4.dp))
+            if (runs.isEmpty() && !failed) Text("about half a minute: the model is loaded if it is not, reads a long passage, " +
+                "then writes a paragraph. The numbers are llama.cpp's own.", color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+            if (failed) Text("the model did not load or answer , MODELS above says why", color = Warning,
+                style = MaterialTheme.typography.labelMedium)
+        }
+        runs.firstOrNull()?.let { r ->
+            Spacer(Modifier.height(6.dp))
+            com.localghost.app.local.PhoneBench.lines(r).forEach { (k, v) ->
+                Row(Modifier.padding(vertical = 1.dp)) {
+                    Text(k, color = GhostTextDim, style = MaterialTheme.typography.labelMedium, modifier = Modifier.width(104.dp))
+                    Text(v, color = GhostText, style = MaterialTheme.typography.labelMedium)
+                }
+            }
+        }
+        if (runs.size > 1) {
+            Spacer(Modifier.height(6.dp))
+            Text("earlier runs", color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+            runs.drop(1).forEach { r ->
+                Text(com.localghost.app.local.PhoneBench.short(r), color = TerminalDim, style = MaterialTheme.typography.labelSmall)
+            }
+        }
+    }
+}

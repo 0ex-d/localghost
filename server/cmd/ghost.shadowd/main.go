@@ -24,17 +24,18 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
+	"github.com/LocalGhostDao/localghost/server/internal/harden"
+	"github.com/LocalGhostDao/localghost/server/internal/hw"
+	"github.com/LocalGhostDao/localghost/server/internal/poltergres"
 	"log"
 	"log/slog"
-	"github.com/LocalGhostDao/localghost/server/internal/poltergres"
-	"github.com/LocalGhostDao/localghost/server/internal/hw"
-	"fmt"
-	"time"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/LocalGhostDao/localghost/server/internal/ctlsock"
 	"github.com/LocalGhostDao/localghost/server/internal/ghosthealth"
@@ -45,6 +46,7 @@ import (
 const service = "ghost.shadowd"
 
 func main() {
+	harden.NoDump() // same-user processes cannot read this one through /proc; no core file
 	port := flag.Int("health-port", envPort("GHOST_HEALTH_PORT"), "loopback health/status port (required)")
 	flag.Parse()
 	if *port <= 0 {
@@ -110,8 +112,8 @@ func main() {
 		if mount != "" {
 			sc, err := hw.LoadServicesConfig(mount)
 			if err == nil {
-			db := poltergres.NewReadWrite(hw.SocketForMount(mount), sc.Postgres.Port, sc.Postgres.RWUser, sc.Postgres.RWPass, sc.Postgres.Name)
-			go detectorLoop(ctx, db, lg)
+				db := poltergres.NewReadWrite(hw.SocketForMount(mount), sc.Postgres.Port, sc.Postgres.RWUser, sc.Postgres.RWPass, sc.Postgres.Name)
+				go detectorLoop(ctx, db, lg)
 			} else {
 				lg.Warn("no services config , detectors idle", "fn", "main", "err", err)
 			}

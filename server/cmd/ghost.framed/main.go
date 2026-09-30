@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/LocalGhostDao/localghost/server/internal/harden"
 	"github.com/LocalGhostDao/localghost/server/internal/landtiles"
 	"github.com/LocalGhostDao/localghost/server/internal/roadgraph"
 	"github.com/LocalGhostDao/localghost/server/internal/roadtiles"
@@ -61,6 +62,7 @@ func defaultConf() conf {
 }
 
 func main() {
+	harden.NoDump() // same-user processes cannot read this one through /proc; no core file
 	port := flag.Int("health-port", envPort("GHOST_HEALTH_PORT"), "loopback health port")
 	mount := flag.String("mount", os.Getenv("GHOST_MOUNT"), "encrypted volume mount path")
 	flag.Parse()

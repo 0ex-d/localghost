@@ -46,7 +46,8 @@ func TestParsePlanTakesWhatTheModelWrappedAndKeepsOnlyWhatIsValid(t *testing.T) 
 func TestPlanPromptCarriesTheLastTurnsAndTheDate(t *testing.T) {
 	h := []chatTurn{{"user", "how much is a freddo in athens"}, {"assistant", "About 3 to 4 euros."}, {"user", "and in pounds?"}}
 	s := planPrompt("and in pounds?", h, time.Date(2026, 9, 26, 12, 0, 0, 0, time.UTC))
-	for _, must := range []string{"2026-09-26", "user: how much is a freddo", "assistant: About 3 to 4 euros.", "The question: and in pounds?", `"queries"`} {
+	for _, must := range []string{"2026-09-26", "user: how much is a freddo", "assistant: About 3 to 4 euros.", "The question: and in pounds?", `"queries"`,
+		"Never put the person's own details"} {
 		if !strings.Contains(s, must) {
 			t.Fatalf("prompt lacks %q:\n%s", must, s)
 		}

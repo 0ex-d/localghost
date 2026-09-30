@@ -28,6 +28,7 @@ import (
 
 	"github.com/LocalGhostDao/localghost/server/internal/ctlsock"
 	"github.com/LocalGhostDao/localghost/server/internal/ghosthealth"
+	"github.com/LocalGhostDao/localghost/server/internal/harden"
 	"github.com/LocalGhostDao/localghost/server/internal/hw"
 	"github.com/LocalGhostDao/localghost/server/internal/oracle"
 	"github.com/LocalGhostDao/localghost/server/internal/poltergres"
@@ -81,6 +82,7 @@ func defaultConf(mount string) conf {
 }
 
 func main() {
+	harden.NoDump() // same-user processes cannot read this one through /proc; no core file
 	port := flag.Int("health-port", envPort("GHOST_HEALTH_PORT"), "loopback health port")
 	mount := flag.String("mount", os.Getenv("GHOST_MOUNT"), "encrypted volume mount path")
 	flag.Parse()

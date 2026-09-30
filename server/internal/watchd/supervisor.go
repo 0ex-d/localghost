@@ -91,14 +91,16 @@ type Supervisor struct {
 	// recovered , so the person learns their archive stopped archiving from the app, not from
 	// noticing a week later. Best-effort by contract: the hook must never block or panic the
 	// supervisor; rate-limited per service (5 min) so a flapping daemon is one alert, not a feed.
-	notify func(service, kind, title, body string)
+	notify   func(service, kind, title, body string)
 	pollEach time.Duration
 	client   *http.Client
 	stopPoll context.CancelFunc
 	wg       sync.WaitGroup
 	logDir   string
-	mount    string  // the encrypted volume root; daemons get it as GHOST_MOUNT
-	runUser  string  // if set, daemons are spawned as this user
+	mount    string // the encrypted volume root; daemons get it as GHOST_MOUNT
+	runUser  string // if set, daemons are spawned as this user
+	tmpOnce  sync.Once
+	tmpOK    bool
 	jlog     *slog.Logger // watchd's own log (through a rotlog.RotWriter)
 }
 
@@ -454,11 +456,40 @@ func (s *Supervisor) spawn(svc Service) (*os.Process, error) {
 		// it per-cohort later; for now it is a passthrough of watchd's environment.
 	)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if cred := s.userCred(); cred != nil {
+	cred := s.userCred()
+	if cred != nil {
 		cmd.SysProcAttr.Credential = cred
+	}
+	// Temporary files on the ENCRYPTED volume: os.CreateTemp("") and every child the daemons run
+	// (ffmpeg, dwebp, whisper-cli) honour TMPDIR. Without it they used the host's /tmp, on the OS
+	// disk: framed's damaged-JPEG repair wrote the original photo there, and the WebP decodes
+	// wrote previews as PNG (found 30 Sep 2026).
+	if d := s.tmpDir(cred); d != "" {
+		cmd.Env = append(cmd.Env, "TMPDIR="+d)
 	}
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
 	return cmd.Process, nil
+}
+
+// tmpDir is <mount>/tmp, 0700, owned by the user the daemons run as, emptied the first time it is
+// made in this watchd (what a crash left behind). "" when it cannot be made: the daemon then falls
+// back to the system default rather than failing to start.
+func (s *Supervisor) tmpDir(cred *syscall.Credential) string {
+	d := filepath.Join(s.mount, "tmp")
+	s.tmpOnce.Do(func() {
+		_ = os.RemoveAll(d)
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			return
+		}
+		if cred != nil {
+			_ = os.Chown(d, int(cred.Uid), int(cred.Gid))
+		}
+		s.tmpOK = true
+	})
+	if !s.tmpOK {
+		return ""
+	}
+	return d
 }

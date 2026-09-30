@@ -1,9 +1,13 @@
 package oracled
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
+	"image"
+	"image/jpeg"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -34,7 +38,9 @@ func TestImageKinds(t *testing.T) {
 func TestImageForModelConvertsWhatTheModelCannotRead(t *testing.T) {
 	dir := t.TempDir()
 	jpg := filepath.Join(dir, "a.jpg")
-	os.WriteFile(jpg, []byte{0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3}, 0o644)
+	os.WriteFile(jpg, testJPEG(t, 40, 30, 0), 0o644)
+	broken := filepath.Join(dir, "broken.jpg")
+	os.WriteFile(broken, []byte{0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3}, 0o644)
 	webp := filepath.Join(dir, "a.webp")
 	os.WriteFile(webp, []byte("RIFF\x00\x00\x00\x00WEBPVP8 data"), 0o644)
 	heic := filepath.Join(dir, "a.heic")
@@ -53,17 +59,72 @@ func TestImageForModelConvertsWhatTheModelCannotRead(t *testing.T) {
 		},
 	}
 	if uri, err := imageForModel(context.Background(), jpg); err != nil || !strings.HasPrefix(uri, "data:image/jpeg;base64,") || calls != 0 {
-		t.Fatalf("jpeg passthrough: %v %.30s calls=%d", err, uri, calls)
+		t.Fatalf("jpeg decoded here: %v %.30s calls=%d", err, uri, calls)
 	}
-	if uri, err := imageForModel(context.Background(), webp); err != nil || !strings.HasPrefix(uri, "data:image/png;base64,") {
-		t.Fatalf("webp converted: %v %.30s", err, uri)
+	if uri, err := imageForModel(context.Background(), webp); err != nil || !strings.HasPrefix(uri, "data:image/jpeg;base64,") {
+		t.Fatalf("webp converted, then fitted: %v %.30s", err, uri)
 	}
 	if _, err := imageForModel(context.Background(), heic); err == nil || !strings.Contains(err.Error(), "heic") {
 		t.Fatalf("heic: %v", err)
 	}
+	// a JPEG nothing can decode is never sent whole
+	if _, err := imageForModel(context.Background(), broken); err == nil || !strings.Contains(err.Error(), "not sent whole") {
+		t.Fatalf("broken jpeg: %v", err)
+	}
 	if _, err := imageForModel(context.Background(), filepath.Join(dir, "gone.jpg")); err == nil || !strings.Contains(err.Error(), "read image") {
 		t.Fatalf("missing file: %v", err)
 	}
+}
+
+// A full-size photo reaches the model at ImageMaxSide on its long side, turned upright.
+func TestImageForModelFitsAndTurns(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "big.jpg")
+	os.WriteFile(p, testJPEG(t, 3000, 2000, 6), 0o644) // landscape pixels, "rotate 90 to show"
+	uri, err := imageForModel(context.Background(), p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := base64.StdEncoding.DecodeString(strings.TrimPrefix(uri, "data:image/jpeg;base64,"))
+	cfg, err := jpeg.DecodeConfig(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Width != 682 || cfg.Height != 1024 {
+		t.Fatalf("sent %dx%d, want 682x1024 (fitted, then turned upright)", cfg.Width, cfg.Height)
+	}
+	old := ImageMaxSide
+	ImageMaxSide = 512
+	defer func() { ImageMaxSide = old }()
+	uri, _ = imageForModel(context.Background(), p)
+	raw, _ = base64.StdEncoding.DecodeString(strings.TrimPrefix(uri, "data:image/jpeg;base64,"))
+	if cfg, _ = jpeg.DecodeConfig(bytes.NewReader(raw)); cfg.Height != 512 {
+		t.Fatalf("conf size not used: %dx%d", cfg.Width, cfg.Height)
+	}
+}
+
+// testJPEG is a w x h JPEG, with an EXIF Orientation tag when orient > 0.
+func testJPEG(t *testing.T, w, h, orient int) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for i := range img.Pix {
+		img.Pix[i] = byte(i * 7)
+	}
+	var buf bytes.Buffer
+	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 80}); err != nil {
+		t.Fatal(err)
+	}
+	b := buf.Bytes()
+	if orient == 0 {
+		return b
+	}
+	// APP1 "Exif\0\0" + little-endian TIFF: IFD0 with one entry, 0x0112 SHORT 1 = orient
+	tiff := []byte{'I', 'I', 42, 0, 8, 0, 0, 0, 1, 0, 0x12, 0x01, 3, 0, 1, 0, 0, 0, byte(orient), 0, 0, 0, 0, 0, 0, 0}
+	seg := append([]byte("Exif\x00\x00"), tiff...)
+	app1 := []byte{0xFF, 0xE1, byte((len(seg) + 2) >> 8), byte(len(seg) + 2)}
+	out := append([]byte{0xFF, 0xD8}, app1...)
+	out = append(out, seg...)
+	return append(out, b[2:]...)
 }
 
 // fakeLlama answers every chat completion with the given status and body.
@@ -105,5 +166,53 @@ func TestRefusalsCarryLlamaServersReason(t *testing.T) {
 	b = fakeLlama(t, 400, `{"error":{"message":"bad things","type":"invalid_request_error"}}`)
 	if _, _, err := b.StreamChat(context.Background(), nil, "hi", "", ""); err == nil || !strings.Contains(err.Error(), "bad things") {
 		t.Fatalf("stream: %v", err)
+	}
+}
+
+// An image the engine dies on twice is not sent a third time; a death with nothing in flight, or
+// a plain refusal, counts nothing.
+func TestStrikesStopAPoisonImage(t *testing.T) {
+	dir := t.TempDir()
+	img := filepath.Join(dir, "p.jpg")
+	os.WriteFile(img, testJPEG(t, 64, 48, 0), 0o644)
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		// the engine aborting mid-request: the connection just ends
+		hj, _ := w.(http.Hijacker)
+		c, _, _ := hj.Hijack()
+		c.Close()
+	}))
+	defer srv.Close()
+	dead := make(chan struct{})
+	close(dead) // the reaper saw it exit
+	strikesPath := filepath.Join(dir, "strikes")
+	b := &llamaBackend{client: srv.Client(), streamClient: srv.Client(), addr: strings.TrimPrefix(srv.URL, "http://"),
+		exited: dead, strikes: newImageStrikes(strikesPath), stats: NewEngineStats()}
+	req := oracle.Request{Input: "caption", Images: []string{img}}
+	for i := 1; i <= 2; i++ {
+		_, err := b.Infer(context.Background(), req)
+		if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("strike %d", i)) {
+			t.Fatalf("try %d: %v", i, err)
+		}
+	}
+	_, err := b.Infer(context.Background(), req)
+	if err == nil || !strings.Contains(err.Error(), "not sent again") || hits != 2 {
+		t.Fatalf("third try: %v, hits %d", err, hits)
+	}
+	// the count survives a restart of oracled
+	b.strikes = newImageStrikes(strikesPath)
+	if _, err := b.Infer(context.Background(), req); err == nil || hits != 2 {
+		t.Fatalf("after reload: %v, hits %d", err, hits)
+	}
+	// an engine that did not die: a failure is just a failure
+	os.Remove(strikesPath)
+	b.strikes = newImageStrikes(strikesPath)
+	b.exited = make(chan struct{})
+	if _, err := b.Infer(context.Background(), req); err == nil || strings.Contains(err.Error(), "strike") {
+		t.Fatalf("no death, no strike: %v", err)
+	}
+	if _, err := os.Stat(strikesPath); err == nil {
+		t.Fatal("a strike file for a live engine")
 	}
 }

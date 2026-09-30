@@ -8,6 +8,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
@@ -25,15 +27,22 @@ import java.io.File
  *
  * One call at a time (a Mutex around the native handle), every call starting from an empty
  * context, speed measured on every call and remembered (so the reader can size its work before
- * it starts), the weights dropped after a few idle minutes (2 GB is not something to hold in a
- * backgrounded app), the thought channel and turn markers stripped from what comes back.
+ * it starts), the thought channel and turn markers stripped from what comes back.
+ *
+ * Loaded once and kept: choosing the phone's model in the chat loads it straight away and PINS it,
+ * so talking to it never waits on a reload (it used to be freed after four idle minutes, and every
+ * pick of the model in the chat freed it too). Unpinned (the box chosen again, or the app locked),
+ * the weights go after a few idle minutes, since 2 GB is not something to hold in a backgrounded app.
  */
 object LocalModel {
 
     enum class State { ABSENT, NOT_BUILT, NOT_LOADED, LOADING, READY, FAILED }
 
+    private val _state = MutableStateFlow(State.ABSENT)
+    /** The state as a flow, for the chat's model pill (loading… / ready). */
+    val stateFlow: StateFlow<State> = _state
     @Volatile var state: State = State.ABSENT
-        private set
+        private set(v) { field = v; _state.value = v }
     /** The prompt format the model was driven with last ("gemma4", "model-template", …), for the settings line. */
     @Volatile var lastFormat: String = ""
         private set
@@ -43,6 +52,13 @@ object LocalModel {
     private val lock = Mutex()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var idleJob: Job? = null
+    @Volatile private var pinned = false
+    /** Threads the loaded model runs on (for the benchmark's report). */
+    @Volatile var threads: Int = 0
+        private set
+    /** The last call's numbers, for the line under a phone answer. */
+    @Volatile var last: Result? = null
+        private set
     private const val IDLE_UNLOAD_MS = 4 * 60_000L
     const val N_CTX = 4096
 
@@ -64,9 +80,10 @@ object LocalModel {
             state = State.LOADING
             // the big cores: on an 8-core phone four are performance cores; more threads than
             // big cores makes llama.cpp slower, not faster
-            val threads = (Runtime.getRuntime().availableProcessors() / 2).coerceIn(2, 4)
+            val n = (Runtime.getRuntime().availableProcessors() / 2).coerceIn(2, 4)
+            threads = n
             val t0 = System.currentTimeMillis()
-            handle = native.nativeLoad(file.absolutePath, N_CTX, threads)
+            handle = native.nativeLoad(file.absolutePath, N_CTX, n)
             state = if (handle != 0L) State.READY else State.FAILED
             if (handle != 0L) Speed.noteLoad(ctx, System.currentTimeMillis() - t0)
         }
@@ -94,6 +111,7 @@ object LocalModel {
                 val st = native.nativeStats(h)
                 val r = Result(clean(buf.toString(Charsets.UTF_8.name())), st[0].toInt(), st[1], st[2].toInt(), st[3], st[4].toInt(), format)
                 Speed.note(ctx, r.promptTokens, r.promptMs, r.genTokens, r.genMs)
+                last = r
                 r
             }
         }.also { armIdle() }
@@ -111,8 +129,62 @@ object LocalModel {
             awaitClose { }
         }.flowOn(Dispatchers.Default)
 
-    const val LIFEBOAT_SYSTEM = "You are LocalGhost's small on-phone model, answering while the person's own server cannot be reached. " +
-        "You cannot see their photos, notes or history. Answer plainly and briefly, and say so when you do not know."
+    // A small model told "say so when you do not know" says so to almost everything ("it mostly
+    // answers with I do not know and I cannot", 30 Sep 2026): the instruction outweighs what it does
+    // know. It is asked for its best answer now, and the one limit it has (no view of the person's
+    // own life) is named with what to say instead.
+    const val LIFEBOAT_SYSTEM = "You are Ghost, a helpful assistant running on the person's phone. " +
+        "Answer the question directly from what you know, in a few clear sentences, and give your best answer. " +
+        "Only if the question is about the person's own photos, notes, places or history, say that their box answers those once it is back."
+
+    /** Keep the weights while the phone's model is the one being talked to (true), or let the idle
+     *  timer drop them again (false). */
+    fun pin(on: Boolean) {
+        pinned = on
+        if (on) idleJob?.cancel() else if (handle != 0L) armIdle()
+    }
+
+    /** Load in the background now (the model was just chosen), so the first message does not wait. */
+    fun preload(ctx: Context) {
+        val app = ctx.applicationContext
+        scope.launch { ensureLoaded(app) }
+    }
+
+    /**
+     * The benchmark (PhoneBench): load (timed, when not loaded yet), read a ~450-token passage,
+     * write up to 160 tokens, as the runtime counts them. Kept with the last runs. Null when the
+     * model is missing or did not load or answer. [onStep] says what it is doing.
+     */
+    suspend fun benchmark(ctx: Context, onStep: (String) -> Unit): PhoneBench.Run? {
+        val file = modelFile(ctx) ?: return null
+        val loadedNow = state != State.READY || handle == 0L
+        if (loadedNow) onStep("loading the model…")
+        val t0 = System.currentTimeMillis()
+        if (!ensureLoaded(ctx)) return null
+        val loadMs = if (loadedNow) System.currentTimeMillis() - t0 else Speed.loadMs(ctx)
+        onStep("reading a long passage…")
+        val r = complete(ctx, "You are being timed. Follow the instruction at the end.", PhoneBench.READ_PROMPT,
+            PhoneBench.READ_MAX_TOKENS, 0.1f) ?: return null
+        onStep("writing an answer…")
+        val w = complete(ctx, "You are a helpful assistant.", PhoneBench.WRITE_PROMPT, PhoneBench.WRITE_MAX_TOKENS, 0.1f) ?: return null
+        val run = PhoneBench.Run(System.currentTimeMillis(), file.name, loadMs, loadedNow,
+            r.promptTokens, r.promptMs, w.genTokens, w.genMs, threads, device())
+        val p = ctx.getSharedPreferences(BENCH_PREFS, Context.MODE_PRIVATE)
+        p.edit().putString("runs", PhoneBench.toJson(listOf(run) + PhoneBench.fromJson(p.getString("runs", null)))).apply()
+        return run
+    }
+
+    /** The kept benchmark runs, newest first. */
+    fun benchRuns(ctx: Context): List<PhoneBench.Run> =
+        PhoneBench.fromJson(ctx.getSharedPreferences(BENCH_PREFS, Context.MODE_PRIVATE).getString("runs", null))
+
+    private const val BENCH_PREFS = "lg_phone_bench"
+
+    private fun device(): String {
+        val b = android.os.Build.MANUFACTURER.replaceFirstChar { it.uppercase() } + " " + android.os.Build.MODEL
+        val soc = if (android.os.Build.VERSION.SDK_INT >= 31) android.os.Build.SOC_MODEL.takeIf { it.isNotBlank() && it != "unknown" } else null
+        return listOfNotNull(b, soc, "${Runtime.getRuntime().availableProcessors()} cores").joinToString(" · ")
+    }
 
     fun unload() {
         idleJob?.cancel()
@@ -126,6 +198,7 @@ object LocalModel {
 
     private fun armIdle() {
         idleJob?.cancel()
+        if (pinned) return
         idleJob = scope.launch {
             delay(IDLE_UNLOAD_MS)
             lock.withLock {

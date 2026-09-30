@@ -120,6 +120,10 @@ func (d *DataStore) Start(slot int) (Endpoints, error) {
 	if err != nil {
 		return Endpoints{}, err
 	}
+	// a volume that still belongs to the user the cohort used to run as is handed over first (once)
+	if err := d.adoptVolume(slot, c); err != nil {
+		return Endpoints{}, fmt.Errorf("hand the volume to the run user: %w", err)
+	}
 	if err := d.startPostgres(slot, c); err != nil {
 		return Endpoints{}, err
 	}
@@ -660,7 +664,12 @@ func pgRuntimeBin(mount string) (string, string, bool) {
 // back to OS packages, which are always world-executable. This is the guard that stops a broken
 // bundle from wedging unlock; the bundle script's own chown is the fix, this is the safety net.
 func (d *DataStore) runtimeUsable(bin string) bool {
-	cred := d.dbCredential()
+	return runtimeUsableBy(bin, d.dbCredential())
+}
+
+// runtimeUsableBy is [runtimeUsable] for a given identity (adoption runs Postgres once as the
+// volume's previous owner).
+func runtimeUsableBy(bin string, cred *syscall.Credential) bool {
 	if cred == nil {
 		return true // no privilege drop (tests): whatever secd can run is fine
 	}
@@ -693,8 +702,13 @@ func osPgBin() string {
 
 // pgCmd builds a command for a Postgres binary, volume runtime first, OS package fallback.
 func (d *DataStore) pgCmd(mount, name string, args ...string) *exec.Cmd {
+	return pgCmdAs(mount, d.dbCredential(), name, args...)
+}
+
+// pgCmdAs is [pgCmd] run as [cred] (nil: as secd).
+func pgCmdAs(mount string, cred *syscall.Credential, name string, args ...string) *exec.Cmd {
 	var cmd *exec.Cmd
-	if bin, ld, ok := pgRuntimeBin(mount); ok && d.runtimeUsable(bin) {
+	if bin, ld, ok := pgRuntimeBin(mount); ok && runtimeUsableBy(bin, cred) {
 		cmd = exec.Command(filepath.Join(bin, name), args...)
 		cmd.Env = append(os.Environ(), "LD_LIBRARY_PATH="+ld)
 	} else if osbin := osPgBin(); osbin != "" {
@@ -705,7 +719,7 @@ func (d *DataStore) pgCmd(mount, name string, args ...string) *exec.Cmd {
 	}
 	// Drop to the unprivileged user , Postgres will not run as root. This is the fix for unlock's
 	// DB-start failing and rolling back the whole mount.
-	if cred := d.dbCredential(); cred != nil {
+	if cred != nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: cred}
 	}
 	return cmd
@@ -727,6 +741,31 @@ func (d *DataStore) redisCmd(mount, name string, args ...string) *exec.Cmd {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: cred}
 	}
 	return cmd
+}
+
+// redisCli is redis-cli with the password in its environment (REDISCLI_AUTH), not on its command
+// line, where any user of the host reads it (ps, /proc/<pid>/cmdline).
+func (d *DataStore) redisCli(mount, pw string, args ...string) *exec.Cmd {
+	cmd := d.redisCmd(mount, "redis-cli", args...)
+	if cmd.Env == nil {
+		cmd.Env = os.Environ()
+	}
+	cmd.Env = append(cmd.Env, "REDISCLI_AUTH="+pw)
+	return cmd
+}
+
+// redisQuote quotes one argument the way redis-cli and redis.conf read a double-quoted string.
+func redisQuote(a string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`).Replace(a) + `"`
+}
+
+// redisLine is one command for redis-cli's stdin.
+func redisLine(args []string) string {
+	q := make([]string, len(args))
+	for i, a := range args {
+		q[i] = redisQuote(a)
+	}
+	return strings.Join(q, " ") + "\n"
 }
 
 // pgIdent admits only strict lower-case identifiers for role/database names sourced from
@@ -1005,7 +1044,7 @@ func (d *DataStore) startRedis(slot int, c ServicesConfig) error {
 	dir := d.redisDir(slot)
 	// CONVERGE, not start: same rule as Postgres. An authenticated ping answering means this slot's
 	// Redis survived whatever restarted secd; re-assert the service ACLs (cheap, idempotent) and done.
-	if d.redisCmd(filepath.Dir(dir), "redis-cli", "-p", fmt.Sprint(c.Redis.Port), "-a", c.Redis.Password, "ping").Run() == nil {
+	if d.redisCli(filepath.Dir(dir), c.Redis.Password, "-p", fmt.Sprint(c.Redis.Port), "ping").Run() == nil {
 		return d.ensureRedisACL(slot, c)
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -1022,13 +1061,21 @@ func (d *DataStore) startRedis(slot int, c ServicesConfig) error {
 	// requirepass from services.conf: even loopback-only, an unauthenticated Redis lets any local
 	// process read the cache. The password gates it, matching Postgres. The readiness ping below must
 	// authenticate too (-a), so a wrong/missing password reads as not-ready, not silently open.
-	cmd := d.redisCmd(filepath.Dir(dir), "redis-server",
+	// the password in a file on the volume (0600), the config file redis-server reads first: on
+	// the command line every user of the host read it with ps (found 30 Sep 2026)
+	authConf := filepath.Join(dir, "auth.conf")
+	if err := os.WriteFile(authConf, []byte("requirepass "+redisQuote(c.Redis.Password)+"\n"), 0o600); err != nil {
+		return fmt.Errorf("redis auth conf: %w", err)
+	}
+	if cred := d.dbCredential(); cred != nil {
+		_ = os.Chown(authConf, int(cred.Uid), int(cred.Gid))
+	}
+	cmd := d.redisCmd(filepath.Dir(dir), "redis-server", authConf,
 		"--port", fmt.Sprint(c.Redis.Port),
 		"--bind", "127.0.0.1",
 		"--dir", dir,
 		"--daemonize", "yes",
 		"--pidfile", pidFile,
-		"--requirepass", c.Redis.Password,
 		// Persistence to the encrypted volume, two thresholds: an hour for a quiet box (one change
 		// is enough to earn the hourly snapshot), a minute only when writes are heavy (20+ changes ,
 		// sync bursts, caption runs). Constant 60s snapshots on an idle box were pure disk churn.
@@ -1041,7 +1088,7 @@ func (d *DataStore) startRedis(slot int, c ServicesConfig) error {
 	}
 	// brief readiness wait, authenticated
 	for i := 0; i < 30; i++ {
-		if d.redisCmd(filepath.Dir(dir), "redis-cli", "-p", fmt.Sprint(c.Redis.Port), "-a", c.Redis.Password, "ping").Run() == nil {
+		if d.redisCli(filepath.Dir(dir), c.Redis.Password, "-p", fmt.Sprint(c.Redis.Port), "ping").Run() == nil {
 			return d.ensureRedisACL(slot, c)
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -1063,8 +1110,14 @@ func (d *DataStore) ensureRedisACL(slot int, c ServicesConfig) error {
 		{"ACL", "SETUSER", c.Redis.RWUser, "on", ">" + c.Redis.RWPass, "~*", "+@read", "+@write", "+@keyspace", "+ping", "+auth", "+hello"},
 	}
 	for _, u := range users {
-		args := append([]string{"-p", fmt.Sprint(c.Redis.Port), "-a", c.Redis.Password}, u...)
-		if out, err := d.redisCmd(mount, "redis-cli", args...).CombinedOutput(); err != nil {
+		// the command goes in on stdin: its passwords never sit on a command line
+		cmd := d.redisCli(mount, c.Redis.Password, "-p", fmt.Sprint(c.Redis.Port))
+		cmd.Stdin = strings.NewReader(redisLine(u))
+		out, err := cmd.CombinedOutput()
+		if err == nil && strings.Contains(string(out), "ERR") {
+			err = fmt.Errorf("refused")
+		}
+		if err != nil {
 			return fmt.Errorf("redis acl %s: %v: %s", u[2], err, strings.TrimSpace(string(out)))
 		}
 	}
@@ -1075,7 +1128,7 @@ func (d *DataStore) stopRedis(slot int, c ServicesConfig) error {
 	port := fmt.Sprint(c.Redis.Port)
 	pw := c.Redis.Password
 	mount := filepath.Dir(d.pgData(slot))
-	if d.redisCmd(mount, "redis-cli", "-p", port, "-a", pw, "ping").Run() != nil {
+	if d.redisCli(mount, pw, "-p", port, "ping").Run() != nil {
 		return nil // not running (or unreachable) , nothing to stop
 	}
 	// shutdown SAVE, not nosave: a lock is a PLANNED exit, and nosave was discarding everything
@@ -1083,9 +1136,9 @@ func (d *DataStore) stopRedis(slot int, c ServicesConfig) error {
 	// cursors, and stats rings died at every lock, silently. The thresholds exist to bound CRASH
 	// loss; a shutdown we ourselves ordered has no excuse not to persist. SAVE writes the RDB to
 	// the encrypted volume before exit; on a box this size that is milliseconds to low seconds.
-	out, err := d.redisCmd(mount, "redis-cli", "-p", port, "-a", pw, "shutdown", "save").CombinedOutput()
+	out, err := d.redisCli(mount, pw, "-p", port, "shutdown", "save").CombinedOutput()
 	// shutdown closes the connection, so an error here is often benign; check it actually stopped.
-	if d.redisCmd(mount, "redis-cli", "-p", port, "-a", pw, "ping").Run() == nil {
+	if d.redisCli(mount, pw, "-p", port, "ping").Run() == nil {
 		return fmt.Errorf("redis slot %d still up after shutdown: %s", slot, strings.TrimSpace(string(out)))
 	}
 	_ = err

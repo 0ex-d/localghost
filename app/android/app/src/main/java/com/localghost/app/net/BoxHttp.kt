@@ -33,8 +33,14 @@ object BoxHttp {
     @Volatile private var cachedFactory: javax.net.ssl.SSLSocketFactory? = null
     @Volatile private var cachedKey: String = ""
 
+    /** Forget the cached factory: the device key changed (moved into the Keystore, or rotated), so
+     *  the next connection presents the new one. */
+    fun reset() {
+        synchronized(this) { cachedFactory = null; cachedKey = "" }
+    }
+
     private fun factoryFor(ctx: Context, cfg: BoxConfig.Config): javax.net.ssl.SSLSocketFactory {
-        val key = cfg.baseUrl + "|" + cfg.certFingerprint
+        val key = cfg.baseUrl + "|" + cfg.certFingerprint + "|" + DeviceCert.activeAlias(ctx)
         cachedFactory?.let { if (cachedKey == key) return it }
         synchronized(this) {
             cachedFactory?.let { if (cachedKey == key) return it }

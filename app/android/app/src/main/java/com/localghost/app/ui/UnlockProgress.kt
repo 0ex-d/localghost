@@ -37,11 +37,13 @@ import com.localghost.app.ui.theme.Warning
 
 /**
  * The unlock (and lock) screen's progress: a percentage and the time left, a bar that moves with
- * time, the box's steps each with how long it took, and a line underneath that says what the box
- * is doing now, turn about with something the app can do.
+ * time, one line with the step, and under it what the box is doing now and, turning every few
+ * seconds, something useful the app can do.
  *
  * The time comes from [UnlockClock]: this phone times every cold unlock and learns what each step
- * takes on this box; while the model loads, the box's own estimate is used. Everything shown is
+ * takes on this box; a box that still loads its model during unlock sends its own estimate. A warm
+ * box replays one of its own cold unlocks step by step, so a quick unlock looks like any other
+ * without the phone adding anything. Everything shown is
  * built from the stage stream alone, which the box sends identically for every account, so a real
  * and a duress unlock look the same.
  */
@@ -52,7 +54,7 @@ fun UnlockProgress(snapshot: UnlockSnapshot, modifier: Modifier = Modifier) {
     val locking = kind == UnlockStage.STOP_SERVICES
     val clock = remember(kind) { UnlockClock(UnlockClockStore.load(ctx)) }
     val seed = remember(kind) { (System.nanoTime() % 1000).toInt() }
-    // a quarter-second clock for the live times; the tidbit turns every 4.5 s
+    // a quarter-second clock for the live times; the tip turns every 6 s
     val tick: Long by produceState(0L) {
         while (true) { kotlinx.coroutines.delay(250); value += 1 }
     }
@@ -60,6 +62,8 @@ fun UnlockProgress(snapshot: UnlockSnapshot, modifier: Modifier = Modifier) {
     LaunchedEffect(snapshot.done) {
         if (snapshot.done) clock.learn()?.let { UnlockClockStore.save(ctx, it) }
     }
+    // finished as far as the screen goes: the box said ready (and any floor has passed)
+    val finished = snapshot.done && est.current == null
 
     Column(modifier.fillMaxWidth()) {
         // 42%   about 20 s left
@@ -67,27 +71,36 @@ fun UnlockProgress(snapshot: UnlockSnapshot, modifier: Modifier = Modifier) {
             Text("${(est.fraction * 100).toInt()}%", color = TerminalGreen,
                 fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.headlineMedium)
             Spacer(Modifier.width(12.dp))
-            Text(leftText(snapshot, est, locking), color = if (est.overdue) Warning else GhostTextDim,
+            Text(leftText(snapshot, est, locking, finished), color = if (est.overdue) Warning else GhostTextDim,
                 style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(bottom = 6.dp))
         }
         Spacer(Modifier.height(8.dp))
         ProgressBar(est.fraction, failed = snapshot.failed != null)
         Spacer(Modifier.height(16.dp))
 
-        StepLine(snapshot, est)
+        StepLine(snapshot, est, finished)
 
         snapshot.failed?.let {
             Spacer(Modifier.height(10.dp))
             Text("! $it", color = Warning, style = MaterialTheme.typography.bodyMedium)
         }
-        if (!snapshot.done && snapshot.failed == null) {
-            Spacer(Modifier.height(18.dp))
-            val turn = (tick / 18).toInt()
-            val line = if (locking) "> " + UnlockTidbits.doing(est.current, snapshot.model)
-                else UnlockTidbits.line(turn, est.current, snapshot.model, seed)
-            Crossfade(targetState = line, animationSpec = tween(450), label = "tidbit") { text ->
-                Text(text, color = if (text.startsWith(">")) TerminalDim else GhostTextDim,
-                    style = MaterialTheme.typography.bodySmall, minLines = 2)
+        if (!finished && snapshot.failed == null) {
+            Spacer(Modifier.height(14.dp))
+            // what the box is doing now: always there, it changes with the step
+            // the model's own phase only while the box is really loading it (not while padding)
+            Crossfade(targetState = "> " + UnlockTidbits.doing(est.current, snapshot.model.takeIf { !snapshot.done }),
+                animationSpec = tween(350), label = "doing") { text ->
+                Text(text, color = TerminalDim, style = MaterialTheme.typography.bodySmall, minLines = 2)
+            }
+            if (!locking) {
+                Spacer(Modifier.height(18.dp))
+                val turn = (tick / 24).toInt()
+                Text("did you know?", color = TerminalGreen, fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.labelSmall)
+                Spacer(Modifier.height(4.dp))
+                Crossfade(targetState = UnlockTidbits.tip(turn, seed), animationSpec = tween(450), label = "tip") { text ->
+                    Text(text, color = GhostTextDim, style = MaterialTheme.typography.bodyMedium, minLines = 3)
+                }
             }
         }
     }
@@ -104,7 +117,7 @@ private fun ProgressBar(fraction: Float, failed: Boolean) {
 /** One line: "step 4 of 7 · starting database" and that step's time so far (the model's own
  *  percent while it loads). The list of every step was one too many things to read. */
 @Composable
-private fun StepLine(snap: UnlockSnapshot, est: UnlockEstimate) {
+private fun StepLine(snap: UnlockSnapshot, est: UnlockEstimate, finished: Boolean) {
     // the last stage (ready / locked) is the arrival, not a step to wait through
     val steps = snap.stages.dropLast(1)
     val cur = est.current
@@ -112,15 +125,15 @@ private fun StepLine(snap: UnlockSnapshot, est: UnlockEstimate) {
     val failedAt = snap.stages.firstOrNull { it.state == StageState.ERRORED }?.stage
     val text = when {
         failedAt != null -> "stopped at step ${steps.indexOfFirst { it.stage == failedAt } + 1} of ${steps.size} · ${failedAt.label}"
-        snap.done || cur == null || idx < 0 -> "all ${steps.size} steps done"
+        finished || cur == null || idx < 0 -> "all ${steps.size} steps done"
         else -> "step ${idx + 1} of ${steps.size} · ${cur.label}"
     }
     // the running step breathes, so a long one still looks alive
     val t = rememberInfiniteTransition(label = "step")
-    val pulse = if (!snap.done && failedAt == null) t.animateFloat(0.55f, 1f, infiniteRepeatable(tween(700), RepeatMode.Reverse), label = "pulse").value else 1f
+    val pulse = if (!finished && failedAt == null) t.animateFloat(0.55f, 1f, infiniteRepeatable(tween(700), RepeatMode.Reverse), label = "pulse").value else 1f
     val took = cur?.let { est.took[it] }
-    val pct = snap.model?.pct?.takeIf { cur == UnlockStage.MODEL && it in 1..99 }
-    val right = if (snap.done || failedAt != null) "" else listOfNotNull(pct?.let { "$it%" }, took?.let { dur(it) }).joinToString("  ")
+    val pct = snap.model?.pct?.takeIf { cur == UnlockStage.MODEL && it in 1..99 && !snap.done }
+    val right = if (finished || failedAt != null) "" else listOfNotNull(pct?.let { "$it%" }, took?.let { dur(it) }).joinToString("  ")
     Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(text, color = if (failedAt != null) Warning else TerminalGreen, fontFamily = FontFamily.Monospace,
             style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f).alpha(pulse))
@@ -128,9 +141,10 @@ private fun StepLine(snap: UnlockSnapshot, est: UnlockEstimate) {
     }
 }
 
-private fun leftText(s: UnlockSnapshot, e: UnlockEstimate, locking: Boolean): String = when {
+// never "it was already open": that is what the box's replay of a cold unlock exists to hide
+private fun leftText(s: UnlockSnapshot, e: UnlockEstimate, locking: Boolean, finished: Boolean): String = when {
     s.failed != null -> "stopped"
-    s.done -> if (locking) "locked" else if (e.warm) "ready , it was already open" else "ready"
+    finished -> if (locking) "locked" else "ready"
     e.overdue -> "taking longer than usual (${dur(e.took[e.current] ?: 0)} on this step)"
     e.secondsLeft < 0 -> "measuring…"
     !e.confident -> TransferRate.left(e.secondsLeft).replace("about", "roughly") + " (first time on this phone)"

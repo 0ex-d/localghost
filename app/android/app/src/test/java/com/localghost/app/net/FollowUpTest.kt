@@ -23,4 +23,20 @@ class FollowUpTest {
             FollowUp.standalone("how about the train times from Paddington to Bath tomorrow?", before))
         assertEquals("how about now?", FollowUp.standalone("how about now?", emptyList()))
     }
+
+    @Test fun aPrivateQuestionIsNotBorrowedForTheWeb() {
+        val fresh = { q: String -> Regex("\\b(today|now|weather)\\b").containsMatchIn(q) } // the auto rule, in miniature
+        // "and now?" after a private question: the question would not have gone to the web itself
+        org.junit.Assert.assertFalse(FollowUp.mayBorrow(listOf("what did I talk about with Maria at the cafe on Tuesday?"), fresh))
+        // after a public one it may
+        org.junit.Assert.assertTrue(FollowUp.mayBorrow(listOf("what's the weather in Loggos today?"), fresh))
+        org.junit.Assert.assertTrue(FollowUp.mayBorrow(emptyList(), fresh))
+    }
+
+    @Test fun questionsAboutThePersonAreSeen() {
+        for (q in listOf("how many times did I go to the gym this month?", "who is my dentist?", "where were we on Tuesday", "what did Maria tell me"))
+            org.junit.Assert.assertTrue(q, FollowUp.looksPersonal(q))
+        for (q in listOf("what's the weather in Loggos today?", "EUR to GBP rate", "who is the prime minister of Greece", "Imagine Dragons tour dates"))
+            org.junit.Assert.assertFalse(q, FollowUp.looksPersonal(q))
+    }
 }

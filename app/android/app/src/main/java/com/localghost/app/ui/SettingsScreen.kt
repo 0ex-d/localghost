@@ -58,7 +58,13 @@ fun SettingsScreen(
         val waiting = remember(trailTick) { com.localghost.app.sync.LocationLog.pendingCount(ctx) }
         val today = remember(trailTick) { com.localghost.app.sync.LocationLog.countToday(ctx) }
         val passive = remember(trailTick) { com.localghost.app.sync.LocationLog.passiveToday(ctx) }
-        val todayLine = "$today today" + (if (passive > 0) " ($passive from other apps' fixes)" else "")
+        val sealedTo = remember(trailTick) { com.localghost.app.sync.TrailKeys.where(ctx) }
+        val todayLine = "$today today" + (if (passive > 0) " ($passive from other apps' fixes)" else "") +
+            when (sealedTo) {
+                "box" -> " · sealed on this phone, opened only by your box PIN"
+                "phone" -> " · sealed on this phone, opened by the phone's own unlock"
+                else -> ""
+            }
         toggleRow(
             label = "keep the trail",
             sub = when {
@@ -88,7 +94,16 @@ fun SettingsScreen(
         var mapTick by remember { mutableIntStateOf(0) }
         val mapsOn = remember(mapTick) { com.localghost.app.settings.AppSettings.mapDownload(ctx) }
         val mapBudget = remember(mapTick) { com.localghost.app.settings.AppSettings.mapBudgetMB(ctx) }
-        val mapStatus = remember(mapTick) { com.localghost.app.local.MapPrefetch.statusLine(ctx) }
+        // the status line follows a run as it goes (the worker notes its progress every ten tiles)
+        var mapStatus by remember { mutableStateOf("") }
+        LaunchedEffect(mapTick) {
+            while (true) {
+                mapStatus = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    com.localghost.app.local.MapPrefetch.statusLine(ctx)
+                }
+                kotlinx.coroutines.delay(3_000)
+            }
+        }
         toggleRow(
             label = "download maps",
             sub = if (mapsOn) "on Wi-Fi, once a day: streets around where you have been, then the coast and main roads outwards · $mapStatus"

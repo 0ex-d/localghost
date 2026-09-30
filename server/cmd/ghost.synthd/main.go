@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/LocalGhostDao/localghost/server/internal/harden"
 	"github.com/LocalGhostDao/localghost/server/internal/hw"
 	"github.com/LocalGhostDao/localghost/server/internal/poltergres"
 	"log"
@@ -169,6 +170,7 @@ func chatPersist(mount string, chatID int64, role, content string) int64 {
 }
 
 func main() {
+	harden.NoDump() // same-user processes cannot read this one through /proc; no core file
 	port := flag.Int("health-port", envPort("GHOST_HEALTH_PORT"), "loopback health/status port (required)")
 	flag.Parse()
 	if *port <= 0 {
@@ -278,7 +280,10 @@ func main() {
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "box": box})
 			return
 		}
-		lg.Info("web plan", "fn", "plan", "search", p.Search, "need", p.Need, "queries", p.Queries, "took", time.Since(t0).Round(time.Millisecond))
+		// what was asked stays out of the INFO log: the log outlives a deleted chat by a week, and
+		// the plan does not know an incognito question from any other (found 30 Sep 2026)
+		lg.Info("web plan", "fn", "plan", "search", p.Search, "queries", len(p.Queries), "took", time.Since(t0).Round(time.Millisecond))
+		lg.Debug("web plan asked", "fn", "plan", "need", p.Need, "queries", p.Queries)
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "search": p.Search, "need": p.Need, "shape": p.Shape, "fresh": p.Fresh, "queries": p.Queries, "box": box})
 	})
 	streamMux.HandleFunc("/chat", func(w http.ResponseWriter, r *http.Request) {
@@ -358,7 +363,8 @@ func main() {
 				how = "by the words"
 			}
 			webNote = fmt.Sprintf("read %d pages' paragraphs %s, best match %.2f", len(web), how, best)
-			lg.Info("web findings ranked", "fn", "chat", "need", need, "pages", len(web), "best", fmt.Sprintf("%.2f", best), "embedded", embedded)
+			lg.Info("web findings ranked", "fn", "chat", "pages", len(web), "best", fmt.Sprintf("%.2f", best), "embedded", embedded)
+			lg.Debug("web findings for", "fn", "chat", "need", need)
 			if q.Round <= 1 && len(q.Spare) > 0 && best < rankThinBelow {
 				moreWeb(w, q.Spare, fmt.Sprintf("nothing read comes close to what is needed (best %.2f); searching once more", best))
 				return

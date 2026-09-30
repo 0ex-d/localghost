@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -45,6 +46,8 @@ type LlamaConfig struct {
 	// LoadTimesPath keeps the last complete load's measured times (loadprog.go), the basis of the
 	// next load's time-left estimate. Empty: estimates start from nothing every time.
 	LoadTimesPath string
+	// StrikesPath keeps the images the engine died on (strikes.go). Empty: in memory only.
+	StrikesPath string
 }
 
 // llamaBackend owns a llama-server subprocess.
@@ -65,6 +68,7 @@ type llamaBackend struct {
 	exited    chan struct{}
 	exitState *os.ProcessState
 	starts    int // how many times Start ran (the retry number on the unlock screen)
+	strikes   *imageStrikes
 }
 
 // NewLlamaBackend prepares (does not start) the backend.
@@ -78,6 +82,7 @@ func NewLlamaBackend(cfg LlamaConfig) *llamaBackend {
 		addr:         "127.0.0.1:" + strconv.Itoa(cfg.Port),
 		info:         info,
 		stats:        NewEngineStats(),
+		strikes:      newImageStrikes(cfg.StrikesPath),
 	}
 }
 
@@ -353,15 +358,35 @@ func (b *llamaBackend) Infer(ctx context.Context, req oracle.Request) (oracle.Re
 }
 
 // inferMultimodal builds an OpenAI-style chat completion with image content parts.
-func (b *llamaBackend) inferMultimodal(ctx context.Context, req oracle.Request) (oracle.Response, error) {
+func (b *llamaBackend) inferMultimodal(ctx context.Context, req oracle.Request) (_ oracle.Response, err error) {
 	promptText, mmBudget := applyThink(req.Think, req.Input, req.MaxTokens)
 	req.MaxTokens = mmBudget
 	content := []map[string]any{{"type": "text", "text": promptText}}
+	var keys []string
+	sent := false
+	// the engine died with these images in flight: a strike against each (strikes.go)
+	defer func() {
+		if err == nil || !sent || ctx.Err() != nil || !b.diedDuring(3*time.Second) {
+			return
+		}
+		n := 0
+		for _, k := range keys {
+			if c := b.strikes.strike(k); c > n {
+				n = c
+			}
+		}
+		err = fmt.Errorf("llama-server died with this image in flight (strike %d; at %d it is not sent again): %w", n, strikesToRefuse, err)
+	}()
 	for _, imgPath := range req.Images {
 		uri, err := imageForModel(ctx, imgPath)
 		if err != nil {
 			return oracle.Response{}, err
 		}
+		k := imageKey(uri)
+		if b.strikes.refused(k) {
+			return oracle.Response{}, fmt.Errorf("image %s: llama-server died on it %d times, it is not sent again (forgive it: delete ghost.oracled.image-strikes beside the conf)", filepath.Base(imgPath), strikesToRefuse)
+		}
+		keys = append(keys, k)
 		content = append(content, map[string]any{
 			"type":      "image_url",
 			"image_url": map[string]string{"url": uri},
@@ -389,6 +414,7 @@ func (b *llamaBackend) inferMultimodal(ctx context.Context, req oracle.Request) 
 		return oracle.Response{}, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	sent = true
 	resp, err := b.client.Do(httpReq)
 	if err != nil {
 		return oracle.Response{}, err

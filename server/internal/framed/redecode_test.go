@@ -7,7 +7,9 @@ import (
 	"image/jpeg"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 )
 
@@ -35,7 +37,11 @@ func TestDamagedJPEGPreviewGoesThroughFFmpeg(t *testing.T) {
 		t.Skip("this damage did not upset Go's decoder; nothing to test")
 	}
 	p := &Pipeline{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	fixed, err := p.redecode(damaged)
+	src := filepath.Join(t.TempDir(), "3f.jpg") // the archived original, where it lies
+	if err := os.WriteFile(src, damaged, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixed, err := p.redecode(src)
 	if err != nil {
 		t.Fatalf("ffmpeg could not re-encode: %v", err)
 	}
@@ -45,5 +51,13 @@ func TestDamagedJPEGPreviewGoesThroughFFmpeg(t *testing.T) {
 	}
 	if got.Bounds().Dx() != 64 || got.Bounds().Dy() != 48 {
 		t.Fatalf("size %v", got.Bounds())
+	}
+}
+
+// Nothing to re-read (a frame ffmpeg grabbed has no original of its own): no copy is made anywhere.
+func TestRedecodeNeedsTheOriginal(t *testing.T) {
+	p := &Pipeline{log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	if _, err := p.redecode(""); err == nil {
+		t.Fatal("redecode with no original should fail")
 	}
 }

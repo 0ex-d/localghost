@@ -14,17 +14,39 @@ import com.localghost.app.R
 import com.localghost.app.net.PendingNotification
 
 object Notifications {
-    const val CHANNEL_ID = "localghost.daemons"
+    // v2 (30 Sep 2026): a channel's lock-screen setting is fixed when it is made, so the private
+    // one is a new channel and the old is deleted
+    const val CHANNEL_ID = "localghost.daemons.private"
+    private const val OLD_CHANNEL_ID = "localghost.daemons"
     private const val CHANNEL_NAME = "Daemon alerts"
     private const val GROUP_KEY = "com.localghost.app.DAEMONS"
     private const val SUMMARY_ID = 1
     const val ACTION_MUTE = "com.localghost.app.action.MUTE"
 
+    /**
+     * The box's notifications carry its reflections, which are about your life. On a locked phone
+     * they showed in full, because Android shows a notification's text on the lock screen unless
+     * the person changed the global setting. The channel now asks for PRIVATE on the lock screen,
+     * which the system honours whatever the global setting: the public version ("a note from your
+     * box") shows until the phone is unlocked.
+     */
     fun ensureChannel(ctx: Context) {
+        val nm = ctx.getSystemService(NotificationManager::class.java)
         val channel = NotificationChannel(CHANNEL_ID, CHANNEL_NAME, NotificationManager.IMPORTANCE_DEFAULT)
-            .apply { description = "Reflections and flags from your box" }
-        ctx.getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+            .apply {
+                description = "Reflections and flags from your box"
+                lockscreenVisibility = android.app.Notification.VISIBILITY_PRIVATE
+            }
+        nm.createNotificationChannel(channel)
+        runCatching { nm.deleteNotificationChannel(OLD_CHANNEL_ID) }
     }
+
+    /** What a locked phone shows instead: that the box said something, not what. */
+    private fun publicVersion(ctx: Context, icon: Int) = NotificationCompat.Builder(ctx, CHANNEL_ID)
+        .setSmallIcon(icon)
+        .setContentTitle("LocalGhost")
+        .setContentText("a note from your box")
+        .build()
 
     fun hasPermission(ctx: Context) =
         ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) ==
@@ -60,6 +82,8 @@ object Notifications {
                 .setContentTitle(item.title)
                 .setContentText(item.body)
                 .setStyle(NotificationCompat.BigTextStyle().bigText(item.body))
+                .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+                .setPublicVersion(publicVersion(ctx, d.icon))
                 .setGroup(GROUP_KEY)
                 .setAutoCancel(true)
                 .addAction(0, "MUTE", mutePI(ctx))
@@ -73,6 +97,8 @@ object Notifications {
             .setContentTitle("LocalGhost")
             .setContentText("${items.size} updates from your box")
             .setStyle(inbox)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(publicVersion(ctx, R.drawable.ic_ghost_notif))
             .setContentIntent(tapPI(ctx, "summary", 9999))
             .setGroup(GROUP_KEY)
             .setGroupSummary(true)

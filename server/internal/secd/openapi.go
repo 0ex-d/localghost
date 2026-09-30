@@ -71,6 +71,8 @@ type lockDoc struct {
 
 type unlockStartDoc struct {
 	Started bool `json:"started"`
+	// Run names this unlock; the poll presents it (?run=) to collect the session token, once.
+	Run string `json:"run,omitempty"`
 }
 
 type unlockPollDoc struct {
@@ -122,6 +124,22 @@ type modelDoc struct {
 	SHA256    string `json:"sha256"`
 }
 
+type rekeyRequestDoc struct {
+	SPKI string `json:"spki"`
+	Sig  string `json:"sig"`
+}
+
+type rekeyDoc struct {
+	OK   bool   `json:"ok"`
+	Cert string `json:"cert"`
+}
+
+type trailKeyDoc struct {
+	Have    bool   `json:"have"`
+	Public  string `json:"public,omitempty"`
+	Private string `json:"private,omitempty"`
+}
+
 type modelsDoc struct {
 	Models []modelDoc `json:"models"`
 }
@@ -156,6 +174,16 @@ func (s *Server) routes() []route {
 			Auth: true, Request: idRequestDoc{}, Response: okDoc{}, Handler: s.handleNotificationDelete},
 		{Method: "POST", Path: "/v1/notifications/answer", Summary: "Answer a notification's question.",
 			Auth: true, Request: answerRequestDoc{}, Response: okDoc{}, Handler: s.handleNotificationAnswer},
+		{Method: "GET", Path: "/v1/model", Summary: "The box model: ready, or loading (phase, percent, time left). It loads after the unlock.",
+			Auth: true, Response: modelState{}, Handler: s.handleModel},
+		{Method: "GET", Path: "/v1/trail/key", Summary: "This device's trail key, to read its own sealed trail while unlocked ({have:false} when none).",
+			Auth: true, Response: trailKeyDoc{}, Handler: s.handleTrailKey},
+		{Method: "POST", Path: "/v1/trail/key", Summary: "The phone hands its trail key (raw X25519, base64) to the vault, once.",
+			Auth: true, Request: trailKeyFile{}, Response: okDoc{}, Handler: s.handleTrailKey},
+		{Method: "POST", Path: "/v1/device/rekey", Summary: "A certificate for a key the phone made itself (spki + a signature proving it holds the key).",
+			Auth: true, Request: rekeyRequestDoc{}, Response: rekeyDoc{}, Handler: s.handleRekey},
+		{Method: "POST", Path: "/v1/device/rekey/confirm", Summary: "Over the new certificate: the one it replaced is retired (answered as if down from then on).",
+			Auth: true, Response: okDoc{}, Handler: s.handleRekeyConfirm},
 		{Method: "GET", Path: "/v1/models", Summary: "The model catalogue the box offers the phone.",
 			Response: modelsDoc{}, Handler: s.handleModels},
 		{Method: "GET", Path: "/v1/models/", Summary: "Model bytes by id (/v1/models/{id}); a large binary download.",

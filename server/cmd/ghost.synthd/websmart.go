@@ -56,7 +56,8 @@ func planPrompt(prompt string, history []chatTurn, now time.Time) string {
 	b.WriteString("The question: " + clip(strings.ReplaceAll(prompt, "\n", " "), 600) + "\n\n")
 	b.WriteString(`Reply with one JSON object and nothing else:
 {"search": true or false, "need": "one sentence: the fact or content that would answer the question", "shape": "number|date|name|list|howto|prose", "fresh": true or false, "queries": ["search query", ...]}
-search is false when the question needs no outside facts (small talk, the person's own photos, memories or trail, arithmetic, a request to write something). need names the specific thing, with the place, the currency, the year when they matter. fresh is true when the answer changes over time (prices, news, weather, who holds a job, the latest version). queries: one to three, most specific first, each a short search engine query, the way a person types one; the last may be a broader fallback.`)
+search is false when the question needs no outside facts (small talk, the person's own photos, memories or trail, arithmetic, a request to write something). need names the specific thing, with the place, the currency, the year when they matter. fresh is true when the answer changes over time (prices, news, weather, who holds a job, the latest version). queries: one to three, most specific first, each a short search engine query, the way a person types one; the last may be a broader fallback.
+The queries leave for a search engine, so they are about the outside world only. Never put the person's own details from the conversation in them: the names of people they know, where they live or were, their health, money, work or relationships. Ask for the public thing instead: "cafes open now in Loggos", not "the cafe where I met Maria".`)
 	return b.String()
 }
 

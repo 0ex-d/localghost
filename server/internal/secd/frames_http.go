@@ -6,11 +6,15 @@ package secd
 // one root, network-facing component) free of image parsers , historically one of the most
 // exploit-rich code families you can put in front of untrusted input , and keeps the linear trust
 // story: the network reaches exactly one small program, and that program only moves bytes.
+// One exception since 30 Sep 2026: a location batch with SEALED points is opened here, with the
+// device's trail key from the vault (trailkey.go), because the key must not reach the daemons. That
+// is JSON and a text line per point, never an image.
 //
 // Write protocol shared with framed: stream to <name>.part, fsync, rename. framed skips *.part, so a
 // half-written upload is never processed; the rename is the commit.
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -85,7 +89,7 @@ func (s *Server) handleFrameUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "upload failed", http.StatusInsufficientStorage)
 		return
 	}
-	secdLog.Info("frame spooled", "fn", "handleFrameUpload", "bytes", n, "took", time.Since(t0).String())
+	secdLog.Debug("frame spooled", "fn", "handleFrameUpload", "bytes", n, "took", time.Since(t0).String())
 	w.WriteHeader(http.StatusAccepted) // accepted for processing; framed does the rest asynchronously
 }
 
@@ -268,7 +272,7 @@ func (s *Server) handleFrameTag(w http.ResponseWriter, r *http.Request) {
 		s.appearsDown(w)
 		return
 	}
-	secdLog.Info("tag corrected", "fn", "handleFrameTag", "action", req.Action)
+	secdLog.Debug("tag corrected", "fn", "handleFrameTag", "action", req.Action)
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(`{"ok":true}`))
 }
@@ -311,8 +315,25 @@ func (s *Server) handleFramesExists(w http.ResponseWriter, r *http.Request) {
 		s.appearsDown(w)
 		return
 	}
-	clean := make([]string, 0, len(req.Hashes))
-	for _, h := range req.Hashes {
+	have, err := s.notif.FramesHave(mounted, cleanHashes(req.Hashes))
+	if err != nil {
+		secdLog.Warn("frames/exists query failed", "fn", "handleFramesExists", "err", err)
+		s.appearsDown(w)
+		return
+	}
+	out := make([]string, 0, len(have))
+	for h := range have {
+		out = append(out, h)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string][]string{"have": out})
+}
+
+// cleanHashes keeps the 32-character lowercase hex hashes and drops anything else (the only user
+// input that reaches a SQL IN list, checked to the character).
+func cleanHashes(in []string) []string {
+	clean := make([]string, 0, len(in))
+	for _, h := range in {
 		if len(h) != 32 {
 			continue
 		}
@@ -327,18 +348,38 @@ func (s *Server) handleFramesExists(w http.ResponseWriter, r *http.Request) {
 			clean = append(clean, h)
 		}
 	}
-	have, err := s.notif.FramesHave(mounted, clean)
-	if err != nil {
-		secdLog.Warn("frames/exists query failed", "fn", "handleFramesExists", "err", err)
+	return clean
+}
+
+// handleFramesKinds , POST /v1/frames/kinds {"hashes":[...]} -> {"kinds":{"<hash>":"photo"|"video"}}.
+// The app asks before opening a strip of hashes (On This Day, an outing's covers) so a video opens
+// in the player, a photo in the viewer.
+func (s *Server) handleFramesKinds(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodPost {
 		s.appearsDown(w)
 		return
 	}
-	out := make([]string, 0, len(have))
-	for h := range have {
-		out = append(out, h)
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string][]string{"have": out})
+	var req struct {
+		Hashes []string `json:"hashes"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&req); err != nil {
+		s.appearsDown(w)
+		return
+	}
+	kinds, err := s.notif.FrameKinds(mounted, cleanHashes(req.Hashes))
+	if err != nil {
+		secdLog.Warn("frames/kinds query failed", "fn", "handleFramesKinds", "err", err)
+		s.appearsDown(w)
+		return
+	}
+	writeJSON(w, map[string]any{"kinds": kinds})
 }
 
 // handleFramesList pages the archived frames newest-first for the app's gallery grid.
@@ -543,18 +584,52 @@ func (s *Server) handleLocations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.streaming(w)()
-	n, err := spoolBody(dir, r, locationsMaxBytes, uid, gid, &s.closing)
+	// A batch with sealed points (the phone's trail, sealed to this device's key in the vault,
+	// trailkey.go) is opened here, before the spool: framed reads plain points and never sees a key.
+	// This is the one upload secd reads; a batch is small (4000 points, about 200 KB).
+	body, err := io.ReadAll(gateReader{r: http.MaxBytesReader(nil, r.Body, locationsMaxBytes), stop: &s.closing})
 	if err != nil {
 		if s.closing.Load() {
 			s.appearsDown(w)
 			return
 		}
+		http.Error(w, "upload failed", http.StatusBadRequest)
+		return
+	}
+	unreadable := 0
+	if bytes.Contains(body, []byte(`"sealed"`)) {
+		mount := filepath.Join(s.cfg.StateDir, "mnt", fmt.Sprintf("slot%d", mounted))
+		k, kerr := loadTrailKey(mount, deviceKeyFromRequest(r))
+		if kerr != nil && !errors.Is(kerr, os.ErrNotExist) {
+			secdLog.Warn("trail key unreadable", "fn", "handleLocations", "err", kerr)
+		}
+		opened, bad, oerr := openLocationBatch(body, k)
+		if errors.Is(oerr, errNoTrailKey) {
+			// the phone keeps the batch and hands its key over at its next unlock
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"ok":false,"trailKey":false}`))
+			return
+		}
+		if oerr != nil {
+			http.Error(w, "upload failed", http.StatusBadRequest)
+			return
+		}
+		body, unreadable = opened, bad
+		if bad > 0 {
+			secdLog.Warn("sealed points that do not open with this device's key were left out", "fn", "handleLocations", "count", bad)
+		}
+	}
+	n, err := spoolFrom(dir, r, bytes.NewReader(body), uid, gid)
+	if err != nil {
 		secdLog.Warn("location spool failed", "fn", "handleLocations", "dir", dir, "err", err)
 		http.Error(w, "upload failed", http.StatusInsufficientStorage)
 		return
 	}
-	secdLog.Info("locations spooled", "fn", "handleLocations", "bytes", n)
+	secdLog.Debug("locations spooled", "fn", "handleLocations", "bytes", n)
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "unreadable": unreadable})
 }
 
 // errClosing: the volume is being locked; an upload still streaming stops here, its .part removed.
@@ -578,6 +653,11 @@ func (g gateReader) Read(p []byte) (int, error) {
 // name is arrival-ordered (nanosecond timestamp) plus random hex so concurrent uploads never collide.
 // stop is the box's closing flag: once it is set the copy fails and the .part is removed.
 func spoolBody(dir string, r *http.Request, maxBytes int64, uid, gid int, stop *atomic.Bool) (int64, error) {
+	return spoolFrom(dir, r, gateReader{r: http.MaxBytesReader(nil, r.Body, maxBytes), stop: stop}, uid, gid)
+}
+
+// spoolFrom is [spoolBody] from a reader already bounded (and gated) by the caller.
+func spoolFrom(dir string, r *http.Request, body io.Reader, uid, gid int) (int64, error) {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return 0, fmt.Errorf("create spool dir: %w", err)
 	}
@@ -612,7 +692,6 @@ func spoolBody(dir string, r *http.Request, maxBytes int64, uid, gid int, stop *
 	if err != nil {
 		return 0, fmt.Errorf("create .part: %w", err)
 	}
-	body := gateReader{r: http.MaxBytesReader(nil, r.Body, maxBytes), stop: stop}
 	n, err := io.Copy(f, body)
 	if err != nil {
 		_ = f.Close()
@@ -1182,8 +1261,11 @@ func (s *Server) handleFramesGeoLOD(w http.ResponseWriter, r *http.Request) {
 	}
 	// INSTRUMENTED , four rounds of map debugging died on silence: a successful handler logged
 	// nothing, so "request never arrived" and "request answered empty" looked identical from
-	// the outside. Now one map-open tells the whole story in one line.
-	secdLog.Info("geo lod", "fn", "handleFramesGeoLOD", "level", level,
+	// the outside. Now one map-open tells the whole story in one line, at DEBUG: secd logs to
+	// journald, on the unencrypted OS disk, and at INFO every view's bounding box and how many
+	// photos it held were kept there, a diary of where you looked (found 30 Sep 2026). The same
+	// went for uploads, voice notes, location batches and chats: routine activity is DEBUG now.
+	secdLog.Debug("geo lod", "fn", "handleFramesGeoLOD", "level", level,
 		"minlat", minLat, "maxlat", maxLat, "minlon", minLon, "maxlon", maxLon, "points", len(pts))
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"level": level, "points": pts})

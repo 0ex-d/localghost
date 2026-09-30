@@ -84,6 +84,60 @@ private fun invMercY(y: Double): Double {
 /** A photo cell projected ONCE to map units when it arrives , the draw loop only scales. */
 private class Dot(val x: Double, val y: Double, val cell: BoxClient.GeoCell)
 
+/**
+ * WHAT THE MAP LAST SHOWED, for the next open to draw at once. The box's data (photo cells, the
+ * day tracks, the newest photo) stays in memory only, like the rest of an unlocked session, and
+ * goes on lock ([clearMapMemory] from the app's teardown); the place names are public and are
+ * kept with it for the same process.
+ */
+private object MapMemory {
+    @Volatile var cells: List<BoxClient.GeoCell> = emptyList()
+    @Volatile var labels: List<BoxClient.GeoLabel> = emptyList()
+    @Volatile var tracks: List<Track>? = null
+    @Volatile var newest: BoxClient.GeoCell? = null
+}
+
+/** The app's lock teardown: the map forgets the box's data it kept for a quick reopen. */
+fun clearMapMemory() {
+    MapMemory.cells = emptyList(); MapMemory.labels = emptyList(); MapMemory.tracks = null; MapMemory.newest = null
+}
+
+/**
+ * WHERE THE MAP WAS LAST LOOKING (centre and zoom), kept on the phone: the map reopens there, not
+ * on a guess, so the tiles it needs are the ones already on disk. Sealed like the trail
+ * ([com.localghost.app.sync.TrailKeys]): where a person looks at a map says where they have been,
+ * so it opens only while the app is unlocked, and a locked app reopens on the default view.
+ */
+private object MapCamera {
+    private const val PREFS = "lg_map_camera"
+    class View(val cx: Double, val cy: Double, val zoom: Float)
+
+    fun load(ctx: android.content.Context): View? {
+        val p = ctx.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE)
+        val v = if (p.contains("cx")) {
+            // kept in the clear before 30 Sep 2026: read once, then gone (sealed at the next save)
+            val old = View(Double.fromBits(p.getLong("cx", 0)), Double.fromBits(p.getLong("cy", 0)), p.getFloat("zoom", 1f))
+            p.edit().remove("cx").remove("cy").remove("zoom").apply()
+            old
+        } else {
+            val text = com.localghost.app.sync.TrailKeys.opener()?.open(p.getString("sealed", "") ?: "") ?: return null
+            val f = text.split(' ')
+            val cx = f.getOrNull(0)?.toDoubleOrNull() ?: return null
+            val cy = f.getOrNull(1)?.toDoubleOrNull() ?: return null
+            val zoom = f.getOrNull(2)?.toFloatOrNull() ?: return null
+            View(cx, cy, zoom)
+        }
+        return if (v.cx.isFinite() && v.cy.isFinite() && v.cx in 0.0..WORLD_UNITS && v.cy in 0.0..WORLD_UNITS && v.zoom in 1f..40000f) v else null
+    }
+
+    fun save(ctx: android.content.Context, cx: Double, cy: Double, zoom: Float) {
+        val pub = com.localghost.app.sync.TrailKeys.publicKey(ctx)
+        val e = ctx.getSharedPreferences(PREFS, android.content.Context.MODE_PRIVATE).edit()
+        if (pub != null) e.putString("sealed", com.localghost.app.sync.TrailSeal.seal(pub, "$cx $cy $zoom")) else e.remove("sealed")
+        e.apply()
+    }
+}
+
 /** One day's movement in map units (Double , it is stroked in screen space, per vertex, so it can
  *  keep a real 2.5px width at any zoom; framed already Douglas-Peucker'd it, so a day is tens to a
  *  few hundred points, never the half-million the landmass is). bbox for culling. [times] is a
@@ -226,7 +280,7 @@ fun MapScreen() {
     var worldNote by remember { mutableStateOf("") }
     var picked by remember { mutableStateOf<BoxClient.GeoCell?>(null) }
     var viewer by remember { mutableStateOf<String?>(null) } // hash open full-screen
-    var tracks by remember { mutableStateOf<List<Track>>(emptyList()) }
+    var tracks by remember { mutableStateOf<List<Track>>(MapMemory.tracks ?: emptyList()) }
     // THE TRAIL PANEL: which day is lit, and where along it the scrubber sits (0..1).
     var trailOpen by remember { mutableStateOf(false) }
     // ONE DAY AT A TIME: the map draws the newest day (today when there is one) and nothing else;
@@ -283,71 +337,105 @@ fun MapScreen() {
     val roadCache = remember { RoadTileCache() }
     val mapScope = rememberCoroutineScope()
     var loadNote by remember { mutableStateOf("loading…") }
-    var cells by remember { mutableStateOf<List<BoxClient.GeoCell>>(emptyList()) }
+    var cells by remember { mutableStateOf(MapMemory.cells) }
     var level by remember { mutableStateOf(3) }
-    var newest by remember { mutableStateOf<BoxClient.GeoCell?>(null) }
+    var newest by remember { mutableStateOf(MapMemory.newest) }
     // Projected once per cells change , 800 points at most, but it keeps the draw lambda to
     // multiply-adds and nothing else.
     val dots = remember(cells) { cells.map { Dot(mercXD(it.lon), mercYD(it.lat), it) } }
 
     LaunchedEffect(Unit) {
-        newest = BoxClient.newestGeoFrame(ctx)
+        // OPEN FROM THE PHONE, THEN ASK THE BOX. Everything the map needs to draw is on the phone
+        // after the first open (the world cut, the coast and road indexes, the tiles, and in memory
+        // the last view's dots and days), so it is drawn from there at once. The box is asked
+        // afterwards, each part on its own, and only what changed is swapped in. It used to be
+        // one line of round trips (newest photo, cut list, two world revalidations, two indexes,
+        // sixty days of tracks) before the first tile could draw.
+        launch {
+            val li = withContext(Dispatchers.IO) { BoxClient.landTileIndexOnPhone(ctx) }
+            val ri = withContext(Dispatchers.IO) { RoadTileGeom.index(BoxClient.roadTileIndexOnPhone(ctx)) }
+            if (tileIndex == null) tileIndex = li
+            if (roadIndex == null) roadIndex = ri
+            BoxClient.landTileIndex(ctx)?.let { if (!it.contentEquals(tileIndex)) tileIndex = it }
+            RoadTileGeom.index(BoxClient.roadTileIndex(ctx))?.let { roadIndex = it }
+        }
+        launch {
+            BoxClient.newestGeoFrame(ctx)?.let { newest = it; MapMemory.newest = it }
+        }
+        launch {
+            // DAY TRACKS, one round trip. /v1/geo/tracks hands back the newest sixty days of polylines
+            // (with a clock per vertex and the day's distance, from boxes that write them) in a single
+            // answer; a box that predates it (null) gets the old days-then-one-per-day walk.
+            val batch = BoxClient.geoDayTracks(ctx, 60)
+            val loaded = ArrayList<Track>()
+            if (batch != null) {
+                for (t in batch) if (t.n >= 2) loaded.add(trackOf(t.day, t.lat, t.lon, t.times, t.distanceM, phone = false, glitches = t.glitches, line = t.line))
+            } else {
+                val days = BoxClient.geoDays(ctx, 14) ?: emptyList()
+                for (d in days) {
+                    val pts = BoxClient.geoDayTrack(ctx, d) ?: continue
+                    if (pts.size >= 2) loaded.add(trackOf(pts).let { trackOf(d, DoubleArray(pts.size) { pts[it].first }, DoubleArray(pts.size) { pts[it].second }, LongArray(0), 0.0, false) })
+                }
+            }
+            if (batch == null && loaded.isEmpty() && MapMemory.tracks != null) return@launch // box away: keep what is drawn
+            tracks = loaded + phoneTracks(ctx, loaded)
+            MapMemory.tracks = tracks
+        }
         // THE WORLD, SMALL FIRST. The box lists its landmass cuts (/v1/geo/world/index): open on
         // the smallest (a 110m world is under a megabyte, scanned in a blink), draw it, then load
         // the largest and swap it in once it is ready , the coastline sharpens under your thumb
         // instead of the screen waiting on 24MB. Everything off the main thread; the dots and the
         // camera never wait for landmass at all. A box that predates the index (null) or has only
-        // the plain world.geojson gets the single-file path it always had.
-        val cuts = BoxClient.worldIndex(ctx) ?: emptyList()
+        // the plain world.geojson gets the single-file path it always had. With a cut already on
+        // the phone, the largest one there is drawn first and the box only revalidates it.
         fun note(w: World?, label: String) = if (w == null) "no landmass file on the box"
             else "landmass $label ${w.levels[2].size} rings · ${w.vertices[2] / 1000}k/${w.vertices[1] / 1000}k/${w.vertices[0] / 1000}k pts by zoom"
-        suspend fun loadCut(res: String): World? {
-            val (file, etag) = BoxClient.worldGeoJsonFile(ctx, res)
-            return withContext(Dispatchers.Default) { WorldRings.load(ctx, file, etag, res.ifEmpty { "default" }) }
+        var drawn: Pair<String, String>? = null // the cut on screen and its ETag
+        suspend fun show(res: String, file: java.io.File?, etag: String) {
+            if (file == null || drawn == (res to etag)) return
+            val w = withContext(Dispatchers.Default) { WorldRings.load(ctx, file, etag, res.ifEmpty { "default" }) } ?: return
+            world = w; worldNote = note(w, res); drawn = res to etag
         }
+        val known = BoxClient.worldIndexOnPhone(ctx)
+        val onPhone = (known ?: emptyList()).sortedByDescending { it.bytes }.map { it.res } + ""
+        for (res in onPhone) {
+            val (file, etag) = withContext(Dispatchers.IO) { BoxClient.worldGeoJsonOnPhone(ctx, res) }
+            if (file != null) { show(res, file, etag); break }
+        }
+        val listed = BoxClient.worldIndex(ctx)
+        // no answer (the box away, or one without the list) and a world already drawn from the
+        // phone: keep it, rather than swap in the plain cut
+        if (listed == null && world != null) return@LaunchedEffect
+        val cuts = listed ?: emptyList()
         if (cuts.isEmpty()) {
-            val w = loadCut("")
-            world = w; worldNote = note(w, "")
+            val (file, etag) = BoxClient.worldGeoJsonFile(ctx, "")
+            show("", file, etag)
+            if (world == null) worldNote = note(null, "")
         } else {
             val small = cuts.minByOrNull { it.bytes } ?: cuts[0]
             val big = cuts.maxByOrNull { it.bytes } ?: small
-            val sw = loadCut(small.res)
-            world = sw; worldNote = note(sw, small.res)
-            if (big.res != small.res) {
-                val bw = loadCut(big.res)
-                if (bw != null) { world = bw; worldNote = note(bw, big.res) }
+            if (world == null && big.res != small.res) {
+                val (file, etag) = BoxClient.worldGeoJsonFile(ctx, small.res)
+                show(small.res, file, etag)
             }
+            val (file, etag) = BoxClient.worldGeoJsonFile(ctx, big.res)
+            show(big.res, file, etag)
         }
-        tileIndex = BoxClient.landTileIndex(ctx)
-        roadIndex = RoadTileGeom.index(BoxClient.roadTileIndex(ctx))
-        // DAY TRACKS, one round trip. /v1/geo/tracks hands back the newest sixty days of polylines
-        // (with a clock per vertex and the day's distance, from boxes that write them) in a single
-        // answer; a box that predates it (null) gets the old days-then-one-per-day walk.
-        val batch = BoxClient.geoDayTracks(ctx, 60)
-        val loaded = ArrayList<Track>()
-        if (batch != null) {
-            for (t in batch) if (t.n >= 2) loaded.add(trackOf(t.day, t.lat, t.lon, t.times, t.distanceM, phone = false, glitches = t.glitches, line = t.line))
-        } else {
-            val days = BoxClient.geoDays(ctx, 14) ?: emptyList()
-            for (d in days) {
-                val pts = BoxClient.geoDayTrack(ctx, d) ?: continue
-                if (pts.size >= 2) loaded.add(trackOf(pts).let { trackOf(d, DoubleArray(pts.size) { pts[it].first }, DoubleArray(pts.size) { pts[it].second }, LongArray(0), 0.0, false) })
-            }
-        }
-        tracks = loaded + phoneTracks(ctx, loaded)
     }
     // One reusable Path for the per-frame track strokes (reset per track, never reallocated).
     val trackPath = remember { androidx.compose.ui.graphics.Path() }
 
     // Camera: centre in map units + zoom (screen px per map unit = min(w,h)/WORLD * zoom).
-    var cx by remember { mutableStateOf(WORLD_UNITS / 2) }
-    var cy by remember { mutableStateOf(WORLD_UNITS / 2) }
-    var zoom by remember { mutableStateOf(1f) }
-    var worldFallback by remember { mutableStateOf(false) }
+    // REOPENS WHERE IT WAS LEFT (MapCamera): the last view's tiles are the ones on the phone
+    val lastView = remember { MapCamera.load(ctx) }
+    var cx by remember { mutableStateOf(lastView?.cx ?: (WORLD_UNITS / 2)) }
+    var cy by remember { mutableStateOf(lastView?.cy ?: (WORLD_UNITS / 2)) }
+    var zoom by remember { mutableStateOf(lastView?.zoom ?: 1f) }
+    var worldFallback by remember { mutableStateOf(lastView != null) }
     // OPENS WHERE YOU ARE, about a hundred kilometres around , like any map on a phone. The
     // phone's last fix is known at once (prefs), so the first frame is already here; without a
     // fix ever taken, the newest photo at the same span; without either, the world.
-    var openerDone by remember { mutableStateOf(false) }
+    var openerDone by remember { mutableStateOf(lastView != null) }
     val startFix = remember { com.localghost.app.sync.LocationLog.last(ctx) }
     LaunchedEffect(Unit) {
         val f = startFix ?: return@LaunchedEffect
@@ -407,9 +495,10 @@ fun MapScreen() {
     // the same escape rule as the dots (below), ranked by the box, thinned on screen by a collision
     // pass at draw time. Projected once per fetch.
     class Label(val x: Double, val y: Double, val name: String, val kind: String)
-    var labels by remember { mutableStateOf<List<Label>>(emptyList()) }
+    var labels by remember { mutableStateOf(MapMemory.labels.map { Label(mercXD(it.lon), mercYD(it.lat), it.name, it.kind) }) }
     LaunchedEffect(cx, cy, zoom, viewW, viewH) {
         kotlinx.coroutines.delay(160)
+        MapCamera.save(ctx, cx, cy, zoom)
         val lvl = when {
             zoom < 20f -> 0
             zoom < 200f -> 1
@@ -448,6 +537,7 @@ fun MapScreen() {
             }
             val got = BoxClient.geoLabels(ctx, q0, q1, q2, q3, want) ?: return@launch
             labels = got.map { Label(mercXD(it.lon), mercYD(it.lat), it.name, it.kind) }
+            MapMemory.labels = got
         }
         val lod = BoxClient.framesGeoLod(ctx, lvl, q0, q1, q2, q3)
         labelJob.join()
@@ -477,6 +567,7 @@ fun MapScreen() {
             cx = WORLD_UNITS / 2; cy = WORLD_UNITS / 2; zoom = 1f
             return@LaunchedEffect
         }
+        if (lod != null) MapMemory.cells = cells
         loadNote = when {
             cells.isEmpty() -> "no geotagged photos anywhere yet , they appear as photos with GPS sync"
             else -> cells.sumOf { it.n }.toString() + " photos · detail " + (lvl + 1) + "/4"

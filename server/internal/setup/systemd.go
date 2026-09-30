@@ -95,6 +95,11 @@ func renderUnit(name, execDir string, cfg DaemonConfig) string {
 	// behind the appears-down edge, and everything it supervises runs with less". The daemons it
 	// spawns drop privileges themselves; secd stays root because its whole job is privileged.
 	fmt.Fprintf(&b, "User=root\n")
+	// No core dumps, for secd or anything it starts (the limit is inherited): a crashed
+	// llama-server, Postgres or daemon holds decrypted data, and with systemd-coredump installed
+	// its memory went to /var/lib/systemd/coredump on the OS disk. systemd-coredump honours the
+	// limit ("Resource limits disable core dumping"); a plain core file needs it too.
+	fmt.Fprintf(&b, "LimitCORE=0\n")
 	fmt.Fprintf(&b, "Restart=on-failure\nRestartSec=2\n")
 	// Hardening that does NOT conflict with mounting + supervising: no new privileges beyond root's,
 	// no home access, a real /dev (needed for /dev/mapper, loop, the raw disk, and the TPM when

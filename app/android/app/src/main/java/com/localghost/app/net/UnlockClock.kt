@@ -14,6 +14,17 @@ package com.localghost.app.net
  * the end until the box says ready. The same numbers come out for any account (they are built only
  * from the stage stream, which is identical for every account), so a duress unlock looks the same.
  *
+ * THE FLOOR ([UnlockSnapshot.floorMs], 0 unless a caller sets one). A box that was already open
+ * would answer "ready" in a second and say it had been unlocked before. Since 30 Sep 2026 the box
+ * hides that itself: a warm unlock replays one of its own last eight cold ones, step by step (secd,
+ * replay.go), so the screen sets no floor. The padding below stays for a caller that wants one:
+ * until the floor has passed, a finished unlock is walked through in order (never back past a step
+ * already shown) and the time left counts down to it. Learning uses the real times.
+ *
+ * MODEL: a box from 30 Sep 2026 skips it at unlock and loads the model afterwards (chat shows that
+ * load, [com.localghost.app.net.BoxClient.modelStatus]). A skipped stage is learned as next to
+ * nothing at once, not averaged down over several unlocks.
+ *
  * Pure: the screen feeds snapshots and asks [estimate] on its own tick; tests drive [now].
  */
 class UnlockClock(
@@ -29,6 +40,7 @@ class UnlockClock(
     private var shown = 0f
     private var warm = false
     private var learnedThisRun = false
+    private var padIdx = -1 // the furthest step shown while padding to the floor
 
     /** Feeds one snapshot (the stream's, as it arrives). */
     fun observe(s: UnlockSnapshot) {
@@ -42,6 +54,11 @@ class UnlockClock(
             }
         }
         if (s.model != null && s.model != model) { model = s.model; modelAt = t }
+        // the furthest step the real stream has shown: padding to the floor never goes back past it
+        if (!s.done) {
+            val cur = s.stages.indexOfFirst { it.state != StageState.COMPLETE && it.state != StageState.SKIPPED }
+            if (cur >= 0) padIdx = maxOf(padIdx, cur)
+        }
         last = s
     }
 
@@ -59,10 +76,15 @@ class UnlockClock(
             current = st
             break
         }
+        val elapsed0 = (t - startedAt).coerceAtLeast(0)
+        if ((s.done || current == null) && s.failed == null && elapsed0 < s.floorMs) {
+            return padded(order, took, elapsed0, s.floorMs)
+        }
         if (s.done || current == null) {
             shown = 1f
             return UnlockEstimate(1f, 0, null, took, confident = true, warm = warm, overdue = false)
         }
+        padIdx = maxOf(padIdx, order.indexOf(current))
         val inCurrent = (t - prev).coerceAtLeast(0)
         took[current] = inCurrent
         val m = model
@@ -75,14 +97,36 @@ class UnlockClock(
             (e - inCurrent).coerceAtLeast(maxOf(1_000L, e / 6))
         }
         val after = order.dropWhile { it != current }.drop(1).sumOf { expected(it) }
-        val left = currentLeft + after
-        val elapsed = (t - startedAt).coerceAtLeast(0)
+        val elapsed = elapsed0
+        val left = if (s.failed == null) maxOf(currentLeft + after, s.floorMs - elapsed) // never "sooner" than the floor
+            else currentLeft + after
         val raw = if (elapsed + left > 0) elapsed.toFloat() / (elapsed + left) else 0f
         shown = maxOf(shown, raw.coerceAtMost(0.98f))
         val confident = boxSays || order.any { it.name in expect }
         // well past what this stage usually takes, and the box gives no estimate of its own
         val overdue = !boxSays && inCurrent > 5_000 && inCurrent > 2 * expected(current)
         return UnlockEstimate(shown, (left + 999) / 1000, current, took, confident, warm, overdue)
+    }
+
+    /**
+     * Done, but short of the floor: the steps are walked in order so the finish lands on the floor.
+     * The step for this moment is the share of the floor gone by, never one before the furthest the
+     * real stream (or this walk) already showed; its time is counted from when the walk reached it.
+     */
+    private fun padded(order: List<UnlockStage>, real: Map<UnlockStage, Long>, elapsed: Long, floor: Long): UnlockEstimate {
+        val steps = order.dropLast(1) // the last (ready) is the arrival, not a step
+        if (steps.isEmpty()) return UnlockEstimate(1f, 0, null, real, confident = true, warm = warm, overdue = false)
+        val per = floor.toDouble() / steps.size
+        val byTime = (elapsed / per).toInt().coerceIn(0, steps.size - 1)
+        val idx = maxOf(byTime, padIdx).coerceIn(0, steps.size - 1)
+        padIdx = idx
+        val cur = steps[idx]
+        val took = LinkedHashMap<UnlockStage, Long>()
+        for (st in steps.take(idx)) took[st] = real[st] ?: per.toLong()
+        took[cur] = (elapsed - (idx * per).toLong()).coerceAtLeast(0)
+        shown = maxOf(shown, (elapsed.toFloat() / floor).coerceAtMost(0.98f))
+        val left = ((floor - elapsed) + 999) / 1000
+        return UnlockEstimate(shown, left, cur, took, confident = true, warm = warm, overdue = false)
     }
 
     /**
@@ -95,11 +139,14 @@ class UnlockClock(
         if (!s.done || s.failed != null || warm || learnedThisRun) return null
         learnedThisRun = true
         var prev = startedAt
-        for (st in s.stages.map { it.stage }) {
+        for (row in s.stages) {
+            val st = row.stage
             val d = doneAt[st] ?: break
             val took = (d - prev).coerceIn(100, 10 * 60_000L)
             prev = d
-            expect[st.name] = expect[st.name]?.let { (it + took) / 2 } ?: took
+            // skipped: the box no longer does it at all, so no average with what it used to take
+            expect[st.name] = if (row.state == StageState.SKIPPED) 100
+                else expect[st.name]?.let { (it + took) / 2 } ?: took
         }
         return HashMap(expect)
     }
@@ -111,7 +158,8 @@ class UnlockClock(
         val DEFAULTS: Map<UnlockStage, Long> = mapOf(
             UnlockStage.RESOLVE to 1_000, UnlockStage.UNSEAL to 2_000, UnlockStage.MOUNT to 2_000,
             UnlockStage.START_DB to 3_000, UnlockStage.START_CACHE to 3_000, UnlockStage.DAEMONS to 1_000,
-            UnlockStage.MODEL to 30_000, UnlockStage.READY to 500,
+            UnlockStage.MODEL to 500, // skipped at unlock since 30 Sep 2026 (a live load sends its own eta)
+             UnlockStage.READY to 500,
             UnlockStage.STOP_SERVICES to 3_000, UnlockStage.STOP_CACHE to 1_000, UnlockStage.STOP_DB to 3_000,
             UnlockStage.UNMOUNT to 2_000, UnlockStage.LOCKED to 500,
         )

@@ -39,9 +39,14 @@ import org.json.JSONObject
  * Framework LocationManager only (no Play Services, no library): one fix per worker run, from the
  * fused provider where the OS has one, network otherwise, GPS last. A point is kept when the phone
  * moved at least [MIN_MOVE_M] or [MIN_GAP_S] passed , a parked phone writes a point an hour, a
- * moving one every run. The spool is a plain append-only text file, "ts lat lon [acc]" per line
- * (acc, the fix's error radius in metres, since this build; older lines have three fields), capped
- * so a phone without a box for a year does not grow it without bound.
+ * moving one every run. The spool is an append-only text file, one point per line, capped so a
+ * phone without a box for a year does not grow it without bound. A point is "ts lat lon [acc]"
+ * (acc, the fix's error radius in metres), and since 30 Sep 2026 each line is that text SEALED
+ * ([TrailSeal], "s1:..."): to a key whose private half is in the box's vault, or on a phone with no
+ * box, behind the phone's own unlock ([TrailKeys]). The worker seals with the public half and holds
+ * nothing that opens what it wrote; the app reads the last two days again only after a PIN unlock.
+ * The last point (the worker compares every fix with it) is sealed to this phone's hardware
+ * ([com.localghost.app.security.DeviceSealed]); the country for the phrases stays plain.
  *
  * A fix comes with its error radius, and the radius is what tells a cell-tower guess from a GPS
  * position: a COARSE fix (radius over [COARSE_M]) never moves the trail. It is not evidence the
@@ -56,6 +61,7 @@ object LocationLog {
     private const val FILE = "location-trail.log"
     private const val RECENT_FILE = "location-recent.log"
     private const val RECENT_S = 48 * 3600L // how far back the phone can draw on its own
+    private const val RING_MAX = 256_000 // the recent ring's cap (a sealed line is ~130 bytes; the age trim runs when the app opens it)
     private const val PREFS = "lg_location"
     private const val MAX_BYTES = 2_000_000 // ~45k points; the oldest fall off past this
     private const val MIN_MOVE_M = 25.0
@@ -89,12 +95,62 @@ object LocationLog {
 
     // --- the spool ---
 
+    /** The last point kept, sealed to this phone's hardware (readable in the background: the
+     *  worker compares each fix with it). */
     fun last(ctx: Context): Point? {
-        val p = prefs(ctx)
-        val ts = p.getLong("last_ts", 0L)
-        if (ts == 0L) return null
-        return Point(ts, p.getFloat("last_lat", 0f).toDouble(), p.getFloat("last_lon", 0f).toDouble(), p.getFloat("last_acc", 0f))
+        migratePlainState(ctx)
+        val line = com.localghost.app.security.DeviceSealed.open(prefs(ctx).getString("last_sealed", null)) ?: return null
+        return parseLine(line)
     }
+
+    /** Before 30 Sep 2026 the last point and the country's reference point were kept in the clear. */
+    private fun migratePlainState(ctx: Context) {
+        val p = prefs(ctx)
+        if (!p.contains("last_ts") && !p.contains("country_lat")) return
+        val e = p.edit()
+        if (p.contains("last_ts")) {
+            val ts = p.getLong("last_ts", 0L)
+            if (ts > 0) com.localghost.app.security.DeviceSealed.seal("$ts ${p.getFloat("last_lat", 0f)} ${p.getFloat("last_lon", 0f)} ${p.getFloat("last_acc", 0f).toInt()}")
+                ?.let { e.putString("last_sealed", it) }
+            e.remove("last_ts").remove("last_lat").remove("last_lon").remove("last_acc")
+        }
+        if (p.contains("country_lat")) {
+            com.localghost.app.security.DeviceSealed.seal("${p.getFloat("country_lat", 999f)} ${p.getFloat("country_lon", 999f)}")
+                ?.let { e.putString("country_ref", it) }
+            e.remove("country_lat").remove("country_lon")
+        }
+        e.apply()
+    }
+
+    /** A point's text, sealed when there is a key (there nearly always is: [TrailKeys.ensure]
+     *  makes one the first time). */
+    private fun seal(ctx: Context, plain: String): String {
+        val pub = TrailKeys.ensure(ctx) ?: return plain
+        val p = prefs(ctx)
+        if (!p.getBoolean("plain_sealed", false)) {
+            sealPlainLines(ctx) // what was written before there was a key
+            p.edit().putBoolean("plain_sealed", true).apply()
+        }
+        return TrailSeal.seal(pub, plain)
+    }
+
+    /** Every plain line of the spool and the ring, sealed to the current key (lines from before
+     *  there was one, or from before this build). */
+    @Synchronized
+    fun sealPlainLines(ctx: Context) {
+        val pub = TrailKeys.publicKey(ctx) ?: return
+        for (f in listOf(file(ctx), File(ctx.filesDir, RECENT_FILE))) {
+            if (!f.exists()) continue
+            val lines = f.readLines().filter { it.isNotBlank() }
+            if (lines.all { TrailSeal.isSealed(it) }) continue
+            val out = lines.mapNotNull { l -> if (TrailSeal.isSealed(l)) l else parseLine(l)?.let { TrailSeal.seal(pub, l.trim()) } }
+            f.writeText(if (out.isEmpty()) "" else out.joinToString("\n", postfix = "\n"))
+        }
+    }
+
+    /** A line of the spool or the ring as a point: sealed lines only with [op] (the app unlocked). */
+    private fun readLine(line: String, op: TrailSeal.Opener?): Point? =
+        if (TrailSeal.isSealed(line)) op?.open(line.trim())?.let { parseLine(it) } else parseLine(line)
 
     /** Append a point unless it is the same place as the last one, recently, or not newer than
      *  the last one at all (a cached fix older than what we already hold is not news). Returns
@@ -123,7 +179,8 @@ object LocationLog {
         } else if (pt.acc > HOPELESS_M) {
             return false
         }
-        val line = "${pt.ts} ${pt.lat} ${pt.lon}" + (if (pt.acc > 0f) " ${pt.acc.toInt()}" else "") + "\n"
+        val plain = "${pt.ts} ${pt.lat} ${pt.lon}" + (if (pt.acc > 0f) " ${pt.acc.toInt()}" else "")
+        val line = seal(ctx, plain) + "\n"
         val f = file(ctx)
         f.appendText(line)
         if (f.length() > MAX_BYTES) trimOldest(f)
@@ -132,9 +189,8 @@ object LocationLog {
         // the last two days would vanish from the map the moment they reached the box.
         val r = File(ctx.filesDir, RECENT_FILE)
         r.appendText(line)
-        if (r.length() > 64_000) trimRecent(r, pt.ts)
-        prefs(ctx).edit().putLong("last_ts", pt.ts).putFloat("last_lat", pt.lat.toFloat())
-            .putFloat("last_lon", pt.lon.toFloat()).putFloat("last_acc", pt.acc).apply()
+        if (r.length() > RING_MAX) trimOldest(r)
+        prefs(ctx).edit().putString("last_sealed", com.localghost.app.security.DeviceSealed.seal(plain) ?: "").apply()
         bumpToday(ctx)
         return true
     }
@@ -150,18 +206,31 @@ object LocationLog {
         return Point(ts, lat, lon, acc)
     }
 
-    private fun trimRecent(r: File, now: Long) {
-        val keep = r.readLines().filter { (it.trim().substringBefore(' ').toLongOrNull() ?: 0L) >= now - RECENT_S }
-        r.writeText(if (keep.isEmpty()) "" else keep.joinToString("\n", postfix = "\n"))
-    }
-
     /** The phone's own points from the last [RECENT_S] seconds (synced or not), oldest first ,
-     *  what the map draws for today before and beside what the box has. */
+     *  what the map draws for today before and beside what the box has. Sealed lines open only
+     *  while the app is unlocked ([TrailKeys.opener]); then the ring also loses what is older than
+     *  two days (the worker, which cannot read a sealed line's time, trims by size alone). */
     @Synchronized
     fun recent(ctx: Context, sinceTs: Long = System.currentTimeMillis() / 1000 - RECENT_S): List<Point> {
         val r = File(ctx.filesDir, RECENT_FILE)
         if (!r.exists()) return emptyList()
-        return r.readLines().mapNotNull { line -> parseLine(line)?.takeIf { it.ts >= sinceTs } }
+        val op = TrailKeys.opener()
+        val floor = System.currentTimeMillis() / 1000 - RECENT_S
+        val keep = ArrayList<String>()
+        val out = ArrayList<Point>()
+        var changed = false
+        for (line in r.readLines()) {
+            if (line.isBlank()) continue
+            val pt = readLine(line, op)
+            if (op != null) {
+                // unlocked: what is too old, or can never open (a key that is gone), leaves the ring
+                if (pt == null || pt.ts < floor) { changed = true; continue }
+                keep.add(line)
+            }
+            if (pt != null && pt.ts >= sinceTs) out.add(pt)
+        }
+        if (changed) r.writeText(if (keep.isEmpty()) "" else keep.joinToString("\n", postfix = "\n"))
+        return out
     }
 
     private fun trimOldest(f: File) {
@@ -170,25 +239,24 @@ object LocationLog {
         f.writeText(keep.joinToString("\n", postfix = "\n"))
     }
 
+    /** The spool's lines, sealed or not, oldest first. */
     @Synchronized
-    fun pending(ctx: Context): List<Point> {
+    private fun pendingLines(ctx: Context): List<String> {
         val f = file(ctx)
         if (!f.exists()) return emptyList()
-        return f.readLines().mapNotNull { line -> parseLine(line) }
+        return f.readLines().map { it.trim() }.filter { it.isNotEmpty() }
     }
 
-    fun pendingCount(ctx: Context): Int = pending(ctx).size
+    fun pendingCount(ctx: Context): Int = pendingLines(ctx).size
 
-    /** Drop exactly the points the box has accepted , by their timestamps, never by position or
-     *  range, so a point recorded while the batch was in flight is untouched. */
+    /** Drop exactly the lines the box has accepted , by the lines themselves (a sealed line is
+     *  unique: a new one-off key each time), never by position or range, so a point recorded while
+     *  the batch was in flight is untouched. */
     @Synchronized
-    private fun ack(ctx: Context, sent: Set<Long>) {
+    private fun ack(ctx: Context, sent: Set<String>) {
         val f = file(ctx)
         if (!f.exists()) return
-        val keep = f.readLines().filter { line ->
-            val ts = line.trim().substringBefore(' ').toLongOrNull() ?: return@filter false
-            ts !in sent
-        }
+        val keep = f.readLines().map { it.trim() }.filter { it.isNotEmpty() && it !in sent }
         if (keep.isEmpty()) f.delete() else f.writeText(keep.joinToString("\n", postfix = "\n"))
     }
 
@@ -255,9 +323,12 @@ object LocationLog {
      *  call on some), only when the phone moved far enough for the answer to change. Returns the
      *  country when it is new. */
     fun geocode(ctx: Context, pt: Point): String? {
+        migratePlainState(ctx)
         val p = prefs(ctx)
-        val prevLat = p.getFloat("country_lat", 999f).toDouble()
-        val prevLon = p.getFloat("country_lon", 999f).toDouble()
+        // where the country was last looked up, sealed like the last point; the country itself is plain
+        val ref = com.localghost.app.security.DeviceSealed.open(p.getString("country_ref", null))?.split(' ')
+        val prevLat = ref?.getOrNull(0)?.toDoubleOrNull() ?: 999.0
+        val prevLon = ref?.getOrNull(1)?.toDoubleOrNull() ?: 999.0
         val prevTs = p.getLong("country_ts", 0L)
         if (prevLat < 900) {
             val moved = FloatArray(1).also { Location.distanceBetween(prevLat, prevLon, pt.lat, pt.lon, it) }[0]
@@ -277,7 +348,7 @@ object LocationLog {
         if (cc.length != 2) return null
         val changed = cc.uppercase() != (p.getString("country", "") ?: "")
         p.edit().putString("country", cc.uppercase()).putLong("country_ts", pt.ts)
-            .putFloat("country_lat", pt.lat.toFloat()).putFloat("country_lon", pt.lon.toFloat()).apply()
+            .putString("country_ref", com.localghost.app.security.DeviceSealed.seal("${pt.lat} ${pt.lon}") ?: "").apply()
         return if (changed) cc.uppercase() else null
     }
 
@@ -311,22 +382,35 @@ object LocationLog {
         if (!BoxConfig.isConfigured(ctx) || SessionStore.read(ctx) == null) return false
         val src = source(ctx)
         while (true) {
-            val pts = pending(ctx)
-            if (pts.isEmpty()) return true
-            val batch = pts.take(BATCH)
+            val lines = pendingLines(ctx)
+            if (lines.isEmpty()) return true
+            val batch = lines.take(BATCH)
+            // sealed lines go as they are, and secd opens them with this phone's key from the vault
+            // before anything else on the box sees them; a plain line (from before there was a key)
+            // goes as a point
             val arr = JSONArray()
-            for (pt in batch) arr.put(JSONObject().put("ts", pt.ts).put("lat", pt.lat).put("lon", pt.lon))
+            val sealed = JSONArray()
+            for (l in batch) {
+                if (TrailSeal.isSealed(l)) sealed.put(l)
+                else parseLine(l)?.let { pt -> arr.put(JSONObject().put("ts", pt.ts).put("lat", pt.lat).put("lon", pt.lon)) }
+            }
             val body = JSONObject().put("source", src).put("points", arr)
+            if (sealed.length() > 0) body.put("sealed", sealed)
             val code = try {
                 BoxHttp.postJsonCode(ctx, "/v1/locations", body)
             } catch (e: Exception) {
                 android.util.Log.w("LocalGhost", "location flush failed: ${e.message}"); return false
             }
+            if (code == 409) {
+                // the box has no key for this phone's trail yet: it is handed over at the next unlock
+                android.util.Log.i("LocalGhost", "location flush: the box has no trail key for this phone yet; kept")
+                return false
+            }
             if (code != 202 && code != 200) {
                 android.util.Log.w("LocalGhost", "location flush: box answered HTTP $code")
                 return false
             }
-            ack(ctx, batch.mapTo(HashSet()) { it.ts })
+            ack(ctx, batch.toHashSet())
             if (batch.size < BATCH) return true
         }
     }

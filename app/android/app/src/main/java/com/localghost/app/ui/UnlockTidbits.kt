@@ -51,6 +51,17 @@ object UnlockTidbits {
         "SETTINGS › LOCK BOX NOW closes the vault from anywhere; the key leaves the box's memory",
         "BOX STATUS shows every service on the box and what it is working on",
         "HEALTH keeps a month of the phone's health numbers on the box, drawn as plain bars",
+        "the hat-and-glasses icon at the top of chat is incognito: that chat is kept nowhere, not on the phone, not on the box",
+        "the globe at the top of chat is web search; on auto the box decides when a question needs the web",
+        "close the app while the box is answering and it keeps writing; the whole answer is there when you come back",
+        "a follow-up like \"and tomorrow?\" carries the question before it, on the box and on the phone model",
+        "an answer keeps its thinking and the pages it read; they are saved with the chat on the box",
+        "SETTINGS › MAPS ON THIS PHONE downloads the streets around your places on Wi-Fi, so the MAP opens fast",
+        "MODELS › benchmark shows how fast this phone reads and writes with its model",
+        "the phone model stays loaded once you pick it in chat, so the second answer starts at once",
+        "tap a photo in MEMORIES to open it; ON THIS DAY plays its photos as a slideshow",
+        "the box never talks to the internet on its own; a web search leaves from the phone, not the box",
+        "the box loads its model after the unlock; if you ask chat before it is ready, chat shows the load and answers once it is",
     )
 
     /**
@@ -59,6 +70,9 @@ object UnlockTidbits {
      * same one.
      */
     fun line(tick: Int, stage: UnlockStage?, model: ModelLoad?, seed: Int): String =
-        if (tick % 2 == 0) "> " + doing(stage, model)
-        else "did you know? " + tips[Math.floorMod(seed + tick / 2, tips.size)]
+        if (tick % 2 == 0) "> " + doing(stage, model) else "did you know? " + tip(tick / 2, seed)
+
+    /** The [turn]th tip of this unlock (the screen turns one every few seconds), from [seed]. */
+    fun tip(turn: Int, seed: Int): String = tips[Math.floorMod(seed + turn, tips.size)]
+
 }
