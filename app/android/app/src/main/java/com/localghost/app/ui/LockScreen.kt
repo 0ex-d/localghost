@@ -36,9 +36,27 @@ fun LockScreen(
     progress: UnlockSnapshot?,
     onLocalOnly: () -> Unit = {},
     onReenroll: () -> Unit = {},
+    closing: Boolean = false,
     onUnlock: () -> Unit,
 ) {
     GhostScaffold { pad ->
+        // LOCKING: the vault rings go out from the inside, one teardown step at a time, then the
+        // picture switches off like an old monitor ([closing]); the gate comes back after it.
+        if (unlocking && progress != null) {
+            Column(
+                Modifier.fillMaxSize().padding(pad).padding(horizontal = 32.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                VaultRings(progress, locking = true, release = closing,
+                    modifier = Modifier.fillMaxWidth(0.78f).widthIn(max = 300.dp).aspectRatio(1f))
+                Spacer(Modifier.height(20.dp))
+                Text("LOCKING", color = GhostTextDim, style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(20.dp))
+                UnlockProgress(progress, modifier = Modifier.widthIn(max = 360.dp))
+            }
+            return@GhostScaffold
+        }
         Column(
             Modifier.fillMaxSize().padding(pad).padding(32.dp),
             verticalArrangement = Arrangement.Center,
@@ -62,10 +80,7 @@ fun LockScreen(
                 style = MaterialTheme.typography.bodyMedium)
             Spacer(Modifier.height(48.dp))
 
-            if (unlocking && progress != null) {
-                // Streamed loading state: the stage list ticks through as the box reports progress.
-                UnlockProgress(progress)
-            } else {
+            run {
                 GhostButton("UNLOCK", onUnlock, modifier = Modifier.fillMaxWidth())
                 error?.let {
                     Spacer(Modifier.height(16.dp))

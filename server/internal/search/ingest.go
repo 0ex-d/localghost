@@ -9,6 +9,7 @@ package search
 import (
 	"bytes"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"image"
 	_ "image/jpeg" // decoders for pHash
@@ -19,6 +20,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/LocalGhostDao/localghost/server/internal/imgfit"
 )
 
 type Ingester struct {
@@ -222,7 +225,25 @@ func (in *Ingester) ensureCaptioned(id int64, render string) error {
 	if st.JobQueued && !st.JobParked {
 		return nil
 	}
+	if tooLargeToCaption(render) {
+		return nil // no caption will ever come of it: not queued at every stock-take
+	}
 	return in.Store.RequeueCaption(id, render)
+}
+
+// tooLargeToCaption: the render is past the box's image limits (imgfit/limits.go), so a caption
+// job for it could only fail.
+func tooLargeToCaption(path string) bool {
+	var tl imgfit.ErrTooLarge
+	if err := imgfit.CheckFile(path); errors.As(err, &tl) {
+		return true
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	return errors.As(imgfit.CheckHeader(f), &tl)
 }
 
 // ApplyCaption is everything that follows a caption, idempotent, so the ensure path and the
@@ -292,6 +313,16 @@ func decodeFile(path string) (image.Image, error) {
 		return nil, err
 	}
 	defer f.Close()
+	// the header first: past the box's limits (imgfit/limits.go) there is no pHash, not a decode
+	cfg, _, cerr := image.DecodeConfig(f)
+	if cerr == nil {
+		if err := imgfit.CheckPixels(cfg.Width, cfg.Height); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
 	img, _, derr := image.Decode(f)
 	if derr != nil && isWebP(path) {
 		// framed's previews are WebP wherever cwebp is installed, and Go decodes no WebP: every

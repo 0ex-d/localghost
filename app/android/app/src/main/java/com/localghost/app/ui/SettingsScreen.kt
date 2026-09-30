@@ -15,6 +15,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.localghost.app.ui.theme.*
+import kotlinx.coroutines.launch
 
 @Composable
 fun SettingsScreen(
@@ -85,6 +86,9 @@ fun SettingsScreen(
         // that records it lives here; one tap joins the two.
         Text("[ see the trail on the map ]", color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
             modifier = Modifier.clickable { onOpenMap() }.padding(vertical = 6.dp))
+
+        Spacer(Modifier.height(24.dp))
+        ServerUpdateSection(onLock)
 
         Spacer(Modifier.height(24.dp))
         SectionLabel("MAPS ON THIS PHONE")
@@ -350,4 +354,99 @@ private fun WipeButton(onWipe: () -> Unit) {
             onDismiss = { confirming = false },
         )
     }
+}
+
+/**
+ * SERVER: the build the box runs, a newer release from the mirror (the phone checks once a day,
+ * update/ServerUpdates.kt), and DEPLOY. The box checks the release's signature with the key it
+ * already holds, puts it on, locks and restarts onto it, so the app locks too; unlock again when it
+ * is back. On trial until its first unlock has run ten minutes with the daemons up; back by itself
+ * if it fails, or with ROLL BACK.
+ */
+@Composable
+private fun ServerUpdateSection(onLock: () -> Unit) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    var status by remember { mutableStateOf<com.localghost.app.net.BoxClient.UpdateStatus?>(null) }
+    var offer by remember { mutableStateOf(com.localghost.app.update.ServerUpdates.lastOffer(ctx)) }
+    var busy by remember { mutableStateOf("") }
+    var result by remember { mutableStateOf("") }
+    LaunchedEffect(Unit) {
+        status = com.localghost.app.net.BoxClient.updateStatus(ctx)
+        status?.let { com.localghost.app.update.ServerUpdates.noteBoxVersion(ctx, it.version) }
+        if (offer == null) offer = com.localghost.app.update.ServerUpdates.check(ctx)
+    }
+    SectionLabel("SERVER")
+    Spacer(Modifier.height(8.dp))
+    val st = status
+    Text(when {
+        st == null -> "the box has not said which build it runs (an older build, or it is out of reach)"
+        else -> "your box runs ${st.version}" + when (st.trialState) {
+            "trial" -> " · on trial: back to ${st.trialPrev} by itself if its first unlock fails; confirmed after ten minutes up"
+            "rolled_back" -> " · ${st.trialVersion} was rolled back: ${st.trialReason}"
+            else -> ""
+        }
+    }, color = GhostText, style = MaterialTheme.typography.bodyMedium)
+    val o = offer
+    val newer = o != null && st != null && com.localghost.app.update.ReleaseInfo.newer(o.release.version, st.version)
+    if (o != null && newer) {
+        Spacer(Modifier.height(6.dp))
+        Text("${o.release.version} is out" + (if (o.release.date.isNotEmpty()) " (${o.release.date.take(10)})" else "") +
+            ", ${o.release.changes.size} change${if (o.release.changes.size == 1) "" else "s"}" +
+            (if (o.release.since.isNotEmpty()) " since ${o.release.since}" else "") + ":",
+            color = TerminalGreen, style = MaterialTheme.typography.labelMedium)
+        o.release.changes.take(12).forEach {
+            Text("  $it", color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+        }
+        if (o.release.changes.size > 12) Text("  … ${o.release.changes.size - 12} more", color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+    } else if (o != null && st != null) {
+        Spacer(Modifier.height(4.dp))
+        Text("the newest release on the mirror is ${o.release.version}: nothing to deploy", color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+    }
+    if (busy.isNotEmpty()) {
+        Spacer(Modifier.height(6.dp))
+        Text("> $busy", color = TerminalGreen, style = MaterialTheme.typography.labelMedium)
+    }
+    if (result.isNotEmpty()) {
+        Spacer(Modifier.height(6.dp))
+        Text(result, color = GhostText, style = MaterialTheme.typography.labelMedium)
+    }
+    Spacer(Modifier.height(8.dp))
+    if (o != null && newer && busy.isEmpty()) {
+        GhostButton("DEPLOY ${o.release.version}", {
+            busy = "starting…"; result = ""
+            scope.launch {
+                val (ok, what) = com.localghost.app.update.ServerUpdates.deploy(ctx, o) { busy = it }
+                busy = ""
+                if (ok) {
+                    result = "your box is restarting onto $what. It locks as it does: unlock it again in a minute."
+                    kotlinx.coroutines.delay(2500)
+                    onLock()
+                } else result = "not deployed: $what"
+            }
+        }, modifier = Modifier.fillMaxWidth())
+    }
+    if (st != null && (st.trialState == "trial" || st.trialState == "confirmed") && busy.isEmpty()) {
+        Spacer(Modifier.height(8.dp))
+        GhostButton("ROLL BACK TO ${st.trialPrev.ifEmpty { "THE EARLIER BUILD" }}", {
+            busy = "putting the earlier build back…"; result = ""
+            scope.launch {
+                val (ok, why) = com.localghost.app.net.BoxClient.updateRollback(ctx)
+                busy = ""
+                if (ok) { result = "your box is restarting onto the earlier build. Unlock it again in a minute."; kotlinx.coroutines.delay(2500); onLock() }
+                else result = "not rolled back: $why"
+            }
+        }, modifier = Modifier.fillMaxWidth())
+    }
+    Text("[ check the mirror now ]", color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
+        modifier = Modifier.clickable {
+            scope.launch {
+                busy = "reading the mirror…"; result = ""
+                val fresh = com.localghost.app.update.ServerUpdates.check(ctx)
+                offer = fresh ?: offer
+                status = com.localghost.app.net.BoxClient.updateStatus(ctx) ?: status
+                busy = ""
+                if (fresh == null) result = "no server release on the mirror yet, or the mirror did not answer"
+            }
+        }.padding(vertical = 6.dp))
 }

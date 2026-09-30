@@ -40,6 +40,11 @@ const simplifyEpsilonDeg = 0.0001
 // at midnight is judged by its neighbours across the boundary; only the day's own points are drawn
 // and counted.
 func BuildDayPath(day time.Time, points []TrackPoint, photos []PhotoPoint) ([]byte, error) {
+	return BuildDayPathAsking(day, points, photos, nil)
+}
+
+// BuildDayPathAsking is [BuildDayPath] with the day's trail questions (questions.go) on the line.
+func BuildDayPathAsking(day time.Time, points []TrackPoint, photos []PhotoPoint, questions []Question) ([]byte, error) {
 	dayStart := time.Date(day.UTC().Year(), day.UTC().Month(), day.UTC().Day(), 0, 0, 0, 0, time.UTC).Unix()
 	dayEnd := dayStart + 86400
 	inDay := func(pts []TrackPoint) []TrackPoint {
@@ -89,6 +94,10 @@ func BuildDayPath(day time.Time, points []TrackPoint, photos []PhotoPoint) ([]by
 				"distanceM": math.Round(TrackDistanceM(points)),
 			},
 		})
+		if len(questions) > 0 {
+			// the stretches the person is asked about ("were you there?")
+			features[len(features)-1].Properties["questions"] = questions
+		}
 	}
 	for _, ph := range photos {
 		features = append(features, feature{

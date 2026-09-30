@@ -972,6 +972,8 @@ func (s *Server) handleGeoTracks(w http.ResponseWriter, r *http.Request) {
 		Times     []int64      `json:"times,omitempty"`     // unix seconds, parallel to coords (day files from framed ≥ this build)
 		DistanceM float64      `json:"distanceM,omitempty"` // over the cleaned points, standing-still jitter excluded
 		Glitches  int          `json:"glitches,omitempty"`  // raw points framed's rules threw out (spikes to a cell tower and back)
+		// stretches the person is asked about ("were you there?", framed/questions.go), as framed wrote them
+		Questions json.RawMessage `json:"questions,omitempty"`
 		// from the day route beside the path (<day>.route.json, /v1/geo/route): the day in one line,
 		// how far on foot and by road, how many stays; absent for days framed has not told yet
 		Line  string  `json:"line,omitempty"`
@@ -1012,9 +1014,10 @@ func (s *Server) handleGeoTracks(w http.ResponseWriter, r *http.Request) {
 					Coords json.RawMessage `json:"coordinates"`
 				} `json:"geometry"`
 				Properties struct {
-					Times     []int64 `json:"times"`
-					DistanceM float64 `json:"distanceM"`
-					Glitches  int     `json:"glitches"`
+					Times     []int64         `json:"times"`
+					DistanceM float64         `json:"distanceM"`
+					Glitches  int             `json:"glitches"`
+					Questions json.RawMessage `json:"questions"`
 				} `json:"properties"`
 			} `json:"features"`
 		}
@@ -1029,7 +1032,8 @@ func (s *Server) handleGeoTracks(w http.ResponseWriter, r *http.Request) {
 			if json.Unmarshal(f.Geometry.Coords, &lonlat) != nil || len(lonlat) < 2 {
 				continue
 			}
-			t := track{Day: d, Coords: make([][2]float64, len(lonlat)), DistanceM: f.Properties.DistanceM, Glitches: f.Properties.Glitches}
+			t := track{Day: d, Coords: make([][2]float64, len(lonlat)), DistanceM: f.Properties.DistanceM, Glitches: f.Properties.Glitches,
+				Questions: f.Properties.Questions}
 			for i, c := range lonlat {
 				t.Coords[i] = [2]float64{c[1], c[0]} // GeoJSON is lon,lat; the map wants lat,lon
 			}

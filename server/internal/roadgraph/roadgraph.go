@@ -157,6 +157,51 @@ func (g *Graph) Walk(a, b Point) (Route, error) {
 	return r, nil
 }
 
+// NearRoad reports whether a road of any kind, paths included, passes within withinM of the
+// point, and whether the box can tell at all: known is false without road tiles, or when none of
+// the nine cells around the point holds a road (an area never cut, or the open sea). A trail
+// question asks "no road goes there" only when known.
+func (g *Graph) NearRoad(lat, lon, withinM float64) (near, known bool) {
+	if !g.Available() {
+		return false, false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(g.loaded) > keepCells {
+		g.reset()
+	}
+	c := roadtiles.CellAt(0, lon, lat)
+	for dy := -1; dy <= 1; dy++ {
+		for dx := -1; dx <= 1; dx++ {
+			_ = g.load(roadtiles.Cell{Level: 0, X: c.X + dx, Y: c.Y + dy})
+		}
+	}
+	span := 1.5 * roadtiles.CellDeg(0) // the nine cells, in degrees from the point
+	kx := 111320 * math.Cos(lat*math.Pi/180)
+	const ky = 110540.0
+	best := math.Inf(1)
+	for _, e := range g.edges {
+		for s := 0; s+1 < len(e.Lat); s++ {
+			alat, alon := float64(e.Lat[s])/1e7, float64(e.Lon[s])/1e7
+			if math.Abs(alat-lat) > span || math.Abs(alon-lon) > span {
+				continue
+			}
+			known = true
+			ax, ay := (alon-lon)*kx, (alat-lat)*ky
+			bx, by := (float64(e.Lon[s+1])/1e7-lon)*kx, (float64(e.Lat[s+1])/1e7-lat)*ky
+			dx, dy := bx-ax, by-ay
+			t := 0.0
+			if l2 := dx*dx + dy*dy; l2 > 0 {
+				t = math.Max(0, math.Min(1, -(ax*dx+ay*dy)/l2))
+			}
+			if d := math.Hypot(ax+t*dx, ay+t*dy); d < best {
+				best = d
+			}
+		}
+	}
+	return known && best <= withinM, known
+}
+
 // load reads one cell's edges into the graph, once.
 func (g *Graph) load(c roadtiles.Cell) error {
 	if g.loaded[c] {

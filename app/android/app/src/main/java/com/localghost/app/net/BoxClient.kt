@@ -285,6 +285,53 @@ object BoxClient {
         false
     }
 
+    /** What the box runs and a release on trial (GET /v1/update); null from a box that predates it. */
+    class UpdateStatus(val version: String, val trialVersion: String, val trialPrev: String, val trialState: String, val trialReason: String)
+
+    suspend fun updateStatus(ctx: Context): UpdateStatus? = try {
+        val o = BoxHttp.getJson(ctx, "/v1/update")
+        if (!o.has("version")) null
+        else {
+            val t = o.optJSONObject("trial") ?: org.json.JSONObject()
+            UpdateStatus(o.optString("version", ""), t.optString("version", ""), t.optString("prev", ""),
+                t.optString("state", ""), t.optString("reason", ""))
+        }
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        null
+    }
+
+    /** One file of the server set to the box (POST /v1/update/file?name=). */
+    suspend fun updateUpload(ctx: Context, name: String, file: java.io.File): Boolean = try {
+        BoxHttp.postFile(ctx, "/v1/update/file?name=" + java.net.URLEncoder.encode(name, "UTF-8"), file,
+            "application/octet-stream", emptyMap()) == 200
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        false
+    }
+
+    /** Verify, put on, restart (POST /v1/update/apply): ok and the version, or false and why not. */
+    suspend fun updateApply(ctx: Context): Pair<Boolean, String> = try {
+        val r = BoxHttp.postJson(ctx, "/v1/update/apply", org.json.JSONObject(), readTimeoutMs = 6 * 60_000)
+        if (r.optBoolean("ok", false)) true to r.optString("version", "") else false to r.optString("why", "the box said no")
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        false to (e.message ?: "the box did not answer")
+    }
+
+    /** The earlier build back (POST /v1/update/rollback). */
+    suspend fun updateRollback(ctx: Context): Pair<Boolean, String> = try {
+        val r = BoxHttp.postJson(ctx, "/v1/update/rollback", org.json.JSONObject())
+        if (r.optBoolean("ok", false)) true to "" else false to r.optString("why", "the box said no")
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        false to (e.message ?: "the box did not answer")
+    }
+
     /** Lock the box: ask ghost.secd to spin the account down , stop its Postgres/Redis, unmount and
      *  luksClose the volume (the key leaves the kernel), and revoke the session. After this every call
      *  appears down until the next PIN unlock. Returns the ordered teardown steps the box reported (so
@@ -1158,7 +1205,8 @@ object BoxClient {
     /** One day of the trail as the box has it: the simplified line with, from boxes at or past the
      *  times build, a clock per vertex and the day's distance over the raw points. */
     data class DayTrack(val day: String, val lat: DoubleArray, val lon: DoubleArray, val times: LongArray, val distanceM: Double, val glitches: Int = 0,
-                        val line: String = "", val walkM: Double = 0.0, val rideM: Double = 0.0, val stays: Int = 0) {
+                        val line: String = "", val walkM: Double = 0.0, val rideM: Double = 0.0, val stays: Int = 0,
+                        val questions: List<TrailQuestion> = emptyList()) {
         val n: Int get() = lat.size
         val hasTimes: Boolean get() = times.size == lat.size && lat.isNotEmpty()
     }
@@ -1221,10 +1269,24 @@ object BoxClient {
                 val t = o.optJSONArray("times")
                 val times = if (t != null && t.length() == c.length()) LongArray(t.length()) { t.optLong(it) } else LongArray(0)
                 DayTrack(o.optString("day", ""), lat, lon, times, o.optDouble("distanceM", 0.0).let { if (it.isNaN()) 0.0 else it }, o.optInt("glitches", 0),
-                    o.optString("line", ""), o.optDouble("walkM", 0.0), o.optDouble("rideM", 0.0), o.optInt("stays", 0))
+                    o.optString("line", ""), o.optDouble("walkM", 0.0), o.optDouble("rideM", 0.0), o.optInt("stays", 0),
+                    TrailQuestion.listFrom(o.optJSONArray("questions")))
             }
         }
     } catch (_: Exception) { null }
+
+    /** The answer to a trail question (POST /v1/geo/trail/answer): [keep] true remembers the yes,
+     *  false deletes the points on the box. The number deleted, or null when the box did not take it. */
+    suspend fun trailAnswer(ctx: Context, q: TrailQuestion, keep: Boolean): Int? = try {
+        val ts = org.json.JSONArray().apply { q.ts.forEach { put(it) } }
+        val r = BoxHttp.postJson(ctx, "/v1/geo/trail/answer", org.json.JSONObject()
+            .put("from", q.from).put("to", q.to).put("ts", ts).put("keep", keep), readTimeoutMs = 45_000)
+        if (r.optBoolean("ok", false)) r.optInt("deleted", 0) else null
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        null
+    }
 
     /** One day's track as ordered lat/lon pairs, pulled from framed's GeoJSON LineStrings. */
     suspend fun geoDayTrack(ctx: Context, day: String): List<Pair<Double, Double>>? = try {

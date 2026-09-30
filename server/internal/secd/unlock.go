@@ -21,6 +21,9 @@ import (
 // one. This wires profile.StreamUnlock (the validated stage logic) to a poll-able state.
 type unlockService struct {
 	backend  UnlockBackend
+	// onDone, when set, hears how each unlock ended: ok, or the step it failed at (a release on
+	// trial is rolled back when the first unlock onto it fails past checking the PIN, update_http.go)
+	onDone   func(ok bool, failedAt profile.Stage)
 	mu       sync.Mutex
 	progress map[profile.Stage]profile.StepState
 	order    []profile.Stage
@@ -242,7 +245,16 @@ func (u *unlockService) run(pin string) {
 		if err != nil && err != errReject {
 			u.failed = err.Error()
 		}
+		failedAt := profile.StageResolve
+		for st, state := range u.progress {
+			if state == profile.Errored {
+				failedAt = st
+			}
+		}
 		u.mu.Unlock()
+		if u.onDone != nil {
+			u.onDone(false, failedAt)
+		}
 		return
 	}
 	if warm {
@@ -261,6 +273,9 @@ func (u *unlockService) run(pin string) {
 	u.openSlot = slot
 	u.doneAt = time.Now()
 	u.mu.Unlock()
+	if u.onDone != nil {
+		u.onDone(true, profile.StageReady)
+	}
 }
 
 // modelState is the box model's state for the app: ready, or loading with oracled's own progress

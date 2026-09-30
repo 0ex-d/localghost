@@ -297,6 +297,46 @@ func (s *Store) DayPoints(dayStart, dayEnd int64) ([]TrackPoint, error) {
 	return pts, nil
 }
 
+// DeletePoints removes the trail points recorded at these seconds, from every source: the person
+// said they were not there (a trail question). Returns how many rows went.
+func (s *Store) DeletePoints(ts []int64) (int, error) {
+	n := 0
+	for _, t := range ts {
+		rows, err := s.db.Query("SELECT count(*) FROM location_points WHERE ts = $1", t)
+		if err != nil {
+			return n, err
+		}
+		if err := s.db.Exec("DELETE FROM location_points WHERE ts = $1", t); err != nil {
+			return n, err
+		}
+		if len(rows.Vals) == 1 && rows.Vals[0][0] != nil {
+			n += int(atoi64(*rows.Vals[0][0]))
+		}
+	}
+	return n, nil
+}
+
+// KeepStretch records a yes to a trail question: the stretch [from, to] is not asked about again.
+func (s *Store) KeepStretch(from, to int64) error {
+	return s.db.Exec(`INSERT INTO trail_kept (ts_from, ts_to, at) VALUES ($1, $2, extract(epoch from now())::bigint)
+		ON CONFLICT (ts_from, ts_to) DO NOTHING`, from, to)
+}
+
+// KeptStretches returns the stretches said yes to that overlap [from, to).
+func (s *Store) KeptStretches(from, to int64) ([][2]int64, error) {
+	rows, err := s.db.Query("SELECT ts_from, ts_to FROM trail_kept WHERE ts_to >= $1 AND ts_from < $2", from, to)
+	if err != nil {
+		return nil, err
+	}
+	out := make([][2]int64, 0, len(rows.Vals))
+	for _, r := range rows.Vals {
+		if len(r) == 2 && r[0] != nil && r[1] != nil {
+			out = append(out, [2]int64{atoi64(*r[0]), atoi64(*r[1])})
+		}
+	}
+	return out, nil
+}
+
 // DayPhotos returns the day's geotagged frames for the map.
 func (s *Store) DayPhotos(dayStart, dayEnd int64) ([]PhotoPoint, error) {
 	rows, err := s.db.Query(

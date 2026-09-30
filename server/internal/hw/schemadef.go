@@ -297,6 +297,14 @@ var schemaRegistry = []SchemaTable{
 		{"lon", "DOUBLE PRECISION", true, ""},
 		{"source", "TEXT", true, "'watch'"},
 	}},
+	// TRAIL DECISIONS , a stretch of the trail the person was asked about ("were you there?",
+	// framed/questions.go) and said yes to: never asked about again. A "no" leaves no row: the
+	// points are deleted from location_points.
+	{Name: "trail_kept", PK: "ts_from, ts_to", Cols: []SchemaCol{
+		{"ts_from", "BIGINT", true, ""},
+		{"ts_to", "BIGINT", true, ""},
+		{"at", "BIGINT", true, "0"},
+	}},
 	// DAEMON STATE , what a daemon wants the status screens to know about work in flight, as
 	// one JSON value per key, written by that daemon only (rule 1: single writer). framed's
 	// "converge" key is the stock-take's live progress; the phone reads it through hw. A

@@ -88,6 +88,7 @@ import com.localghost.app.ui.SyncUiState
 import com.localghost.app.ui.theme.LocalGhostTheme
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 
 private sealed interface Screen {
@@ -113,6 +114,9 @@ class MainActivity : ComponentActivity() {
     private var unlockProgress by mutableStateOf<UnlockSnapshot?>(null)
     // Teardown progress shown at the gate while the box spins down after a LOCK.
     private var lockProgress by mutableStateOf<UnlockSnapshot?>(null)
+    // the vault rings' last move: the iris opening at READY, the monitor switching off at LOCKED
+    private var vaultOpening by mutableStateOf(false)
+    private var vaultClosing by mutableStateOf(false)
     private var error by mutableStateOf<String?>(null)
     // After a QR scan we keep the decoded link here so the Setup screen can prefill its fields (and keep
     // them if the box rejects us), and track the background enrol's outcome: null = still in flight, true
@@ -330,6 +334,7 @@ class MainActivity : ComponentActivity() {
             com.localghost.app.sync.LocationLog.schedule(this)
         }
         com.localghost.app.local.MapPrefetch.schedule(this) // only when "download maps" is ticked
+        com.localghost.app.update.ServerUpdates.schedule(this) // the mirror once a day on Wi-Fi: a newer server release?
         lifecycleScope.launch { LocalModel.stateFlow.collect { phoneModelState = it } }
 
         lifecycleScope.launch {
@@ -391,8 +396,8 @@ class MainActivity : ComponentActivity() {
                         },
                         onCancel = { scannedLink = null; error = null; scanEnrolOk = null; screen = Screen.Setup },
                     )
-                    Screen.Gate -> LockScreen(error, unlocking = lockProgress != null, progress = lockProgress, onLocalOnly = ::enterLocalOnly, onReenroll = { scannedLink = null; error = null; scanEnrolOk = null; screen = Screen.Scan }) { passBiometric() }
-                    Screen.Pin -> PinScreen(busy, error, unlockProgress) { submit(it) }
+                    Screen.Gate -> LockScreen(error, unlocking = lockProgress != null, progress = lockProgress, onLocalOnly = ::enterLocalOnly, onReenroll = { scannedLink = null; error = null; scanEnrolOk = null; screen = Screen.Scan }, closing = vaultClosing) { passBiometric() }
+                    Screen.Pin -> PinScreen(busy, error, unlockProgress, opening = vaultOpening) { submit(it) }
                     Screen.Shell -> MainShell(
                 genStats = lastGenStats,
                 navRequest = pendingNav, onNavConsumed = { pendingNav = "" },
@@ -1035,18 +1040,29 @@ class MainActivity : ComponentActivity() {
 
     private fun lockBox() {
         lifecycleScope.launch {
-            val steps = try { BoxClient.lock(this@MainActivity) } catch (_: Exception) { emptyList() }
+            // THE VAULT RINGS GO OUT: the gate at once, every ring lit and the services stopping
+            // while the box does the real teardown; then the box's own steps, each putting out a
+            // ring from the inside; then the monitor switches off and the gate is back.
             screen = Screen.Gate
+            lockProgress = UnlockSnapshot.teardown(emptyMap()) // every ring lit: the iris closes in
+            val call = async { try { BoxClient.lock(this@MainActivity) } catch (_: Exception) { emptyList() } }
+            kotlinx.coroutines.delay(com.localghost.app.ui.VAULT_ARRIVE_MS.toLong())
+            if (!call.isCompleted) lockProgress = UnlockSnapshot.teardown(mapOf(UnlockStage.STOP_SERVICES to StageState.RUNNING))
+            val steps = call.await()
             if (steps.isNotEmpty()) {
                 val acc = mutableMapOf<UnlockStage, StageState>()
                 for (s in steps) {
                     acc[s.stage] = s.state
                     lockProgress = UnlockSnapshot.teardown(acc)
-                    kotlinx.coroutines.delay(160)
+                    kotlinx.coroutines.delay(240)
                 }
-                kotlinx.coroutines.delay(300)
-                lockProgress = null
+                kotlinx.coroutines.delay(200)
             }
+            // no answer from the box: the phone locks anyway, the rings just switch off
+            vaultClosing = true
+            kotlinx.coroutines.delay(com.localghost.app.ui.VAULT_CLOSE_MS.toLong() + 50)
+            lockProgress = null
+            vaultClosing = false
             tearDownCache()
         }
     }
@@ -1432,6 +1448,12 @@ class MainActivity : ComponentActivity() {
                 if (snap.done) ok = true
                 if (snap.failed != null) error = snap.failed
             }
+            // READY: the vault rings open like an iris before the app appears behind them
+            if (ok && screen is Screen.Pin) {
+                vaultOpening = true
+                kotlinx.coroutines.delay(com.localghost.app.ui.VAULT_OPEN_MS.toLong())
+                vaultOpening = false
+            }
             busy = false; unlockProgress = null
             // the app went to the background meanwhile and locked itself (onStop): the gate stays
             if (screen !is Screen.Pin) return@launch
@@ -1457,6 +1479,11 @@ class MainActivity : ComponentActivity() {
                 trailJob = lifecycleScope.launch(Dispatchers.IO) {
                     runCatching { DeviceCert.rotateIfNeeded(this@MainActivity) }
                     com.localghost.app.sync.TrailKeys.onBoxUnlocked(this@MainActivity)
+                    // which build the box runs, for the daily check's "a newer release is out"
+                    BoxClient.updateStatus(this@MainActivity)?.let {
+                        com.localghost.app.update.ServerUpdates.noteBoxVersion(this@MainActivity, it.version)
+                        com.localghost.app.update.ServerUpdates.notifyOnce(this@MainActivity)
+                    }
                 }
                 maybeAutoSync()
                 // Each load is independent. Against the real box one endpoint can fail (a daemon down,

@@ -103,15 +103,18 @@ func runUnlock(b UnlockBackend, pin string, emit func(profile.Progress)) (openSl
 		// Log enter/exit + duration per stage. This makes the WHOLE unlock sequence visible in the
 		// journal , the recurring failure mode here has been a stage hanging or erroring silently, only
 		// surfacing (if at all) to the app. With this, one unlock attempt shows exactly which stage ran,
-		// how long it took, and where it stopped.
-		secdLog.Info("unlock stage begin", "fn", "unlock", "slot", slot, "stage", stage)
+		// how long it took, and where it stopped. At DEBUG since 30 Sep 2026: the journal is on the OS
+		// disk, and every unlock's begin/ok lines were a diary of when the box was opened and which
+		// opens were cold. A failed stage still logs at ERROR; GHOST_LOG_LEVEL=debug brings the rest
+		// back while something is being chased, and the last cold unlocks' times are on the volume.
+		secdLog.Debug("unlock stage begin", "fn", "unlock", "slot", slot, "stage", stage)
 		t0 := time.Now()
 		if err := do(); err != nil {
 			emit(profile.Progress{Stage: stage, State: profile.Errored})
 			secdLog.Error("unlock stage FAILED", "fn", "unlock", "slot", slot, "stage", stage, "after", time.Since(t0).String(), "err", err)
 			return err
 		}
-		secdLog.Info("unlock stage ok", "fn", "unlock", "slot", slot, "stage", stage, "took", time.Since(t0).String())
+		secdLog.Debug("unlock stage ok", "fn", "unlock", "slot", slot, "stage", stage, "took", time.Since(t0).String())
 		emit(profile.Progress{Stage: stage, State: profile.Complete})
 		return nil
 	}
@@ -158,14 +161,14 @@ func runUnlock(b UnlockBackend, pin string, emit func(profile.Progress)) (openSl
 	// and impossible to diagnose on the box).
 	converge := func(stage profile.Stage, do func() error) error {
 		emit(profile.Progress{Stage: stage, State: profile.Running})
-		secdLog.Info("unlock stage begin", "fn", "unlock", "slot", slot, "stage", stage)
+		secdLog.Debug("unlock stage begin", "fn", "unlock", "slot", slot, "stage", stage)
 		t0 := time.Now()
 		if err := do(); err != nil {
 			emit(profile.Progress{Stage: stage, State: profile.Errored})
 			secdLog.Error("unlock stage FAILED", "fn", "unlock", "slot", slot, "stage", stage, "after", time.Since(t0).String(), "err", err)
 			return err
 		}
-		secdLog.Info("unlock stage ok", "fn", "unlock", "slot", slot, "stage", stage, "took", time.Since(t0).String())
+		secdLog.Debug("unlock stage ok", "fn", "unlock", "slot", slot, "stage", stage, "took", time.Since(t0).String())
 		emit(profile.Progress{Stage: stage, State: profile.Complete})
 		return nil
 	}

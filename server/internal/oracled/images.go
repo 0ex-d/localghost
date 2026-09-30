@@ -41,9 +41,6 @@ import (
 // 1024 keeps a photo's detail for a caption and its image tokens well inside one batch.
 var ImageMaxSide = 1024
 
-// imageMaxPixels refuses a decode bomb: a header claiming more than this is not decoded here.
-const imageMaxPixels = 120_000_000
-
 // imageKind names an image by its first bytes (the file name says nothing reliable).
 func imageKind(raw []byte) string {
 	switch {
@@ -125,6 +122,14 @@ func ffmpegJPEG(ctx context.Context, path, kind string) ([]byte, error) {
 // HEIC, the odd JPEG it refuses) goes through a converter first. An image nothing here can decode is
 // an error that says so , the job parks with a reason, and the engine never sees the file whole.
 func imageForModel(ctx context.Context, path string) (string, error) {
+	// past the box's limits it is not read, converted or sent (imgfit/limits.go)
+	if err := imgfit.CheckFile(path); err != nil {
+		var tl imgfit.ErrTooLarge
+		if errors.As(err, &tl) {
+			return "", err
+		}
+		return "", fmt.Errorf("read image: %w", err)
+	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("read image: %w", err)
@@ -163,8 +168,8 @@ func fitDecoded(raw []byte, maxSide int) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cfg.Width <= 0 || cfg.Height <= 0 || cfg.Width*cfg.Height > imageMaxPixels {
-		return nil, fmt.Errorf("%dx%d is not a size to decode", cfg.Width, cfg.Height)
+	if err := imgfit.CheckPixels(cfg.Width, cfg.Height); err != nil {
+		return nil, err
 	}
 	img, _, err := image.Decode(bytes.NewReader(raw))
 	if err != nil {

@@ -107,6 +107,25 @@ object Notifications {
             .build())
     }
 
+    /** A newer server release is on the mirror (update/ServerUpdates.kt): once per version. Opens the
+     *  app's SETTINGS, where DEPLOY is, after the gate. Nothing private in it: a version number. */
+    fun postServerRelease(ctx: Context, version: String, changes: Int) {
+        if (!hasPermission(ctx)) return
+        val i = android.content.Intent(ctx, com.localghost.app.MainActivity::class.java).apply {
+            action = "com.localghost.app.OPEN_NOTIFICATION"
+            putExtra("nav", "settings")
+            flags = android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        val pi = PendingIntent.getActivity(ctx, 7001, i, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        NotificationManagerCompat.from(ctx).notify(7001, NotificationCompat.Builder(ctx, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_ghost_notif)
+            .setContentTitle("LocalGhost server $version is out")
+            .setContentText((if (changes > 0) "$changes changes. " else "") + "Deploy it from SETTINGS › SERVER when you choose.")
+            .setContentIntent(pi)
+            .setAutoCancel(true)
+            .build())
+    }
+
     fun cancelAll(ctx: Context) {
         val nm = NotificationManagerCompat.from(ctx)
         Daemon.entries.forEach { nm.cancel(it.ordinal + 100) }

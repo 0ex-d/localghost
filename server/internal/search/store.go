@@ -364,7 +364,7 @@ func (s *Store) EnqueueCategorize(limit int) (int, error) {
 }
 
 // TagDigest groups the tags of a set of frames by category: category -> tags, most frequent
-// first, tombstones excluded, '' shown under "other". This is the prompt-sized summary of a
+// first, tombstones excluded, the empty category shown under "other". This is the prompt-sized summary of a
 // matched photo set and what a gallery groups by.
 func (s *Store) TagDigest(hashes []string, perCategory int) (map[string][]string, error) {
 	out := map[string][]string{}

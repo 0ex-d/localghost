@@ -34,6 +34,7 @@ type Server struct {
 	unlock         *unlockService
 	session        *sessionManager // the one live session token (foreground + poller share it)
 	retired        retiredCerts    // device certificates replaced by a rotation: answered as if down
+	upd            updateState     // a server release put on from the phone (update_http.go)
 	mute           *hw.MuteStore   // notification mute read/write (in-volume Postgres/Redis), per scope
 	notif          *hw.NotifStore  // notification produce/read/seen/delete (in-volume Postgres/Redis)
 	// closing: a lock, halt or shutdown is tearing the volume down. Uploads are refused from the
@@ -190,6 +191,7 @@ func New(cfg Config) (*Server, error) {
 		mounted: -1,
 	}
 	s.retired.path = filepath.Join(cfg.StateDir, "devices", "retired")
+	defer s.startTrial() // a release on trial: secd's part starts with it
 	s.session = newSessionManager(SessionTTL)
 	// Wire the notification mute store. The mute lives in the in-volume Postgres/Redis, per scope
 	// (global "*" + per-service). The mount path for a slot is <stateDir>/mnt/slot<N> (matching
@@ -208,6 +210,7 @@ func New(cfg Config) (*Server, error) {
 	// newDefaultBackend is build-tag-selected: the simulation in the default build, the real TPM +
 	// dm-crypt + Postgres/Redis backend with -tags tpm. This is the seam where unlock meets hardware.
 	s.unlock = newUnlockService(newDefaultBackend(cfg))
+	s.unlock.onDone = s.trialOnUnlock // a release on trial is judged by its first unlocks
 	// the last cold unlocks' step times live on the encrypted volume, beside the data they open
 	s.unlock.timesPath = filepath.Join(cfg.StateDir, "mnt", fmt.Sprintf("slot%d", profile.MainSlot), "secd", "unlock-times.json")
 
@@ -304,7 +307,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/chat/stop", s.handleChatStop)       // STOP: ends the answer being written for a chat (closing the app does not)
 	mux.HandleFunc("/v1/chat/plan", s.handleChatPlan)       // what the question needs from the web, from the model, before the phone searches
 	mux.HandleFunc("/v1/locations", s.handleLocations)
+	mux.HandleFunc("/v1/geo/trail/answer", s.handleTrailAnswer)      // "were you there?" answered: keep, or delete the points
 	mux.HandleFunc("/v1/trail/key", s.handleTrailKey)                // the phone's trail key, kept in the vault
+	mux.HandleFunc("/v1/update", s.handleUpdate)                     // what runs, and a release on trial
+	mux.HandleFunc("/v1/update/file", s.handleUpdateFile)            // one file of the signed server set, from the phone
+	mux.HandleFunc("/v1/update/apply", s.handleUpdateApply)          // verify, put on, lock and restart
+	mux.HandleFunc("/v1/update/rollback", s.handleUpdateRollback)    // the earlier build back
 	mux.HandleFunc("/v1/device/rekey", s.handleRekey)                // the phone's own key, a new certificate for it
 	mux.HandleFunc("/v1/device/rekey/confirm", s.handleRekeyConfirm) // over the new one: the QR's retires
 	mux.HandleFunc("/v1/model", s.handleModel)                       // the box model: ready, or loading and how far

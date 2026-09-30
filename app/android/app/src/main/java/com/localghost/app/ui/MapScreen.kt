@@ -95,11 +95,31 @@ private object MapMemory {
     @Volatile var labels: List<BoxClient.GeoLabel> = emptyList()
     @Volatile var tracks: List<Track>? = null
     @Volatile var newest: BoxClient.GeoCell? = null
+    @Volatile var questions: Map<String, List<com.localghost.app.net.TrailQuestion>> = emptyMap()
+}
+
+/** One "were you there?" in the day panel: the question, then [ NO, DELETE IT ] and [ YES, KEEP IT ]. */
+@Composable
+private fun TrailQuestionCard(q: com.localghost.app.net.TrailQuestion, clock: (Long) -> String, busy: Boolean, onAnswer: (Boolean) -> Unit) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 6.dp).border(1.dp, GhostBorder, RectangleShape).padding(10.dp)) {
+        Text(q.text(clock), color = GhostText, style = MaterialTheme.typography.labelMedium)
+        Row(Modifier.padding(top = 8.dp)) {
+            if (busy) {
+                Text("…", color = TerminalGreen, style = MaterialTheme.typography.labelMedium)
+            } else {
+                Text("[ NO, DELETE IT ]", color = Warning, style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.clickable { onAnswer(false) }.padding(end = 16.dp, top = 4.dp, bottom = 4.dp))
+                Text("[ YES, KEEP IT ]", color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.clickable { onAnswer(true) }.padding(top = 4.dp, bottom = 4.dp))
+            }
+        }
+    }
 }
 
 /** The app's lock teardown: the map forgets the box's data it kept for a quick reopen. */
 fun clearMapMemory() {
     MapMemory.cells = emptyList(); MapMemory.labels = emptyList(); MapMemory.tracks = null; MapMemory.newest = null
+    MapMemory.questions = emptyMap()
 }
 
 /**
@@ -281,6 +301,9 @@ fun MapScreen() {
     var picked by remember { mutableStateOf<BoxClient.GeoCell?>(null) }
     var viewer by remember { mutableStateOf<String?>(null) } // hash open full-screen
     var tracks by remember { mutableStateOf<List<Track>>(MapMemory.tracks ?: emptyList()) }
+    // the box's "were you there?" per day (framed/questions.go), and the one being answered
+    var questions by remember { mutableStateOf(MapMemory.questions) }
+    var answering by remember { mutableStateOf<com.localghost.app.net.TrailQuestion?>(null) }
     // THE TRAIL PANEL: which day is lit, and where along it the scrubber sits (0..1).
     var trailOpen by remember { mutableStateOf(false) }
     // ONE DAY AT A TIME: the map draws the newest day (today when there is one) and nothing else;
@@ -370,6 +393,8 @@ fun MapScreen() {
             val loaded = ArrayList<Track>()
             if (batch != null) {
                 for (t in batch) if (t.n >= 2) loaded.add(trackOf(t.day, t.lat, t.lon, t.times, t.distanceM, phone = false, glitches = t.glitches, line = t.line))
+                questions = batch.filter { it.questions.isNotEmpty() }.associate { it.day to it.questions }
+                MapMemory.questions = questions
             } else {
                 val days = BoxClient.geoDays(ctx, 14) ?: emptyList()
                 for (d in days) {
@@ -1171,6 +1196,31 @@ fun MapScreen() {
                                 color = GhostText, style = MaterialTheme.typography.labelMedium)
                         }
                         if (rt.r.note.isNotEmpty()) Text(rt.r.note, color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+                    }
+                    // WERE YOU THERE? The box's questions about this day: no deletes the points on the
+                    // box (and on this phone) for good, yes keeps them and it never asks again.
+                    questions[d]?.forEach { q ->
+                        TrailQuestionCard(q, clock = { clock(it) }, busy = answering == q) { keep ->
+                            answering = q
+                            mapScope.launch {
+                                val done = withContext(Dispatchers.IO) { BoxClient.trailAnswer(ctx, q, keep) }
+                                if (done != null) {
+                                    if (!keep) withContext(Dispatchers.IO) { com.localghost.app.sync.LocationLog.forget(ctx, q.ts.toSet()) }
+                                    questions = questions.mapValues { (_, l) -> l.filter { it != q } }.filterValues { it.isNotEmpty() }
+                                    MapMemory.questions = questions
+                                    if (!keep) {
+                                        // the day drawn, measured and told again without those points
+                                        val batch = BoxClient.geoDayTracks(ctx, 60)
+                                        if (batch != null) {
+                                            val loaded = batch.filter { it.n >= 2 }.map { t -> trackOf(t.day, t.lat, t.lon, t.times, t.distanceM, phone = false, glitches = t.glitches, line = t.line) }
+                                            tracks = loaded + phoneTracks(ctx, loaded)
+                                            MapMemory.tracks = tracks
+                                        }
+                                    }
+                                }
+                                answering = null
+                            }
+                        }
                     }
                     if (dayPts.size >= 2) {
                         Slider(value = scrub, onValueChange = { scrub = it },

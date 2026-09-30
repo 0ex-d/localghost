@@ -21,27 +21,27 @@ import com.localghost.app.net.UnlockSnapshot
 import com.localghost.app.ui.theme.*
 
 @Composable
-fun PinScreen(busy: Boolean, error: String?, progress: UnlockSnapshot?, onSubmit: (String) -> Unit) {
+fun PinScreen(busy: Boolean, error: String?, progress: UnlockSnapshot?, opening: Boolean = false, onSubmit: (String) -> Unit) {
     var pin by remember { mutableStateOf("") }
     var reveal by remember { mutableStateOf(false) }
     val haptic = LocalHapticFeedback.current
     fun submit() { if (pin.isNotEmpty() && !busy) { onSubmit(pin); pin = "" } }
 
     GhostScaffold { pad ->
-        // Once the code is in, the keypad goes and the screen is the unlock alone: the bar, step x
-        // of y, the time left. A wrong code comes back with the keypad and the error.
+        // Once the code is in, the keypad goes and the screen is the unlock alone: the vault rings
+        // lighting step by step, the bar, step x of y, the time left. At READY the rings open like
+        // an iris ([opening]) and the app is behind them. A wrong code comes back with the keypad.
         if (busy && progress != null && progress.failed == null) {
             Column(
                 Modifier.fillMaxSize().padding(pad).padding(horizontal = 32.dp),
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                androidx.compose.foundation.Image(
-                    painter = painterResource(R.drawable.ic_ghost), contentDescription = null,
-                    modifier = Modifier.size(56.dp))
-                Spacer(Modifier.height(12.dp))
+                VaultRings(progress, locking = false, release = opening,
+                    modifier = Modifier.fillMaxWidth(0.78f).widthIn(max = 300.dp).aspectRatio(1f))
+                Spacer(Modifier.height(20.dp))
                 Text("UNLOCKING", color = GhostText, style = MaterialTheme.typography.titleMedium)
-                Spacer(Modifier.height(28.dp))
+                Spacer(Modifier.height(20.dp))
                 UnlockProgress(progress, modifier = Modifier.widthIn(max = 360.dp))
             }
         } else Column(

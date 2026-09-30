@@ -250,6 +250,38 @@ elif [ "${VOLUME_LOCKED:-0}" = "0" ]; then
     echo "      secd's SIGTERM lock against systemd's kill timeout. For a guaranteed-clean teardown:"
     echo "        sudo GHOST_PIN=<main pin> ./tools/redeploy.sh"
 fi
+# THE UNIT'S HARDENING, CONVERGED: a unit written before a setting existed never gets it from a
+# redeploy (the unit is only rendered at setup), so the settings that matter come as a drop-in,
+# written here each time: no core dumps from secd or anything it starts (a crashed llama-server or
+# Postgres holds decrypted data, and systemd-coredump would keep it on the OS disk).
+install -d -m755 /etc/systemd/system/ghost.secd.service.d
+printf '[Service]\nLimitCORE=0\n' > /etc/systemd/system/ghost.secd.service.d/nocore.conf.new
+if ! cmp -s /etc/systemd/system/ghost.secd.service.d/nocore.conf.new /etc/systemd/system/ghost.secd.service.d/nocore.conf 2>/dev/null; then
+    mv /etc/systemd/system/ghost.secd.service.d/nocore.conf.new /etc/systemd/system/ghost.secd.service.d/nocore.conf
+    echo "unit drop-in: LimitCORE=0"
+else
+    rm -f /etc/systemd/system/ghost.secd.service.d/nocore.conf.new
+fi
+# THE UPDATE GUARD: before every start of secd, it rolls a release on trial back if the new secd
+# keeps failing to stay up (internal/update). Installed here and by setup, never by a release.
+if [ -x "$REPO/bin/ghost-update-guard" ]; then
+    install -m755 "$REPO/bin/ghost-update-guard" "$SYSTEM_BIN/ghost-update-guard.new"
+    mv "$SYSTEM_BIN/ghost-update-guard.new" "$SYSTEM_BIN/ghost-update-guard"
+    # once per start: a unit rendered since 30 Sep 2026 has the line itself, older ones get a drop-in
+    if grep -q ghost-update-guard /etc/systemd/system/ghost.secd.service 2>/dev/null; then
+        rm -f /etc/systemd/system/ghost.secd.service.d/update-guard.conf
+    else
+        printf '[Unit]\nStartLimitIntervalSec=120\nStartLimitBurst=20\n[Service]\nExecStartPre=-%s/ghost-update-guard\n' "$SYSTEM_BIN" > /etc/systemd/system/ghost.secd.service.d/update-guard.conf
+    fi
+fi
+# THE UPDATER'S TOOLS, where secd can run them (it cannot see /home): the mirror's verifier and the
+# site key it pins, for a release the phone hands the box (secd update_http.go)
+install -d -m755 /opt/localghost/tools
+for t in mirror_fetch.sh mirror-key.asc; do
+    [ -e "$REPO/tools/$t" ] && install -m644 "$REPO/tools/$t" "/opt/localghost/tools/$t"
+done
+chmod 755 /opt/localghost/tools/mirror_fetch.sh 2>/dev/null || true
+systemctl daemon-reload
 echo "systemctl restart ghost.secd"
 systemctl restart ghost.secd
 echo "restart returned"

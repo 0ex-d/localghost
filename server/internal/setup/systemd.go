@@ -64,6 +64,9 @@ func renderUnit(name, execDir string, cfg DaemonConfig) string {
 	fmt.Fprintf(&b, "Description=LocalGhost %s\n", name)
 	fmt.Fprintf(&b, "After=network-online.target\n")
 	fmt.Fprintf(&b, "Wants=network-online.target\n")
+	// room for the update guard's count (a release that keeps failing is rolled back on its fourth
+	// quick start) before systemd would stop restarting secd at all
+	fmt.Fprintf(&b, "StartLimitIntervalSec=120\nStartLimitBurst=20\n")
 
 	fmt.Fprintf(&b, "\n[Service]\n")
 	fmt.Fprintf(&b, "Type=notify\n")
@@ -86,6 +89,10 @@ func renderUnit(name, execDir string, cfg DaemonConfig) string {
 	fmt.Fprintf(&b, "Environment=GHOST_LOG_LEVEL=info\n")
 	// ExecStart runs from SystemBinDir (not execDir): see the const , ProtectHome=yes below would
 	// make a /home path unexecutable. InstallServices stages the binary there.
+	// A release put on from the phone is on trial: before each start the guard counts starts and,
+	// the third quick one in a row, puts the earlier build back (internal/update). "-": a missing
+	// or failing guard never stops secd from starting.
+	fmt.Fprintf(&b, "ExecStartPre=-%s/ghost-update-guard\n", SystemBinDir)
 	fmt.Fprintf(&b, "ExecStart=%s/%s --state %s --disk %s --addr 127.0.0.1:%d%s\n",
 		SystemBinDir, name, cfg.StateDir, cfg.Disk, cfg.Port, userArg)
 	// ghost.secd runs as ROOT. This is deliberate and unavoidable: it opens dm-crypt (cryptsetup),

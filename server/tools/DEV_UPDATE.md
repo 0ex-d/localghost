@@ -3217,3 +3217,217 @@ Tested: `TestDeviceKeyRotation` (a bad proof refused, the certificate signed by 
 phone's key with the old name, the old certificate working until the confirmation and down after,
 the trail key moved, a second confirmation harmless, retired across a restart). The phone side is
 structure-checked only.
+
+## Vault rings: the unlock and the lock, drawn (app)
+
+Vlad: "the lock on the phone was nice, let's do a cool lock and unlock animation as well" , then
+"make the lock animation similar". Both now run on one drawing (`ui/VaultRings.kt`, the rules in
+`ui/VaultRingsModel.kt`, pure and tested).
+
+Six rings, one per unlock step from the outside in: RESOLVE, UNSEAL, MOUNT, START_DB, START_CACHE,
+DAEMONS (the model loads after the unlock and has no ring; READY is the arrival). Each ring is dark,
+filling while its step runs (a scan head sweeps it), lit when the step is done, draining on the way
+down, or red when the step failed. A ring locks in with a short overshoot so that its keyway lands at
+the top; when all six are home the keyways make one slot, the rings hold for 450 ms and the iris
+opens over 800 ms with a radial glow. A light tick on each ring that settles, a long one at the end.
+
+The lock plays it backwards. The rings arrive lit (750 ms), each teardown step puts out its ring
+from the inside out (STOP_SERVICES the daemons, STOP_CACHE and STOP_DB theirs, UNMOUNT the volume
+and the seal, LOCKED the outer ring), and the screen switches off like an old monitor: squeezed to
+a line, a bright band, dark. The phone asks the box to lock at the start and replays the steps
+against the real answer, so the drawing never runs ahead of the box.
+
+`vault-rings-preview.html` (sent with this drop) draws the same geometry in a browser, to look at
+the timing without building the app.
+
+Tested: `VaultRingsModelTest` (phases while unlocking and locking, a failed step, the rest angle
+always a real turn and landing at the top, ring sizes and segment counts). The drawing is
+structure-checked only.
+
+## The trail asks "were you there?" (framed, secd, app)
+
+Vlad: "a question on the gps when i look at the day, it looks like today you went to x and then came
+back quickly, did you really, and then on no, delete it ... anything that seems out of the obvious
+like no road and no other stuff to get there".
+
+The glitch rules (clean.go) already hide what cannot be true. What only looks unlikely was drawn,
+and the person is the one who knows, so a day now carries questions (`internal/framed/questions.go`):
+
+- **glitch**: points the glitch rules leave off the map, 2 km or more from the trail. Asked so they
+  can go for good; nothing changes on the map either way.
+- **fast**: an out-and-back of up to three points, at least 5 km away, back within a third of the
+  distance and within 90 minutes, that needs 200 km/h or more on the way out or back (50 km in 15
+  minutes). A train or a flight does not come straight back.
+- **offroad**: the same shape to a place with no road within 1 km, where the box's road tiles know
+  the area (`roadgraph.NearRoad`; unknown ground is never called off-road).
+
+The questions ride on the day's route (`BuildDayPathAsking`, the LineString's `questions`), so the
+phone gets them with the tracks it already fetches. The map shows one card at a time: "At 14:10 the
+trail goes to Igoumenitsa, 38 km away, and is back 12 min later. That would take 240 km/h. Were you
+there?" with **NO, DELETE IT** and **YES, KEEP IT**.
+
+`POST /v1/geo/trail/answer {"from","to","ts":[...],"keep"}` (secd → framed ctl `trail-answer`). No
+deletes those points from `location_points` (every source) and the phone's own ring
+(`LocationLog.forget`); yes goes into `trail_kept` (new table) and that stretch is never asked about
+again. Either way the day (and the next, when the stretch crosses midnight) is rebuilt. A question
+spans at most six hours.
+
+Days built before this have no questions until they are rebuilt:
+
+    sudo ./tools/ns.sh ./bin/ghost-cli ghost.framed day-routes days=60
+
+Tested: `questions_test.go` (a glitch asked about, a fast out-and-back asked about, a day trip
+not asked about, no road there asked about only where the tiles know the ground, a yes not asked
+again, the questions on the day's path), `TestTrailAnswersInTheStore` against Postgres (delete
+counts, kept stretches), `TrailQuestionTest` on the phone (the text, the JSON). The card and the
+forget are structure-checked only.
+
+## Pictures too big to open are left alone (imgfit, oracled, framed, searchd)
+
+Vlad: "can we make sure we're processing images again? it would be safe to limit them to a size, if
+i get a raw image that's 100mb i should not try to parse that".
+
+`internal/imgfit/limits.go`: 64 MB on disk and 60 megapixels, checked before anything is decoded.
+The pixel count comes from the file's header (`image.DecodeConfig`), so a small file that claims to
+be 30000×30000 is refused before a byte of pixels is allocated. Every decoder checks first: oracled
+before it reads a file for a caption, framed before previews and derived files, searchd before it
+hashes. A photo past the limit is archived untouched, searchable by its date and place, with no
+preview and no caption: a caption job for it is done at once rather than failing five times and
+parking (where an unpark would only start it over), and the stock-take no longer queues one.
+
+Whether the captions are moving again:
+
+    sudo ./tools/ns.sh ./bin/ghost-cli ghost.searchd queue
+    sudo ./tools/ns.sh ./bin/ghost-cli ghost.oracled status
+    sudo ./tools/ns.sh ./bin/ghost-cli ghost.searchd unpark kind=caption   # if parkedJobs > 0
+
+Tested: `TestLimits` (a 48 MP photo passes, a decode bomb and a PNG whose header claims 40000×40000
+refused, a file past 64 MB refused), `TestNoPreviewPastTheLimit`, `TestTooLargeToCaption`, the
+oracled image tests.
+
+## A new server release from the phone, without root (update, secd, tools, app)
+
+Vlad: "how do we initiate the deploy of a new version without having root on the server, can the app
+let us know hey there is a new version, do you want it deployed and it tries to switch to it on the
+server side and rolls back if it's buggy ... we can check once a day". The box never goes to the
+internet for it: the phone does, and the box checks what the phone brings with the key it already
+has.
+
+**Build.** `tools/release_build.sh <version> [outdir]` from a clean tree (it refuses uncommitted
+changes). Reproducible: `CGO_ENABLED=0`, `-trimpath`, `-buildid=`, the tar sorted with the commit's
+time and owner 0, `gzip -n`. The same commit gives the same bytes anywhere, so anyone can rebuild a
+published release and compare. It writes the "server" set:
+
+    localghost-server-<version>-linux-amd64.tar.gz   VERSION, COMMIT, CHANGES.txt, bin/, tools/
+    RELEASE.txt      version, commit, date, bundle, and the commits since the last tag
+    NOTICE.txt, TERMS-MIT.txt
+
+The bundle holds secd, the cohort, ghost-cli, ghost-ctl, mirror_fetch.sh and mirror-key.asc (so the
+next release is checked with the same key). It never holds ghost-update-guard (what undoes a bad
+release is never replaced by one) or llama-server and whisper-cli (built on the box from pinned
+sources by update.sh). It needs tools/mirror-key.asc in the tree.
+
+**Publish** (the web repo). The set goes on the mirror as `server`, like any other set:
+`/<build>/server/<file>`, listed in MANIFEST.txt and signed with the site key. Brief for the web side
+below.
+
+**The phone.** Once a day on Wi-Fi with the battery not low (`update/ServerUpdates.kt`, WorkManager)
+it reads MANIFEST.txt, then RELEASE.txt (its SHA-256 checked against the manifest). The box's
+version comes from `GET /v1/update` after each unlock. A newer release notifies once per version;
+SETTINGS › SERVER shows what runs, the offer with its changes, **DEPLOY**, **ROLL BACK** during a
+trial, and "check the mirror now". DEPLOY downloads the set to the phone, checks each file's hash
+against the manifest, and uploads MANIFEST.txt, its .asc, then each file to the box. A mirror
+rebuilt since the check is fine when RELEASE.txt is the same file; a different release says "check
+again".
+
+**The box** (`internal/secd/update_http.go`, `internal/update`):
+
+    GET  /v1/update                 {"version", "trial": {...}}
+    POST /v1/update/file?name=...   MANIFEST.txt (starts a new upload), MANIFEST.txt.asc,
+                                    <build>/server/<file>; names checked, 512 MB each at most
+    POST /v1/update/apply           verify, put on, lock, restart; {"ok","version"} or {"ok":false,"why"}
+    POST /v1/update/rollback        the earlier build back, lock, restart
+
+All four need a PIN session; apply needs the box unlocked. Apply runs mirror_fetch.sh itself over
+a `file://` copy of the upload, with the key installed in /opt/localghost/tools (never one that came
+with the upload): the signature, the "# LocalGhost Mirror Manifest" header, every hash, and no
+build older than the box last used. Then `update.Unpack` (VERSION, COMMIT, CHANGES.txt, ELF files
+under bin/, tools/ only; secd and watchd must be there) and `update.Apply`:
+
+1. what runs now goes to `/var/lib/ghost/update/prev/` (secd, ghost-cli, ghost-ctl, the tools, the
+   cohort from the volume);
+2. secd, ghost-cli and ghost-ctl over /opt/localghost/bin by rename (the running secd keeps its
+   file), the cohort into staging (ingested at the next unlock before the daemons start), the tools
+   into /opt/localghost/tools;
+3. `trial.json` opens a trial, secd locks and exits 75, and systemd starts the new secd.
+
+**The trial ends one of two ways.** Confirmed when the first unlock completes and the critical
+daemons stay up for ten minutes. Rolled back (prev/ put back, lock, restart) when:
+- the new secd will not stay up: `ghost-update-guard` runs before every start of the unit
+  (`ExecStartPre=-`), counts quick starts, and puts prev/ back on the fourth; the new secd resets the
+  count after a minute up;
+- the first unlock fails past RESOLVE (a wrong PIN says nothing about the build);
+- a critical daemon restarts three times or is down in those ten minutes;
+- the person taps ROLL BACK.
+
+`make` now stamps the version (`git describe --tags --always --dirty`), so a box built from source
+says what it runs; a build with no tag yet reads as older than any release.
+
+**Once, as root, to take the first release this way:**
+
+    sudo ./tools/redeploy.sh
+
+It installs ghost-update-guard, the unit drop-in that runs it (and `StartLimitBurst=20` in 120 s so
+systemd does not give up before the guard acts), and mirror_fetch.sh with the site key into
+/opt/localghost/tools. From then on a release needs the phone and the PIN, not root.
+
+Tested: `update_test.go` (Unpack takes only a release, apply then roll back puts every file back,
+the guard rolls back a quick crash loop, no rollback without an earlier build),
+`update_http_test.go` (the whole exchange from the phone, an unverified release refused, a failed
+first unlock rolls back, which daemons count as unhealthy), the whole chain with a throwaway gpg key: release_build.sh → a mirror
+layout → mirror_fetch.sh over file:// → Unpack. `ReleaseInfoTest` on the phone (the manifest's
+server set, bad paths refused, the notes, version order including git-describe and bare hashes).
+The phone's download, upload and settings screen are structure-checked only. Not run: systemd
+restarting secd on a real box.
+
+### For the web repo: publishing the server set
+
+The mirror is a proxy of upstream files signed with the site key. The upstream for `server` is the
+localghost repository's GitHub release: attach the four files release_build.sh writes to the
+release for the tag, then add a set to the mirror config:
+
+    server  localghost-server-<version>-linux-amd64.tar.gz  <terms: MIT>  https://github.com/LocalGhostDao/localghost/releases/download/v<version>/localghost-server-<version>-linux-amd64.tar.gz
+    server  RELEASE.txt                                      <terms: MIT>  https://github.com/LocalGhostDao/localghost/releases/download/v<version>/RELEASE.txt
+
+(in whatever form deploy/mirror uses for a set, with NOTICE.txt and TERMS-MIT.txt beside the files
+like every other set). The phone reads RELEASE.txt before it downloads anything, and the box
+requires one `localghost-server-*.tar.gz` in the set and no more. Only the newest release is in the set:
+a release that is replaced drops out of the next build. Anyone can check a published bundle by
+running release_build.sh at the same tag and comparing the SHA-256 with the manifest's line.
+
+## Setup and redeploy, looked over (tools, setup)
+
+- New boxes get the daemons' own user (`ghostd`, no home, no shell, no password) from setup.sh
+  directly; own_user.sh remains for boxes set up before.
+- `LimitCORE=0` reached only units written after the privacy round; redeploy.sh now adds it to an
+  older secd unit as a drop-in (a core dump of secd would hold the volume key in the clear on the OS
+  disk).
+- redeploy.sh reloads systemd before it restarts anything, so a changed unit is what starts.
+- setup.sh ends with a warning when swap is on the OS disk unencrypted (a paged-out daemon's memory
+  would be there in the clear) and how to make it encrypted with a random key at each boot.
+- privacy_check.sh reports the unlock diary as a warning, not a failure (see below).
+
+## The unlock diary is Debug (secd)
+
+"unlock stage begin/ok" at Info wrote the time of every unlock and how long each step took into the
+OS disk's journal, where it stays after a lock. It is at Debug now; the phone's own unlock clock
+shows the same. What the journal already held goes as it rotates; the vacuum run on 30 Sep
+cleared most of it.
+
+## docs/SECURITY.md says what ships (docs)
+
+SECURITY.md describes the design: a FIDO2 key, several PINs, decoy volumes and a hidden volume. The
+box has one account, a main PIN and a wipe PIN, no FIDO2 and no decoys (`internal/profile/setup.go`).
+Someone who reads the document and counts on a duress PIN at a border would be counting on nothing,
+so it now opens with what the box does today, the software seal's limit and what the wipe leaves on
+each tier. The design text below it is unchanged.

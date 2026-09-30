@@ -19,6 +19,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	_ "image/gif" // registered so image.Decode handles GIF uploads (the sniffer already names them)
@@ -39,6 +40,7 @@ import (
 	"github.com/LocalGhostDao/localghost/server/internal/dayroute"
 	"github.com/LocalGhostDao/localghost/server/internal/exif"
 	"github.com/LocalGhostDao/localghost/server/internal/geo"
+	"github.com/LocalGhostDao/localghost/server/internal/imgfit"
 )
 
 // Dirs is the frames layout under <mount>/frames.
@@ -115,6 +117,14 @@ type Pipeline struct {
 	// `ghost-cli ghost.framed geo-import`). Nil means no geo data yet: empty place strings,
 	// reprocess backfills after an import.
 	resolvePlace func(lat, lon float64) geo.Place
+	// nearRoad, when set, says whether a road passes near a point (roadgraph.NearRoad): a trail
+	// question asks "no road goes there" only with it
+	nearRoad func(lat, lon, withinM float64) (near, known bool)
+}
+
+// SetRoadCheck gives the trail questions the road tiles (nil: never "no road").
+func (p *Pipeline) SetRoadCheck(fn func(lat, lon, withinM float64) (near, known bool)) {
+	p.nearRoad = fn
 }
 
 func NewPipeline(dirs Dirs, store *Store, log *slog.Logger) *Pipeline {
@@ -251,8 +261,13 @@ func (p *Pipeline) processOne(path string) (string, error) {
 	// Sniff from the head, then load FULL bytes only for photos (preview decode needs pixels).
 	sniff := Sniff(head)
 	var raw []byte
+	tooLarge := ""
 	if sniff.Kind == KindPhoto || sniff.Kind == KindUnknown {
-		if raw, err = os.ReadFile(path); err != nil {
+		// past the box's limits (imgfit/limits.go) a still is archived untouched and never read
+		// whole: a 100 MB RAW or scan gets no preview and no caption, only its date and place
+		if lerr := imgfit.CheckFile(path); lerr != nil {
+			tooLarge = lerr.Error()
+		} else if raw, err = os.ReadFile(path); err != nil {
 			return "", err
 		}
 	}
@@ -328,7 +343,9 @@ func (p *Pipeline) processOne(path string) (string, error) {
 	switch sniff.Kind {
 	case KindPhoto:
 		kindStr = "photo"
-		if cfgFmt == "jpeg" || cfgFmt == "png" || cfgFmt == "gif" {
+		if tooLarge != "" {
+			p.log.Info("photo archived without preview", "fn", "processOne", "hash", hash, "why", tooLarge)
+		} else if cfgFmt == "jpeg" || cfgFmt == "png" || cfgFmt == "gif" {
 			prevPath, thumbPath = p.makePreviews(raw, archPath, hash, meta.Orientation)
 		} else {
 			p.log.Info("photo archived without preview (decoder does not handle this still format)",
@@ -401,6 +418,14 @@ func (p *Pipeline) processOne(path string) (string, error) {
 // file on the volume the bytes came from ("" for a frame ffmpeg grabbed): a damaged original is
 // re-read from there, never from a copy in a temporary directory.
 func (p *Pipeline) makePreviews(raw []byte, src, hash string, orientation int) (prev, thumb string) {
+	// the header first: a picture claiming more pixels than the box decodes is left without one
+	if err := imgfit.CheckHeader(bytes.NewReader(raw)); err != nil {
+		var tl imgfit.ErrTooLarge
+		if errors.As(err, &tl) {
+			p.log.Info("no preview", "fn", "makePreviews", "hash", hash, "why", err.Error())
+			return "", ""
+		}
+	}
 	img, _, err := image.Decode(bytes.NewReader(raw))
 	if err != nil {
 		// Go's decoder is strict: a JPEG with a damaged segment ("missing 0xff00 sequence", "bad
@@ -548,7 +573,23 @@ func (p *Pipeline) RebuildDay(day string) {
 	if len(pts) == 0 && len(photos) == 0 {
 		return
 	}
-	doc, err := BuildDayPath(t, pts, photos)
+	// the stretches worth a "were you there?", named, minus the ones already said yes to
+	keptRanges, _ := p.store.KeptStretches(start-2*3600, end+2*3600)
+	kept := func(from, to int64) bool {
+		for _, k := range keptRanges {
+			if k[0] <= to && k[1] >= from {
+				return true
+			}
+		}
+		return false
+	}
+	questions := TrailQuestions(pts, start, end, p.nearRoad, kept)
+	for i := range questions {
+		if p.resolvePlace != nil {
+			questions[i].Place = placeName(p.resolvePlace(questions[i].Lat, questions[i].Lon))
+		}
+	}
+	doc, err := BuildDayPathAsking(t, pts, photos, questions)
 	if err != nil {
 		return
 	}
@@ -591,6 +632,55 @@ func (p *Pipeline) RebuildDay(day string) {
 	p.log.Info("day path rebuilt", "fn", "rebuildDay", "day", day, "trackPoints", len(pts),
 		"photoPoints", len(photos), "stays", len(route.Stays), "moves", len(route.Moves),
 		"walkM", route.WalkM, "rideM", route.RideM, "routeIn", time.Since(t0).Round(time.Millisecond))
+}
+
+// placeName is how a question names a place: the nearest town, else the feature or the region,
+// with the country.
+func placeName(pl geo.Place) string {
+	name := pl.Locality
+	for _, alt := range []string{pl.Feature, pl.Park, pl.Admin2, pl.Admin1} {
+		if name == "" {
+			name = alt
+		}
+	}
+	if name == "" {
+		return pl.Country
+	}
+	if pl.Country != "" {
+		return name + ", " + pl.Country
+	}
+	return name
+}
+
+// AnswerTrail acts on a trail question: keep records the yes; otherwise the points at ts, all
+// within [from, to], are deleted. The days they touch are rebuilt. Returns how many were deleted.
+func (p *Pipeline) AnswerTrail(from, to int64, ts []int64, keep bool) (int, error) {
+	if to < from || to-from > 6*3600 {
+		return 0, fmt.Errorf("a question spans at most a few hours")
+	}
+	n := 0
+	if keep {
+		if err := p.store.KeepStretch(from, to); err != nil {
+			return 0, err
+		}
+	} else {
+		var in []int64
+		for _, t := range ts {
+			if t >= from && t <= to {
+				in = append(in, t)
+			}
+		}
+		var err error
+		if n, err = p.store.DeletePoints(in); err != nil {
+			return n, err
+		}
+	}
+	days := map[string]bool{time.Unix(from, 0).UTC().Format("2006-01-02"): true, time.Unix(to, 0).UTC().Format("2006-01-02"): true}
+	for d := range days {
+		p.RebuildDay(d)
+	}
+	p.log.Info("trail question answered", "fn", "AnswerTrail", "keep", keep, "deleted", n)
+	return n, nil
 }
 
 // RebuildRecentDays rebuilds the newest n days that have a path file (or points), oldest first,
@@ -812,7 +902,9 @@ func (p *Pipeline) derive(path string, forcePreviews bool) (Frame, bool, error) 
 		kindStr = "photo"
 		prevPath, thumbPath = existing()
 		if forcePreviews || prevPath == "" || thumbPath == "" {
-			if raw, rerr := os.ReadFile(path); rerr == nil {
+			if lerr := imgfit.CheckFile(path); lerr != nil {
+				p.log.Info("no preview", "fn", "derive", "hash", hash, "why", lerr.Error())
+			} else if raw, rerr := os.ReadFile(path); rerr == nil {
 				if pv, tv := p.makePreviews(raw, path, hash, meta.Orientation); pv != "" {
 					prevPath, thumbPath, previewed = pv, tv, true
 				}

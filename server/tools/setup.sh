@@ -267,7 +267,19 @@ DOMAIN_ARG=""
 
 # ---------------------------------------------------------------------------
 say "6/6  Dry run, then apply"
-COMMON="--user $SVC_USER --disk $DISK --host $CUR_HOST $DOMAIN_ARG --seal $SEAL"
+# THE DAEMONS' OWN USER. The service user builds and deploys; the daemons run as a system user
+# nobody logs in as, so nothing else running as the service user (a shell, an editor, a website on
+# this machine) can read the decrypted volume through /proc/<daemon>/root (tools/own_user.sh says
+# more; a box set up before this moves over with it).
+RUN_USER="${GHOST_RUN_USER:-ghostd}"
+case "$RUN_USER" in ghost|ghost_ro|ghost_rw|root) echo "  GHOST_RUN_USER=$RUN_USER is a database role or root; pick another"; exit 1;; esac
+if ! id "$RUN_USER" >/dev/null 2>&1; then
+    useradd --system --user-group --no-create-home --home-dir /nonexistent \
+        --shell /usr/sbin/nologin --comment "LocalGhost daemons" "$RUN_USER"
+    passwd -l "$RUN_USER" >/dev/null 2>&1 || true
+    echo "  made system user $RUN_USER for the daemons (no home, no shell, no password)"
+fi
+COMMON="--user $RUN_USER --disk $DISK --host $CUR_HOST $DOMAIN_ARG --seal $SEAL"
 echo "  ghost-setup $COMMON"
 echo
 echo "  DRY RUN (touches nothing):"
@@ -288,10 +300,11 @@ if confirm_word "APPLY"; then
     echo "      sudo ./tools/setup_llama.sh --models /path/with/ggufs"
     echo "    See tools/README.md steps 6-8 for models, the DB bundle, and the"
     echo "    first-unlock checks (including the PTT cold-power-cycle if the TPM is in lockout)."
-    if [ "$(getent passwd "$SVC_USER" | cut -d: -f7)" != /usr/sbin/nologin ]; then
-        echo "    The daemons run as $SVC_USER, an account people log in as: anything run as"
-        echo "    $SVC_USER could read the vault. After the first unlock, lock the box and run"
-        echo "      sudo ./tools/own_user.sh     (the daemons get a user of their own, ghostd)"
+    echo "    The daemons run as $RUN_USER, a user nobody logs in as; $SVC_USER builds and deploys."
+    if swapon --noheadings --show=NAME 2>/dev/null | grep -qv '^/dev/zram\|^/dev/dm-'; then
+        echo "    Swap on this machine is not encrypted: the model, Postgres and the daemons can be"
+        echo "    paged out to the OS disk in the clear. Encrypted swap (a random key at each boot,"
+        echo "    /etc/crypttab) or zram closes it; tools/privacy_check.sh checks."
     fi
 else
     echo "  Not applied. Re-run tools/setup.sh when ready; nothing was changed."

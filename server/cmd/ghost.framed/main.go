@@ -298,6 +298,7 @@ func main() {
 	// without tiles it draws chords, and it forgets its loaded cells after every rebuild
 	roads := roadgraph.Open(roadsOut)
 	pipe.SetRouter(roads)
+	pipe.SetRoadCheck(roads.NearRoad) // "no road goes there", for the trail questions
 	var roadsBusy sync.Mutex
 	buildRoads := func(why string) string {
 		pbfs := roadtiles.FindPBFs(roadsIn)
@@ -483,6 +484,25 @@ func main() {
 			return ctlsock.Response{}, err
 		}
 		return ctlsock.Response{OK: true, Text: framed.TrailReport(t, rows, a.Km*1000)}, nil
+	})
+	// trail-answer: the person's answer to a trail question (framed/questions.go), from the phone
+	// through secd: keep=true never asks again; keep=false deletes the points
+	ctl.Handle("trail-answer", func(args json.RawMessage) (ctlsock.Response, error) {
+		var a struct {
+			From int64   `json:"from"`
+			To   int64   `json:"to"`
+			TS   []int64 `json:"ts"`
+			Keep bool    `json:"keep"`
+		}
+		if len(args) == 0 || json.Unmarshal(args, &a) != nil {
+			return ctlsock.Response{}, fmt.Errorf("trail-answer requires from, to, ts, keep")
+		}
+		n, err := pipe.AnswerTrail(a.From, a.To, a.TS, a.Keep)
+		if err != nil {
+			return ctlsock.Response{}, err
+		}
+		data, _ := json.Marshal(map[string]any{"deleted": n})
+		return ctlsock.Response{OK: true, Data: data}, nil
 	})
 	ctl.Handle("rebuild-day", func(args json.RawMessage) (ctlsock.Response, error) {
 		var a struct {

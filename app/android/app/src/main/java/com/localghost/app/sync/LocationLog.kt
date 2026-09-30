@@ -233,6 +233,24 @@ object LocationLog {
         return out
     }
 
+    /** The person said they were not there (a trail question answered no): the points recorded
+     *  at these seconds leave the phone's own two days too. Needs the app unlocked (sealed lines);
+     *  returns how many went. */
+    @Synchronized
+    fun forget(ctx: Context, ts: Set<Long>): Int {
+        val r = File(ctx.filesDir, RECENT_FILE)
+        if (!r.exists() || ts.isEmpty()) return 0
+        val op = TrailKeys.opener()
+        var gone = 0
+        val keep = r.readLines().filter { line ->
+            if (line.isBlank()) return@filter false
+            val pt = readLine(line, op)
+            if (pt != null && pt.ts in ts) { gone++; false } else true
+        }
+        if (gone > 0) r.writeText(if (keep.isEmpty()) "" else keep.joinToString("\n", postfix = "\n"))
+        return gone
+    }
+
     private fun trimOldest(f: File) {
         val lines = f.readLines()
         val keep = lines.drop(lines.size / 4)

@@ -425,9 +425,12 @@ dead box. That indistinguishability is the product.
 
 ## 8b. A user of their own for the daemons , root, once, with the box locked
 
-The daemons run as the service user from step 1. When that is an account people log in as (coder
-here), anything else running as it (a shell, an editor, a website on the same machine) can read the
-decrypted volume through /proc/<daemon pid>/root. Give the daemons a system user nobody logs in as:
+A box set up from 30 Sep 2026 has this already: setup.sh makes `ghostd` (GHOST_RUN_USER to name it
+otherwise) and the daemons run as it, while the service user builds and deploys. On a box set up
+before, the daemons run as the service user from step 1. When that is an account people log in as
+(coder here), anything else running as it (a shell, an editor, a website on the same machine) can
+read the decrypted volume through /proc/<daemon pid>/root. Give the daemons a system user nobody
+logs in as:
 
     # lock from the app first (SETTINGS › LOCK BOX NOW)
     sudo ./tools/own_user.sh            # makes ghostd, points ghost.secd at it, restarts secd
@@ -438,6 +441,22 @@ decrypted volume through /proc/<daemon pid>/root. Give the daemons a system user
 The service user keeps building and deploying (redeploy.sh builds as it); it loses only the door.
 Undo: copy /etc/systemd/system/ghost.secd.service.before-own-user back, daemon-reload, restart,
 lock and unlock.
+
+## 8c. New releases from the phone , root once, then never
+
+After this the box takes a new server release from the app, with the PIN and no root: the phone
+reads the mirror once a day on Wi-Fi, says when there is a newer release, and DEPLOY in SETTINGS ›
+SERVER hands the signed set to the box. The box checks the signature with the key it already holds,
+puts the release on, locks, and restarts onto it; the first unlock after is a trial, and the earlier
+build comes back by itself if the new one fails it (or from ROLL BACK). Once, as root:
+
+    sudo ./tools/redeploy.sh    # installs ghost-update-guard, its unit drop-in, and the verifier +
+                                # site key in /opt/localghost/tools
+
+Building a release for the mirror (a clean tree at a tag; the web repo publishes it as the set
+`server`): `./tools/release_build.sh 0.9.3`. It is reproducible: the same commit gives the same
+bytes, so anyone can rebuild a published release and compare it with the manifest. DEV_UPDATE.md,
+"A new server release from the phone", has the rest.
 
 ## Undo
 

@@ -124,6 +124,35 @@ type modelDoc struct {
 	SHA256    string `json:"sha256"`
 }
 
+type trailAnswerDoc struct {
+	From int64   `json:"from"`
+	To   int64   `json:"to"`
+	TS   []int64 `json:"ts"`
+	Keep bool    `json:"keep"`
+}
+
+type trailAnsweredDoc struct {
+	OK      bool `json:"ok"`
+	Deleted int  `json:"deleted"`
+}
+
+type updateDoc struct {
+	Version string `json:"version"`
+	Trial   struct {
+		Version string `json:"version"`
+		Prev    string `json:"prev"`
+		State   string `json:"state"`
+		Reason  string `json:"reason,omitempty"`
+	} `json:"trial"`
+}
+
+type updateAppliedDoc struct {
+	OK      bool     `json:"ok"`
+	Version string   `json:"version,omitempty"`
+	Why     string   `json:"why,omitempty"`
+	Changes []string `json:"changes,omitempty"`
+}
+
 type rekeyRequestDoc struct {
 	SPKI string `json:"spki"`
 	Sig  string `json:"sig"`
@@ -176,10 +205,20 @@ func (s *Server) routes() []route {
 			Auth: true, Request: answerRequestDoc{}, Response: okDoc{}, Handler: s.handleNotificationAnswer},
 		{Method: "GET", Path: "/v1/model", Summary: "The box model: ready, or loading (phase, percent, time left). It loads after the unlock.",
 			Auth: true, Response: modelState{}, Handler: s.handleModel},
+		{Method: "POST", Path: "/v1/geo/trail/answer", Summary: "Were you there? keep=true remembers the stretch; keep=false deletes its points for good.",
+			Auth: true, Request: trailAnswerDoc{}, Response: trailAnsweredDoc{}, Handler: s.handleTrailAnswer},
 		{Method: "GET", Path: "/v1/trail/key", Summary: "This device's trail key, to read its own sealed trail while unlocked ({have:false} when none).",
 			Auth: true, Response: trailKeyDoc{}, Handler: s.handleTrailKey},
 		{Method: "POST", Path: "/v1/trail/key", Summary: "The phone hands its trail key (raw X25519, base64) to the vault, once.",
 			Auth: true, Request: trailKeyFile{}, Response: okDoc{}, Handler: s.handleTrailKey},
+		{Method: "GET", Path: "/v1/update", Summary: "The build the box runs, and a release on trial (trial, confirmed, rolled back).",
+			Auth: true, Response: updateDoc{}, Handler: s.handleUpdate},
+		{Method: "POST", Path: "/v1/update/file", Summary: "One file of the signed server set (?name=MANIFEST.txt first, then its .asc, then <build>/server/<file>).",
+			Auth: true, Response: okDoc{}, Handler: s.handleUpdateFile},
+		{Method: "POST", Path: "/v1/update/apply", Summary: "Verify the uploaded set against the pinned site key, put it on, lock and restart onto it.",
+			Auth: true, Response: updateAppliedDoc{}, Handler: s.handleUpdateApply},
+		{Method: "POST", Path: "/v1/update/rollback", Summary: "Put the earlier build back, lock and restart onto it.",
+			Auth: true, Response: updateAppliedDoc{}, Handler: s.handleUpdateRollback},
 		{Method: "POST", Path: "/v1/device/rekey", Summary: "A certificate for a key the phone made itself (spki + a signature proving it holds the key).",
 			Auth: true, Request: rekeyRequestDoc{}, Response: rekeyDoc{}, Handler: s.handleRekey},
 		{Method: "POST", Path: "/v1/device/rekey/confirm", Summary: "Over the new certificate: the one it replaced is retired (answered as if down from then on).",

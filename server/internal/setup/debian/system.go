@@ -422,6 +422,13 @@ func (s *System) InstallServices(units []setup.SystemdUnit) error {
 			return fmt.Errorf("stage %s into %s: %w", u.Name, setup.SystemBinDir, err)
 		}
 	}
+	// the guard that rolls a bad release back before secd starts (internal/update): staged beside
+	// secd when it was built; the unit runs it with "-", so a box without it still starts
+	if src := filepath.Join(s.ExecDir, "ghost-update-guard"); fileExists(src) {
+		if err := copyFile(src, filepath.Join(setup.SystemBinDir, "ghost-update-guard"), 0o755); err != nil {
+			return fmt.Errorf("stage ghost-update-guard: %w", err)
+		}
+	}
 	for _, u := range units {
 		path := filepath.Join("/etc/systemd/system", u.Name+".service")
 		if err := os.WriteFile(path, []byte(u.Unit), 0o644); err != nil {
@@ -627,4 +634,9 @@ func fileReadable(p string) bool {
 	}
 	_ = f.Close()
 	return true
+}
+
+func fileExists(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && !fi.IsDir()
 }

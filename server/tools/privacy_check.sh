@@ -53,7 +53,7 @@ if [ -d /var/log/journal ]; then
     n=$(journalctl -u ghost.secd --no-pager -q 2>/dev/null | grep -c "geo lod" || true)
     [ "${n:-0}" -gt 0 ] && warn "$n 'geo lod' line(s) in secd's journal: the bounding box of every map view (journalctl --vacuum-time=1s after the fix, or rotate)" || pass "no map views in secd's journal"
     u=$(journalctl -u ghost.secd --no-pager -q 2>/dev/null | grep -c "unlock stage ok" || true)
-    info "$u unlock stage line(s) in secd's journal (a timeline of unlocks)"
+    [ "${u:-0}" -gt 0 ] && warn "$u unlock stage line(s) in secd's journal: a timeline of when the box was opened (at debug level since 30 Sep 2026; they go when the journal rotates)" || pass "no unlock timeline in secd's journal"
 else pass "journald is volatile (RAM only)"; fi
 
 mode=$(sed -n 's/^GHOST_SEAL_MODE=//p' "$STATE/seal.env" 2>/dev/null | tr -d '"' | head -1)

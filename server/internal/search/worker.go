@@ -96,6 +96,14 @@ func (w *Worker) one(ctx context.Context, kind string, do func(context.Context, 
 			w.modelHoldUntil = time.Now().Add(20 * time.Second)
 			return false
 		}
+		if strings.Contains(err.Error(), "too large to decode") {
+			// past the box's image limits (imgfit/limits.go): no attempt will ever read it, so the
+			// job is done without a caption instead of failing five times and parking, where an
+			// unpark would only start it over. The frame keeps its date, place and file.
+			w.Log.Info("image past the size limits, left without a caption", "fn", "one", "kind", kind, "job", job.ID, "why", err.Error())
+			_ = w.Store.CompleteJob(job.ID)
+			return true
+		}
 		w.Log.Warn("job failed", "fn", "one", "kind", kind, "job", job.ID, "err", err)
 		_ = w.Store.FailJob(job.ID, err)
 		return true

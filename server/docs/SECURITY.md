@@ -10,6 +10,22 @@
 
 ---
 
+> **What the box does today (30 Sep 2026).** Most of this document is the design. The box as built
+> is simpler, and nobody should rely on the parts that are not there yet:
+>
+> - **One account, two PINs.** The main PIN opens the one encrypted volume; an optional wipe PIN
+>   destroys the volume's sealed key and answers like a wrong PIN. There are **no decoy volumes, no
+>   hidden volume and no duress PIN** that opens something else (`internal/profile/setup.go` says
+>   why: deniability is meant to live on the phone, which keeps only a few days).
+> - **No FIDO2 key.** The enrolled phone's device certificate is the access key, and the PIN unseals
+>   the volume key from the TPM, whose lockout punishes guessing in hardware. On a box set up with
+>   the software seal (no TPM), the wrapped key sits on the OS disk and a stolen disk can be guessed
+>   at offline with no lockout: move such a box to the TPM (`ghost-ctl migrate-to-tpm`).
+> - **The wipe** on the TPM tier evicts the key from the TPM. On the software tier it deletes the
+>   wrapping from a file on an SSD, where old copies can survive in free blocks.
+
+---
+
 ## The Honeypot Problem
 
 LocalGhost creates a searchable, correlated record of your entire life. Journals. Bank transactions. Health metrics. Screen recordings. Location history. Everything `ghost.synthd` has ever connected.
