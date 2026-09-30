@@ -14,8 +14,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -27,6 +29,7 @@ import com.localghost.app.net.StageState
 import com.localghost.app.net.UnlockClock
 import com.localghost.app.net.UnlockClockStore
 import com.localghost.app.net.UnlockEstimate
+import com.localghost.app.net.UnlockPacer
 import com.localghost.app.net.UnlockSnapshot
 import com.localghost.app.net.UnlockStage
 import com.localghost.app.ui.theme.GhostBorder
@@ -47,6 +50,25 @@ import com.localghost.app.ui.theme.Warning
  * built from the stage stream alone, which the box sends identically for every account, so a real
  * and a duress unlock look the same.
  */
+/**
+ * Paces a real unlock snapshot so each step is readable: holds every step on screen for at least a
+ * moment and walks them in order, even when the box finishes them all in one poll (a warm box
+ * replays a cold unlock, secd replay.go). Both the vault rings and [UnlockProgress] are fed this, so
+ * the picture and the words move together. A fresh pacer per run (keyed on whether this is a lock).
+ */
+@Composable
+fun rememberPaced(real: UnlockSnapshot): UnlockSnapshot {
+    val locking = real.stages.firstOrNull()?.stage == UnlockStage.STOP_SERVICES
+    val pacer = remember(locking) { UnlockPacer() }
+    // a fast tick so the held steps advance between the box's once-a-second polls
+    var frame by remember(locking) { mutableStateOf(0) }
+    LaunchedEffect(locking) {
+        while (true) { kotlinx.coroutines.delay(90); frame++ }
+    }
+    pacer.observe(real)
+    return remember(real, frame) { pacer.display() } ?: real
+}
+
 @Composable
 fun UnlockProgress(snapshot: UnlockSnapshot, modifier: Modifier = Modifier) {
     val ctx = LocalContext.current
@@ -91,6 +113,11 @@ fun UnlockProgress(snapshot: UnlockSnapshot, modifier: Modifier = Modifier) {
             Crossfade(targetState = "> " + UnlockTidbits.doing(est.current, snapshot.model.takeIf { !snapshot.done }),
                 animationSpec = tween(350), label = "doing") { text ->
                 Text(text, color = TerminalDim, style = MaterialTheme.typography.bodySmall, minLines = 2)
+            }
+            // why this step is not instant, so a step that holds for a second reads as work, not a stall
+            Crossfade(targetState = UnlockTidbits.why(est.current), animationSpec = tween(350), label = "why") { why ->
+                Text(if (why.isEmpty()) " " else "  $why", color = GhostBorder,
+                    style = MaterialTheme.typography.labelSmall, minLines = 2)
             }
             if (!locking) {
                 Spacer(Modifier.height(18.dp))

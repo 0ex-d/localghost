@@ -147,14 +147,15 @@ fun VaultRings(snapshot: UnlockSnapshot, locking: Boolean, release: Boolean, mod
 /** How long the iris takes to open (after a beat for the last ring to lock in), and the monitor to
  *  switch off. The caller waits these out. */
 private const val OPEN_HOLD_MS = 450
-private const val ARRIVE_MS = VAULT_ARRIVE_MS
 private const val OPEN_MS = 800
 private const val CLOSE_MS = 650
 const val VAULT_OPEN_MS = OPEN_HOLD_MS + OPEN_MS
 const val VAULT_CLOSE_MS = CLOSE_MS
 
-/** How long a lock's rings take to fly in and close round the ghost, before the teardown shows. */
+/** How long a lock's rings take to fly in and close round the ghost, before the teardown shows.
+ *  Declared before ARRIVE_MS: a constant cannot be read before its own line. */
 const val VAULT_ARRIVE_MS = 750
+private const val ARRIVE_MS = VAULT_ARRIVE_MS
 
 private const val REST = -90f          // the keyway's resting angle: straight up
 private const val STARTED_LIT = 60_000L // "locked in long ago"

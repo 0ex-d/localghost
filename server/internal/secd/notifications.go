@@ -216,6 +216,9 @@ func (e muteErr) Error() string { return string(e) }
 // deviceKey is a compact, stable per-device id for the push cursor, derived from the client cert nginx
 // passes (clientID). Hashed so the Redis key is short and contains no cert bytes.
 func deviceKey(r *http.Request) string {
+	if id := certID(r); id != "" {
+		return id[:16] // the same as hashing the header: certID is its SHA-256
+	}
 	sum := sha256.Sum256([]byte(clientID(r)))
 	return hex.EncodeToString(sum[:8]) // 16 hex chars, enough to distinguish devices
 }

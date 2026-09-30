@@ -1438,6 +1438,7 @@ class MainActivity : ComponentActivity() {
         // (secd, replay.go), so the phone shows what the box streams and adds no floor of its own.
         busy = true; error = null; unlockProgress = UnlockSnapshot.initial()
         holdScreenOn()
+        val unlockStart = android.os.SystemClock.elapsedRealtime()
         lifecycleScope.launch {
             // Stream unlock progress: a cold account ticks through its stages once a second, a warm
             // one replays a cold one. The view is identical for any account.
@@ -1447,6 +1448,13 @@ class MainActivity : ComponentActivity() {
                 holdScreenOn() // a long unlock must not let the screen go dark
                 if (snap.done) ok = true
                 if (snap.failed != null) error = snap.failed
+            }
+            // The screen paces the steps so every ring is readable (UnlockPacer); wait for that floor
+            // before the iris, or a warm box that finished in a blink would open before the rings did.
+            if (ok) {
+                val floorLeft = com.localghost.app.net.UnlockPacer.FLOOR_MS -
+                    (android.os.SystemClock.elapsedRealtime() - unlockStart)
+                if (floorLeft > 0) kotlinx.coroutines.delay(floorLeft)
             }
             // READY: the vault rings open like an iris before the app appears behind them
             if (ok && screen is Screen.Pin) {

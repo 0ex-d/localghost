@@ -458,6 +458,22 @@ Building a release for the mirror (a clean tree at a tag; the web repo publishes
 bytes, so anyone can rebuild a published release and compare it with the manifest. DEV_UPDATE.md,
 "A new server release from the phone", has the rest.
 
+## 8d. Move the phone's TLS into secd , root once (recommended on a box that hosts other sites)
+
+By default nginx terminates the phone's TLS and passes the device certificate to secd as a header,
+which any local process on the box can forge. To have secd check the certificate itself , nginx then
+forwards the raw TLS stream by name and never sees the plaintext , while the box's other sites move
+to an internal port behind the stream:
+
+    sudo ghost-ctl edge-passthrough --domain <box name>   # backs up nginx, tests, checks, rolls back on failure
+    echo tls | sudo tee /etc/ghost/edge                   # then a plain-HTTP client on :8443 gets the down page
+    # undo, if a site misbehaves behind the stream:
+    sudo ghost-ctl edge-passthrough --undo
+
+`ghost-cli` and `ghost-ctl` are unaffected , they use the box's control sockets, not the TLS port ,
+so everything you run here keeps working. `sudo ./tools/privacy_check.sh` says whether the move is in
+place. DEV_UPDATE.md, "The phone's TLS is checked by secd itself", has the design.
+
 ## Undo
 
 `./tools/server_setup_undo.sh` walks the root-setup pieces back , but note it deletes the tss

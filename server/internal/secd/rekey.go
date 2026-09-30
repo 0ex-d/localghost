@@ -48,8 +48,12 @@ const rekeyMessage = "localghost rekey v1\n"
 const defaultCaDir = "/etc/ghost/ca"
 
 // certID names the certificate a request presents: SHA-256 of the header nginx sets (the escaped
-// PEM of the verified client certificate), hex. "" without one.
+// PEM of the verified client certificate), hex. "" without one. Over secd's own TLS the front door
+// (edge.go) names it and puts the name on the request.
 func certID(r *http.Request) string {
+	if id, ok := r.Context().Value(certIDKey{}).(string); ok {
+		return id
+	}
 	c := r.Header.Get("X-Client-Cert")
 	if c == "" {
 		return ""

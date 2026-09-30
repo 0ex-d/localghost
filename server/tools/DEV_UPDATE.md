@@ -3431,3 +3431,93 @@ box has one account, a main PIN and a wipe PIN, no FIDO2 and no decoys (`interna
 Someone who reads the document and counts on a duress PIN at a border would be counting on nothing,
 so it now opens with what the box does today, the software seal's limit and what the wipe leaves on
 each tier. The design text below it is unchanged.
+
+## The scanner is a vault aperture now (app)
+
+Vlad: "make the scanning of the QR code on the machine equally cypherpunk and futuristic but within
+our guidelines, it's a bit silly now." The angry ghost, its speech bubbles and the success fireworks
+are gone. In their place, the same language as the unlock rings (`ui/QrApertureModel.kt`, pure and
+tested; drawn in `ui/QrScanScreen.kt`):
+
+- a vault aperture locks over the code, twelve segments around a crosshair, turning slowly with a
+  scan tick sweeping the ring;
+- the segments light as the box's rotating enrolment frames land (any eight of twelve complete it),
+  or all at once for a single clean code;
+- on success the lit ring blows open like the unlock's iris , it scales outward and fades through a
+  green bloom while a shockwave races past it, the camera there behind it , then BOX FOUND snaps in
+  with a little overshoot, the connection address types itself out (the host the phone will reach,
+  e.g. lgs.localghost.ai, not the box's nickname), and the pinned fingerprint fills in group by
+  group , the same identity the app checks on every connection;
+- a code that reads but is not a box turns the ring red, with one terse line ("that is a Wi-Fi code,
+  not a box") instead of a shouting ghost.
+
+The decode pipeline (finders, sampling, frame assembly, the two-frame confirmation, auto-torch and
+auto-zoom) is untouched; only the overlay changed. `qr-aperture-preview.html` (this drop) shows the
+geometry in a browser.
+
+Tested: `QrApertureModelTest` (segments as frames land, a clean code fills at once, the iris easing,
+the phase from what the scanner sees). The drawing is structure-checked only.
+
+## The phone's TLS is checked by secd itself, not by a header (secd, setup, ctl)
+
+The security review's second finding: secd served plain HTTP on 127.0.0.1:8443 and believed the
+`X-Client-Cert` header nginx set, on every route. Any process on the box , one of the ~20 websites,
+an SSRF in any of them , could reach the PIN door without a device certificate and claim to be any
+device, retired ones included. Now secd does the TLS.
+
+**secd** (`internal/secd/edge.go`). The listener looks at each connection's first byte: a TLS
+handshake (0x16) secd terminates itself, serving `box-server.pem` (the certificate the phone pins)
+and checking the client certificate against `devices-ca.pem` , in the handler, not the handshake, so
+no certificate, a forged one and a retired one all get the same 503 page a down box gives. A device
+is named by the SHA-256 of the certificate's PEM as nginx would have escaped it, so a phone keeps its
+trail key, sync positions and notification cursor across the switch; while the old path still runs
+secd records, for every certificate it sees, the name nginx gave it (`devices/ids`), so the names
+match even if the rebuilt string ever differed. Anything but a TLS byte is the old nginx path,
+served as before until `/etc/ghost/edge` says `tls`, then given the 503 too. So a redeploy changes
+nothing on its own; the switch is one file and one nginx reload.
+
+**nginx** (`internal/setup/edge.go`, `ghost-ctl edge-passthrough`). nginx's stream module forwards
+the phone's raw TLS to secd by the name it asks for (`ssl_preread`), and the box's other sites move
+from `:443` to `127.0.0.1:4443` behind the stream with a PROXY line so they keep their clients'
+addresses. The runner rewrites the listen lines, adds the stream include, keeps every file it
+changes, runs `nginx -t`, reloads, checks from outside (the box's name serves the box's certificate,
+another name serves its own), and puts everything back on any failure. `--undo` restores it.
+
+    sudo ghost-ctl edge-passthrough --domain <box name>     # move nginx (backs up, tests, checks, rolls back)
+    echo tls | sudo tee /etc/ghost/edge                     # then plain HTTP on :8443 gets the down page
+    sudo ghost-ctl edge-passthrough --undo                  # put nginx back
+
+`ghost-cli` and `ghost-ctl` are untouched by this: they reach secd and the daemons over the unix
+control sockets in the run dir, never the HTTP port, so CLI access on the box works just as before, locked or unlocked.
+
+Tested: `edge_test.go` in secd (the phone over TLS reaches the routes; no certificate, another CA's,
+and a forged header all get the 503; a 404 folds to the 503; plain HTTP served then refused after
+the switch; a phone keeps nginx's name for it; a retired certificate stays down; a PROXY line is
+taken and the client's address kept), `edge_test.go` in setup (listen lines moved, IPv6 handled, a
+specific-address listener refused, quic left alone, the stream include added once, apply end to end,
+a rollback when the check fails, undo). The nginx moves are verified against a tree of files with a
+fake nginx; not run against a live nginx here.
+
+## The service user's sudo is one exact unit, not ghost.* (setup)
+
+The review also flagged the sudoers rule: `coder` could run `systemctl {start,stop,restart,status,
+enable,disable} ghost.*`, where the `*` also matches a trailing ` -H other.host` or ` -M container`
+or other systemctl arguments. `server_setup_root.sh` now writes the exact `ghost.secd` unit (with
+and without `.service`), only the verbs a deploy uses (restart, start, stop, status, daemon-reload),
+and no enable/disable (a one-time admin action). An existing wildcard file is kept as a `.bak` and
+replaced. `privacy_check.sh` warns when any sudoers file still grants `ghost.*`.
+
+## The unlock is paced so every step can be read (app)
+
+Vlad: "the unlock now just skips through steps and I can't read them ... add a bit of a delay so we
+get to see the animation." A warm box replays a cold unlock so fast that all six rings could light in
+one poll. `net/UnlockPacer.kt` (pure, tested) holds each ring step on screen for at least 720 ms and
+walks them in order, never ahead of the box and never backward; a step the box really sits on keeps
+its real length. Both the vault rings and the progress text read from the paced snapshot, so the
+picture and the words move together, and `MainActivity` waits out the floor (about four seconds)
+before the iris opens. Each step now also says why it takes the time it does (`UnlockTidbits.why`):
+the PIN is checked in the secure chip at its own pace, Postgres replays anything unwritten, and so
+on. A failure shows the real snapshot at once, no pacing.
+
+Tested: `UnlockPacerTest` (a warm unlock walked one step at a time, a slow step keeping its length, a
+failure passing through, the floor). The screen wiring is structure-checked only.

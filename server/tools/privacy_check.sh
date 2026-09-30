@@ -107,7 +107,11 @@ ss -ltnH 2>/dev/null | awk '{print $4}' | grep -E '^127\.0\.0\.1:' | sort -u | w
     case "$who" in ghost.*|postgres|redis-server|llama-server) info "127.0.0.1:$p ($who) answers any local process";; esac
 done
 if ss -ltnH 2>/dev/null | grep -q '127.0.0.1:8443 '; then
-    warn "ghost.secd serves plain HTTP on 127.0.0.1:8443: any local process reaches it without the device certificate (a unix socket only nginx can open closes this)"
+    if [ "$(cat /etc/ghost/edge 2>/dev/null)" = tls ] && [ -f /etc/nginx/localghost-stream.conf ]; then
+        pass "ghost.secd terminates the phone's TLS itself (edge=tls, nginx forwards the raw stream by name): a plain-HTTP client on :8443 gets the down page, not the door"
+    else
+        warn "ghost.secd still trusts the X-Client-Cert header on plain 127.0.0.1:8443: any local process reaches the PIN door without the phone's certificate. Move it with: sudo ghost-ctl edge-passthrough --domain <box name> (secd does its own TLS, nginx forwards the raw stream by name)"
+    fi
 fi
 for p in 18080 18081; do
     if out=$(curl -s -m 2 "http://127.0.0.1:$p/slots" 2>/dev/null) && echo "$out" | grep -q '"id"'; then
@@ -118,6 +122,11 @@ done
 if ps -eo args 2>/dev/null | grep -v grep | grep -q 'redis-server.*--requirepass'; then
     warn "Redis's password is on its command line (ps shows it to every user)"
 else pass "no Redis password on a command line"; fi
+if grep -rqs 'systemctl.*ghost\.\*' /etc/sudoers.d/ 2>/dev/null; then
+    warn "a sudoers rule grants systemctl on 'ghost.*' (a wildcard that also matches extra arguments like -H/-M): re-run server_setup_root.sh to replace it with the exact ghost.secd unit"
+elif grep -rqs 'ghost\.secd' /etc/sudoers.d/ 2>/dev/null; then
+    pass "the service user's systemctl sudo is the exact ghost.secd unit, no wildcard"
+fi
 
 echo "== what the network sees"
 dom=$(grep -h server_name /etc/nginx/sites-enabled/* 2>/dev/null | grep -i localghost | head -1 | awk '{print $2}' | tr -d ';')

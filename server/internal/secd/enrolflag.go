@@ -12,7 +12,6 @@ package secd
 // existing authenticated request leaving a mark on disk.
 
 import (
-	"net/http"
 	"os"
 	"path/filepath"
 	"sync/atomic"
@@ -31,13 +30,6 @@ func (s *Server) noteVerifiedDevice() {
 		return // already flagged this process; skip the syscall
 	}
 	_ = os.WriteFile(s.enrolFlagPath(), []byte("1\n"), 0o644)
-}
-
-// verifiedClient reports whether nginx forwarded a verified client cert for this request. nginx sets
-// X-Client-Cert only after ssl_client_verify == SUCCESS (see the site config), so its presence is the
-// edge's own attestation , secd does not re-parse the cert here, it only needs to know one arrived.
-func verifiedClient(r *http.Request) bool {
-	return r.Header.Get("X-Client-Cert") != ""
 }
 
 // enrolFlagField is embedded in Server (see server.go) to make noteVerifiedDevice a one-time syscall.

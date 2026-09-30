@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
@@ -136,11 +137,11 @@ fun QrScanScreen(
     }
 
     // On a valid enrol scan: kick the enrol off in the BACKGROUND immediately (onScanned starts the
-    // network request in the host), then play a fixed ~2.6s AR success animation over the live camera , a
-    // big happy ghost pops in and bobs while fireworks burst around it. The enrol and the celebration run
-    // at once, so the time is not dead waiting even though the box can take a moment to answer. Only once
-    // the animation has fully played do we call onProceed to leave the scanner, so the success is always
-    // seen for its full length no matter how fast or slow the box responds; the host routes on the outcome.
+    // network request in the host), then play a fixed ~2.6s AR success animation over the live camera ,
+    // the aperture blows open like the unlock's iris, BOX FOUND snaps in and the address and fingerprint
+    // type themselves out. The enrol and the animation run at once, so the time is not dead waiting even
+    // though the box can take a moment to answer. Only once it has fully played do we call onProceed to
+    // leave the scanner, so the success is always seen for its full length; the host routes on the outcome.
     LaunchedEffect(foundLink) {
         val link = foundLink ?: return@LaunchedEffect
         onScanned(link) // start enrolling now, in the background
@@ -149,10 +150,10 @@ fun QrScanScreen(
             enrolAnim = i.toFloat() / steps
             kotlinx.coroutines.delay(50) // 52 * 50ms = 2600ms
         }
-        onProceed() // celebration done , hand off
+        onProceed() // the open has played , hand off
     }
 
-    // Celebration clock: runs while a real box is found, drives the fireworks burst.
+    // A free clock while a real box is found, for the held ring's faint breathe.
     var celebrate by remember { mutableStateOf(0f) }
     LaunchedEffect(foundLink) {
         while (foundLink != null) {
@@ -561,84 +562,33 @@ fun QrScanScreen(
                 }
             }
 
-            // AR overlay: the ghost drawn over the code, because the code decoded
-            // but it is not the way in. The orbit phase advances on its own clock (~100ms) so the ghost
-            // flies even between decode passes. The finder points come from the analysis frame (image
-            // space); we map them to this Canvas's view space. HONEST NOTE: the mapping is the part to
-            // verify on a real device , camera resolution vs preview size vs rotation is the classic
-            // source of an offset or mirrored overlay and cannot be confirmed by reasoning alone.
-            var orbit by remember { mutableStateOf(0f) }
-            LaunchedEffect(quip != null) {
-                while (quip != null) {
-                    orbit += 0.18f
-                    kotlinx.coroutines.delay(100)
-                }
-            }
-            // Rage ramps toward 1 while a wrong code is in view and decays when it leaves, so the ghost
-            // visibly gets angrier the longer you keep showing it the wrong code, then calms down.
-            var rage by remember { mutableStateOf(0f) }
+            // AR overlay: the VAULT APERTURE over the code, in the unlock's language. It spins on its
+            // own clock (~60ms) so it turns between decode passes; its segments light as the box's
+            // rotating enrolment frames land, and it goes red when a code reads but is not the way in.
+            // The finder points come from the analysis frame (image space); we map them to view space.
+            // HONEST NOTE: the mapping is the part to verify on a real device , camera resolution vs
+            // preview size vs rotation is the classic source of an offset overlay.
+            var spin by remember { mutableStateOf(0f) }
             LaunchedEffect(granted) {
-                while (granted) {
-                    rage = if (quip != null) (rage + 0.022f).coerceAtMost(1f) else (rage - 0.04f).coerceAtLeast(0f)
-                    kotlinx.coroutines.delay(50)
-                }
+                while (granted) { spin += 3.2f; kotlinx.coroutines.delay(60) }
             }
             overlay?.let { ov ->
                 Canvas(Modifier.fillMaxSize()) {
                     val pts = mapFindersToView(ov, size.width, size.height)
-                    // On a fresh frame capture, flash a green tick right on the code , the "we saw THIS
-                    // one" confirmation Vlad asked for, drawn where the phone is actually pointed. Brief
-                    // (matches frameFlashAt's ~450ms window) so it acknowledges without obscuring the next.
-                    if (pts.size == 3 && System.currentTimeMillis() - frameFlashAt < 450L) {
-                        val minX = pts.minOf { it.x }; val maxX = pts.maxOf { it.x }
-                        val minY = pts.minOf { it.y }; val maxY = pts.maxOf { it.y }
-                        val cx = (minX + maxX) / 2f; val cy = (minY + maxY) / 2f
-                        val r = (maxX - minX).coerceAtLeast(60f) * 0.28f
-                        drawCircle(TerminalGreen.copy(alpha = 0.22f), r * 1.7f, androidx.compose.ui.geometry.Offset(cx, cy))
-                        val sw = r * 0.28f
-                        drawLine(TerminalGreen, androidx.compose.ui.geometry.Offset(cx - r * 0.55f, cy),
-                            androidx.compose.ui.geometry.Offset(cx - r * 0.1f, cy + r * 0.5f), sw, cap = androidx.compose.ui.graphics.StrokeCap.Round)
-                        drawLine(TerminalGreen, androidx.compose.ui.geometry.Offset(cx - r * 0.1f, cy + r * 0.5f),
-                            androidx.compose.ui.geometry.Offset(cx + r * 0.6f, cy - r * 0.5f), sw, cap = androidx.compose.ui.graphics.StrokeCap.Round)
-                    }
-                    // Only the WRONG-code ghost is drawn over the code. A successful scan is handled by the
-                    // full-screen celebration layer at the end, so nothing is drawn on the code on success.
-                    if (pts.size == 3 && quip != null) {
-                        // No bracket , just the ghost, getting ANGRIER the longer you keep showing it
-                        // rubbish. `rage` ramps toward 1 while a wrong code is in view (and decays
-                        // otherwise); it reddens the ghost, grows it, shakes it harder, and pushes a red
-                        // glow out behind it. The thing we scanned pops up above and mouths off.
-                        val minX = pts.minOf { it.x }; val maxX = pts.maxOf { it.x }
-                        val minY = pts.minOf { it.y }
-                        val cx = (minX + maxX) / 2f
-                        val pad = 24f
-                        val angry = androidx.compose.ui.graphics.lerp(Warning, AngryRed, rage)
-                        val ghostS = 54f + rage * 34f
-                        val jx = kotlin.math.sin(orbit * (3.1f + rage * 3f)) * (6f + rage * 14f)
-                        val jy = kotlin.math.cos(orbit * (2.7f + rage * 3f)) * (4f + rage * 10f)
-                        val gx = cx + jx
-                        val gy = minY - pad - ghostS * 1.3f + jy
-                        // Spooky backdrop: a deep void heart with a faint breathing mist ring, so the ghost
-                        // reads over a bright or busy camera frame AND looks like it brought its own gloom.
-                        // Drawn always, even before rage builds, so the ghost is visible the instant it appears.
-                        drawSpookyHalo(gx, gy, ghostS, angry, orbit)
-                        if (rage > 0.02f) {
-                            drawCircle(
-                                brush = androidx.compose.ui.graphics.Brush.radialGradient(
-                                    colors = listOf(AngryRed.copy(alpha = 0.45f * rage), androidx.compose.ui.graphics.Color.Transparent),
-                                    center = androidx.compose.ui.geometry.Offset(gx, gy),
-                                    radius = ghostS * 2.6f,
-                                ),
-                                radius = ghostS * 2.6f,
-                                center = androidx.compose.ui.geometry.Offset(gx, gy),
-                            )
-                        }
-                        drawAngryGhost(gx, gy, ghostS, angry, orbit, rage)
-                        val said = quip?.let { shoutFor(it) } ?: ""
-                        if (said.isNotEmpty()) {
-                            drawSpeechBubble(gx, gy - ghostS * 1.5f, said, angry, orbit)
-                        }
-                    }
+                    if (pts.size != 3) return@Canvas
+                    val minX = pts.minOf { it.x }; val maxX = pts.maxOf { it.x }
+                    val minY = pts.minOf { it.y }; val maxY = pts.maxOf { it.y }
+                    val cx = (minX + maxX) / 2f; val cy = (minY + maxY) / 2f
+                    // the code's span, with a margin so the aperture sits around it, not on it
+                    val span = maxOf(maxX - minX, maxY - minY).coerceAtLeast(80f)
+                    val radius = span * 0.85f
+                    val wrong = quip != null
+                    val have = frameProgress?.first ?: 0
+                    val want = frameProgress?.second ?: 1
+                    val lit = if (wrong) 0 else QrApertureModel.litSegments(have.coerceAtLeast(if (foundLink == null) 0 else 1), want)
+                    val tint = if (wrong) AngryRed else TerminalGreen
+                    val justCaptured = System.currentTimeMillis() - frameFlashAt < 350L
+                    drawAperture(cx, cy, radius, tint, spin, lit, wrong, justCaptured)
                 }
             }
 
@@ -730,79 +680,85 @@ fun QrScanScreen(
                 }
             }
 
-            // When a readable-but-wrong QR is in view, say what it was and have an opinion.
+            // A readable-but-wrong QR: the aperture over it is already red; here, one terse line
+            // naming what it was, no more.
             quip?.let { g ->
                 Spacer(Modifier.height(10.dp))
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(VoidLighter, MaterialTheme.shapes.small)
-                        .padding(12.dp)
-                ) {
-                    Text("Looks like ${g.label}.", color = Warning, style = MaterialTheme.typography.bodyMedium)
-                    Spacer(Modifier.height(4.dp))
-                    Text(g.quip, color = TerminalGreen, style = MaterialTheme.typography.bodySmall)
-                    Spacer(Modifier.height(6.dp))
-                    Text(g.preview, color = GhostTextDim, style = MaterialTheme.typography.labelSmall)
-                }
+                Text("that is ${g.label}, not a box , point at the QR on the box",
+                    color = Warning, style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.fillMaxWidth().background(VoidLighter, MaterialTheme.shapes.small).padding(12.dp))
             }
 
             Spacer(Modifier.height(8.dp))
             GhostButton("CANCEL / TYPE INSTEAD", onCancel, modifier = Modifier.fillMaxWidth())
         }
 
-        // SUCCESS. A real box is scanned. This is AR: the live camera stays behind the celebration, and a
-        // big happy ghost pops in and bobs over a soft glow while colourful fireworks burst around it. The
-        // status text sits on a dark pill so it stays legible over the camera. enrolAnim (0..1 over the
-        // animation) pops the ghost in with a little overshoot; celebrate is the free clock driving the
-        // fireworks and the bob. Nothing is drawn opaque , the whole point is to keep the AR camera visible.
+        // SUCCESS. A real box is scanned. The aperture the scanner held over the code blows open like
+        // the unlock's iris , the lit ring races outward and fades through a bloom of green, a
+        // shockwave ripples past it , and the camera is there behind it. BOX FOUND snaps in with a
+        // little overshoot, the connection address types itself out, and the pinned fingerprint fills
+        // in group by group , the same identity the app checks on every connection. enrolAnim (0..1
+        // over the ~2.6s) drives the whole thing; celebrate is the free clock for the shimmer.
         if (foundLink != null) {
-            val boxLabel = foundLink?.boxName?.trim()?.takeIf { it.isNotEmpty() } ?: "the box"
+            // the machine names the CONNECTION, not its own nickname: the host the phone will reach
+            // (with the port only when it is not the usual 443)
+            val addr = foundLink?.let { l -> if (l.port == 443 || l.port == 0) l.host else "${l.host}:${l.port}" } ?: "the box"
+            val fp = foundLink?.certFingerprint ?: ""
+            val a = enrolAnim.coerceIn(0f, 1f)
             Box(Modifier.fillMaxSize()) {
                 Canvas(Modifier.fillMaxSize()) {
-                    drawFireworks(size.width, size.height, celebrate)
                     val cx = size.width / 2f
-                    val cy = size.height * 0.42f + kotlin.math.sin(celebrate * 2.2f) * (size.height * 0.012f)
-                    val a = enrolAnim.coerceIn(0f, 1f)
-                    val pop = 1f - (1f - a) * (1f - a)                                   // ease-out
-                    val overshoot = 1f + 0.10f * kotlin.math.sin(a * Math.PI.toFloat())  // gentle pop
-                    val s = size.minDimension * 0.12f * pop * overshoot
-                    if (s > 1f) {
-                        // Spooky backdrop: same treatment as the angry ghost , deep void heart with a faint
-                        // breathing spectral-green mist , then the celebration's own green glow on top.
-                        drawSpookyHalo(cx, cy, s, TerminalGreen, celebrate)
-                        drawCircle(
-                            brush = androidx.compose.ui.graphics.Brush.radialGradient(
-                                colors = listOf(TerminalGreen.copy(alpha = 0.30f), androidx.compose.ui.graphics.Color.Transparent),
-                                center = androidx.compose.ui.geometry.Offset(cx, cy),
-                                radius = s * 2.6f,
-                            ),
-                            radius = s * 2.6f,
-                            center = androidx.compose.ui.geometry.Offset(cx, cy),
-                        )
-                        drawHappyGhost(cx, cy, s, TerminalGreen)
-                    }
+                    val cy = size.height * 0.40f
+                    val radius = size.minDimension * 0.30f
+                    drawSuccessAperture(cx, cy, radius, celebrate, a)
                 }
                 Column(
                     Modifier.fillMaxSize().systemBarsPadding().padding(24.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    Spacer(Modifier.weight(0.62f))
+                    Spacer(Modifier.weight(0.60f))
+                    // BOX FOUND lands with an overshoot once the iris is opening (a > ~0.4)
+                    val titleIn = ((a - 0.38f) / 0.25f).coerceIn(0f, 1f)
+                    val pop = if (titleIn <= 0f) 0f else 1f + 0.12f * kotlin.math.sin(titleIn * Math.PI.toFloat())
                     Column(
                         Modifier
+                            .graphicsLayer { scaleX = pop; scaleY = pop; alpha = titleIn }
                             .background(Void.copy(alpha = 0.72f), MaterialTheme.shapes.small)
-                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                            .padding(horizontal = 18.dp, vertical = 12.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
-                        Text("BOX FOUND", color = TerminalGreen, style = MaterialTheme.typography.headlineSmall)
-                        Spacer(Modifier.height(4.dp))
-                        Text("connecting to $boxLabel…", color = GhostTextDim, style = MaterialTheme.typography.bodyMedium)
+                        Text("✓ BOX FOUND", color = TerminalGreen, style = MaterialTheme.typography.headlineSmall)
+                        Spacer(Modifier.height(6.dp))
+                        // the address types itself out as the iris opens
+                        val shown = (addr.length * ((a - 0.45f) / 0.35f).coerceIn(0f, 1f)).toInt()
+                        Text("→ " + addr.take(shown) + (if (shown < addr.length) "▋" else ""),
+                            color = GhostText, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                            style = MaterialTheme.typography.bodyMedium)
+                        if (fp.length >= 16) {
+                            Spacer(Modifier.height(10.dp))
+                            Text("pinned identity", color = TerminalDim,
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                style = MaterialTheme.typography.labelSmall)
+                            // the fingerprint fills in group by group
+                            val groups = groupHex(fp).split(" ")
+                            val reveal = (groups.size * ((a - 0.5f) / 0.4f).coerceIn(0f, 1f)).toInt().coerceIn(0, groups.size)
+                            Text(groups.take(reveal).joinToString(" "), color = TerminalGreen, textAlign = TextAlign.Center,
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                style = MaterialTheme.typography.labelSmall)
+                        }
                     }
-                    Spacer(Modifier.weight(0.38f))
+                    Spacer(Modifier.weight(0.40f))
                 }
             }
         }
     }
+}
+
+/** The box's fingerprint in short groups, so the pinned identity is readable on the success screen. */
+private fun groupHex(fp: String): String {
+    val hex = fp.filter { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' }.lowercase()
+    val shown = hex.take(32)
+    return shown.chunked(4).joinToString(" ")
 }
 
 /**
@@ -872,38 +828,6 @@ private fun quadLooksSquare(q: List<com.localghost.app.qr.QrSampler.FinderPoint>
     return maxOf(d1, d2) / minOf(d1, d2).coerceAtLeast(1f) <= 1.45f
 }
 
-/**
- * The ghosts' backdrop: a deep void heart with a faint, slowly breathing mist ring in the ghost's own
- * colour, so it reads over a bright or busy camera frame and looks properly haunted rather than like a
- * drop shadow. Everything is radial and fades to transparent, keeping the AR feel. `t` is any advancing
- * animation clock (orbit for the angry ghost, the celebration clock for the happy one).
- */
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSpookyHalo(
-    cx: Float, cy: Float, s: Float,
-    tint: androidx.compose.ui.graphics.Color, t: Float,
-) {
-    val centre = androidx.compose.ui.geometry.Offset(cx, cy)
-    val breathe = 0.9f + 0.1f * kotlin.math.sin(t * 5.3f)   // slow candle-flicker of the mist
-    // Outer spectral mist: transparent at the heart, faint tint mid-ring, gone at the edge.
-    drawCircle(
-        brush = androidx.compose.ui.graphics.Brush.radialGradient(
-            0.0f to androidx.compose.ui.graphics.Color.Transparent,
-            0.55f to tint.copy(alpha = 0.13f * breathe),
-            1.0f to androidx.compose.ui.graphics.Color.Transparent,
-            center = centre, radius = s * 3.1f,
-        ),
-        radius = s * 3.1f, center = centre,
-    )
-    // Deep void heart, darker than a shadow , the gloom the ghost brought with it.
-    drawCircle(
-        brush = androidx.compose.ui.graphics.Brush.radialGradient(
-            colors = listOf(Void.copy(alpha = 0.80f), Void.copy(alpha = 0.42f), androidx.compose.ui.graphics.Color.Transparent),
-            center = centre, radius = s * 2.2f,
-        ),
-        radius = s * 2.2f, center = centre,
-    )
-}
-
 private fun mapPointsToView(
     points: List<com.localghost.app.qr.QrSampler.FinderPoint>,
     frameW: Int,
@@ -945,143 +869,6 @@ private const val FOUND_TIMEOUT_MS = 1500L
  *  the hunting rate once the code has genuinely left the frame. */
 private const val DETECT_WINDOW_MS = 700L
 
-/** The ghost silhouette body (dome top, scalloped bottom), centred at (cx, cy), size s. */
-private fun ghostBody(cx: Float, cy: Float, s: Float): androidx.compose.ui.graphics.Path =
-    androidx.compose.ui.graphics.Path().apply {
-        moveTo(cx - s, cy + s)
-        cubicTo(cx - s, cy - s * 1.3f, cx + s, cy - s * 1.3f, cx + s, cy + s)
-        val n = 3
-        val step = (2 * s) / n
-        var x = cx + s
-        for (i in 0 until n) {
-            val nx = x - step
-            val midY = if (i % 2 == 0) cy + s * 1.35f else cy + s * 0.75f
-            quadraticTo((x + nx) / 2f, midY, nx, cy + s)
-            x = nx
-        }
-        close()
-    }
-
-/**
- * The brand ghost, ANGRY variant: bigger, filled, vibrating with rage. Centred at (cx, cy). The body
- * is filled (so it reads as solid and full, not a wisp), with a darker fill under a bright outline.
- * Angry V-brows, hard eyes, a jagged grimace, and anger marks puffing off the head that pulse with the
- * phase. Pure Canvas so it animates wherever the hover/jitter puts it.
- */
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawAngryGhost(
-    cx: Float, cy: Float, s: Float, color: androidx.compose.ui.graphics.Color, phase: Float, rage: Float,
-) {
-    val body = ghostBody(cx, cy, s)
-    // fill first (alpha grows with rage so it reads more solid and hot), then a bright outline
-    drawPath(body, color.copy(alpha = 0.22f + 0.3f * rage), style = androidx.compose.ui.graphics.drawscope.Fill)
-    drawPath(body, color, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 4f))
-
-    // angry eyebrows: two strokes angled down toward the centre (a scowl), steeper as rage climbs
-    val browY = cy - s * 0.32f
-    val eo = s * 0.40f
-    val bl = s * 0.34f
-    val tilt = bl * (0.35f + 0.4f * rage)
-    drawLine(color,
-        androidx.compose.ui.geometry.Offset(cx - eo - bl / 2, browY - tilt),
-        androidx.compose.ui.geometry.Offset(cx - eo + bl / 2, browY + tilt), strokeWidth = 5f)
-    drawLine(color,
-        androidx.compose.ui.geometry.Offset(cx + eo - bl / 2, browY + tilt),
-        androidx.compose.ui.geometry.Offset(cx + eo + bl / 2, browY - tilt), strokeWidth = 5f)
-
-    // hard round eyes under the brows
-    val eyeY = cy - s * 0.05f
-    drawCircle(color, radius = s * 0.16f, center = androidx.compose.ui.geometry.Offset(cx - eo, eyeY))
-    drawCircle(color, radius = s * 0.16f, center = androidx.compose.ui.geometry.Offset(cx + eo, eyeY))
-
-    // a jagged, gritted grimace (zig-zag) across the lower face
-    val mouth = androidx.compose.ui.graphics.Path().apply {
-        val mw = s * 0.7f
-        val my = cy + s * 0.42f
-        val left = cx - mw / 2f
-        moveTo(left, my)
-        val teeth = 4
-        val tw = mw / teeth
-        for (i in 0 until teeth) {
-            val x1 = left + tw * (i + 0.5f)
-            val x2 = left + tw * (i + 1f)
-            lineTo(x1, my - s * 0.14f)
-            lineTo(x2, my)
-        }
-    }
-    drawPath(mouth, color, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f))
-
-    // anger marks: jagged sparks puffing off the head, MORE of them and longer as rage climbs
-    val pulse = 0.6f + 0.4f * kotlin.math.sin(phase * 4f)
-    val markR = s * (1.15f + 0.12f * pulse)
-    val markLen = s * (0.22f + 0.4f * rage) * pulse
-    val count = 4 + (rage * 6f).toInt()
-    for (i in 0 until count) {
-        val a = (i.toFloat() / count) * (2f * Math.PI.toFloat()) + phase * 0.5f
-        val bx = cx + markR * kotlin.math.cos(a)
-        val by = cy + markR * kotlin.math.sin(a)
-        drawLine(color,
-            androidx.compose.ui.geometry.Offset(bx, by),
-            androidx.compose.ui.geometry.Offset(bx + markLen * kotlin.math.cos(a), by + markLen * kotlin.math.sin(a)),
-            strokeWidth = 3f)
-    }
-}
-
-/** Short angry thing the scanned code "shouts" from the bubble, by kind. Keep it punchy. */
-private fun shoutFor(g: com.localghost.app.qr.QrGuess): String = when {
-    g.label.contains("link", true) || g.label.contains("web", true) -> "I'm just a website!"
-    g.label.contains("wifi", true) -> "I'm someone's WiFi!"
-    g.label.contains("contact", true) || g.label.contains("card", true) -> "I'm a business card!"
-    g.label.contains("text", true) -> "I'm just text!"
-    else -> "Wrong code!"
-}
-
-/**
- * A small speech bubble centred above (cx, cy) holding the shout. Rounded rect with a downward tail,
- * text drawn via the native canvas. Bobs gently on the phase so it feels alive.
- */
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSpeechBubble(
-    cx: Float, cy: Float, text: String, color: androidx.compose.ui.graphics.Color, phase: Float,
-) {
-    val paint = android.graphics.Paint().apply {
-        isAntiAlias = true
-        textSize = 30f
-        typeface = android.graphics.Typeface.MONOSPACE
-        this.color = android.graphics.Color.argb(255, (color.red * 255).toInt(), (color.green * 255).toInt(), (color.blue * 255).toInt())
-    }
-    val bob = kotlin.math.sin(phase * 2f) * 3f
-    val tw = paint.measureText(text)
-    val padX = 18f; val padY = 12f
-    val bw = tw + padX * 2
-    val bh = 30f + padY * 2
-    val left = cx - bw / 2f
-    val top = cy - bh / 2f + bob
-    // bubble background (dark) and outline
-    val rect = androidx.compose.ui.geometry.Rect(left, top, left + bw, top + bh)
-    val corner = androidx.compose.ui.geometry.CornerRadius(12f, 12f)
-    drawRoundRect(
-        color = androidx.compose.ui.graphics.Color(0xFF101418),
-        topLeft = androidx.compose.ui.geometry.Offset(rect.left, rect.top),
-        size = androidx.compose.ui.geometry.Size(bw, bh), cornerRadius = corner,
-    )
-    drawRoundRect(
-        color = color,
-        topLeft = androidx.compose.ui.geometry.Offset(rect.left, rect.top),
-        size = androidx.compose.ui.geometry.Size(bw, bh), cornerRadius = corner,
-        style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f),
-    )
-    // downward tail toward the ghost
-    val tail = androidx.compose.ui.graphics.Path().apply {
-        moveTo(cx - 10f, top + bh)
-        lineTo(cx + 10f, top + bh)
-        lineTo(cx, top + bh + 16f)
-        close()
-    }
-    drawPath(tail, androidx.compose.ui.graphics.Color(0xFF101418))
-    drawPath(tail, color, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f))
-    // text
-    drawContext.canvas.nativeCanvas.drawText(text, left + padX, top + padY + 24f, paint)
-}
-
 /**
  * A clean AR "locked on" reticle: four L-shaped corner brackets at the detected quad's corners, with
  * a faint connecting outline. pulse (0..1) gently breathes the bracket length and alpha so it reads as
@@ -1113,76 +900,6 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawReticle(
     }
 }
 
-
-/**
- * Draws celebratory fireworks across the frame when an enrol scan succeeds: several bursts at
- * staggered times and fixed pseudo-random positions, each throwing a ring of fading sparks outward.
- * Driven by a single rising clock t, so it keeps going for the ~2.6s the success animation runs.
- */
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawFireworks(w: Float, h: Float, t: Float) {
-    fun frac(x: Float) = x - kotlin.math.floor(x)
-    val colors = listOf(
-        TerminalGreen,
-        androidx.compose.ui.graphics.Color(0xFFFFE066), // gold
-        androidx.compose.ui.graphics.Color(0xFF66FFCC), // mint
-        androidx.compose.ui.graphics.Color(0xFF66D9FF), // sky
-        androidx.compose.ui.graphics.Color(0xFFFF6FB5), // pink
-        androidx.compose.ui.graphics.Color(0xFFB388FF), // violet
-        androidx.compose.ui.graphics.Color(0xFFFF9E4D), // orange
-        androidx.compose.ui.graphics.Color(0xFF4DFFA6), // spring
-        Warning,                                        // amber
-    )
-    val bursts = 12
-    for (b in 0 until bursts) {
-        val seed = b * 97.13f
-        val bx = (0.08f + 0.84f * frac(kotlin.math.sin(seed) * 4391.7f)) * w
-        val by = (0.08f + 0.62f * frac(kotlin.math.cos(seed * 1.7f) * 2917.3f)) * h
-        val cycle = 1.4f
-        val local = (t - b * 0.13f) % cycle   // tighter stagger => more bursts alive at once
-        if (local < 0f || local > 1f) continue
-        val p = local                          // 0..1 burst progress
-        val col = colors[b % colors.size]
-        val rays = 12 + (b % 4) * 3            // 12..21 rays, varied per burst
-        val radius = p * (80f + (b % 4) * 28f)
-        val alpha = (1f - p).coerceIn(0f, 1f)
-        val spark = 2.5f + 2f * (1f - p)
-        for (i in 0 until rays) {
-            val a = (i.toFloat() / rays) * (2f * Math.PI.toFloat()) + b * 0.3f
-            val ca = kotlin.math.cos(a); val sa = kotlin.math.sin(a)
-            drawLine(
-                col.copy(alpha = alpha * 0.55f),
-                androidx.compose.ui.geometry.Offset(bx + radius * 0.5f * ca, by + radius * 0.5f * sa),
-                androidx.compose.ui.geometry.Offset(bx + radius * ca, by + radius * sa),
-                strokeWidth = 2f,
-            )
-            drawCircle(col.copy(alpha = alpha), radius = spark, center = androidx.compose.ui.geometry.Offset(bx + radius * ca, by + radius * sa))
-        }
-        // bright flash at the burst centre in its first moments
-        if (p < 0.25f) {
-            drawCircle(col.copy(alpha = (1f - p / 0.25f) * 0.8f), radius = 5f, center = androidx.compose.ui.geometry.Offset(bx, by))
-        }
-    }
-}
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawHappyGhost(
-    cx: Float, cy: Float, s: Float, color: androidx.compose.ui.graphics.Color,
-) {
-    val body = ghostBody(cx, cy, s)
-    val outline = (s * 0.04f).coerceAtLeast(3f)
-    // faint fill so a big ghost reads as solid rather than a wisp, then a crisp outline
-    drawPath(body, color.copy(alpha = 0.16f), style = androidx.compose.ui.graphics.drawscope.Fill)
-    drawPath(body, color, style = androidx.compose.ui.graphics.drawscope.Stroke(width = outline))
-    val eyeY = cy - s * 0.10f
-    val eo = s * 0.40f
-    // big round happy eyes
-    drawCircle(color, radius = s * 0.14f, center = androidx.compose.ui.geometry.Offset(cx - eo, eyeY))
-    drawCircle(color, radius = s * 0.14f, center = androidx.compose.ui.geometry.Offset(cx + eo, eyeY))
-    // a big upturned smile
-    val smile = androidx.compose.ui.graphics.Path().apply {
-        moveTo(cx - s * 0.42f, cy + s * 0.28f)
-        quadraticTo(cx, cy + s * 0.86f, cx + s * 0.42f, cy + s * 0.28f)
-    }
-    drawPath(smile, color, style = androidx.compose.ui.graphics.drawscope.Stroke(width = (s * 0.05f).coerceAtLeast(3f)))
-}
 
 /** Pull luminance from the frame, sample candidate grids, and let our decoder pick the real one. */
 // Reusable per-frame buffers. The analyser runs on a single thread, so one set of buffers can be
@@ -1344,4 +1061,115 @@ private fun tryDecode(proxy: ImageProxy, frames: com.localghost.app.qr.FrameAsse
 /** Thread-safe holder for the latest scan-pipeline diagnostic, read by the status line. */
 private object ScanDiag {
     @Volatile var last: String = "starting"
+}
+
+// --- the vault aperture drawn over the code, in the unlock's language (QrApertureModel) ---
+
+/**
+ * The aperture around a code the scanner is reading. A ring of twelve segments: the lit ones bright,
+ * the rest a faint outline, so a multi-frame enrolment fills the ring as its frames land. A scan tick
+ * sweeps the ring as it turns. Red (wrong == true) when a code read but is not the way in. On a fresh
+ * frame capture (justCaptured) the whole ring flares for a beat.
+ */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawAperture(
+    cx: Float, cy: Float, radius: Float,
+    tint: androidx.compose.ui.graphics.Color, spin: Float, lit: Int, wrong: Boolean, justCaptured: Boolean,
+) {
+    val centre = androidx.compose.ui.geometry.Offset(cx, cy)
+    val segs = QrApertureModel.SEGMENTS
+    val gap = 6f                       // degrees of gap between segments
+    val sweep = 360f / segs - gap
+    val stroke = radius * 0.10f
+    val topLeft = androidx.compose.ui.geometry.Offset(cx - radius, cy - radius)
+    val arcSize = androidx.compose.ui.geometry.Size(radius * 2, radius * 2)
+    val flare = if (justCaptured) 0.35f else 0f
+    for (i in 0 until segs) {
+        val start = QrApertureModel.segmentAngle(i, segs) - sweep / 2f + spin * 0.15f
+        val on = i < lit
+        val alpha = when {
+            on -> (0.85f + flare).coerceAtMost(1f)
+            else -> 0.16f
+        }
+        drawArc(
+            color = tint.copy(alpha = alpha),
+            startAngle = start, sweepAngle = sweep, useCenter = false,
+            topLeft = topLeft, size = arcSize,
+            style = androidx.compose.ui.graphics.drawscope.Stroke(width = if (on) stroke else stroke * 0.5f,
+                cap = androidx.compose.ui.graphics.StrokeCap.Round),
+        )
+    }
+    // a bright scan tick that sweeps the ring while it reads (not when wrong)
+    if (!wrong) {
+        val a = Math.toRadians((spin % 360f - 90f).toDouble())
+        val p = androidx.compose.ui.geometry.Offset(cx + (radius * kotlin.math.cos(a)).toFloat(),
+            cy + (radius * kotlin.math.sin(a)).toFloat())
+        drawCircle(tint, radius * 0.06f, p)
+    }
+    // a faint corner-crosshair in the middle so the code is clearly the target
+    val c = radius * 0.16f
+    val cw = radius * 0.03f
+    for (s in listOf(-1f, 1f)) {
+        drawLine(tint.copy(alpha = 0.5f), androidx.compose.ui.geometry.Offset(cx + s * c, cy),
+            androidx.compose.ui.geometry.Offset(cx + s * c * 0.4f, cy), cw)
+        drawLine(tint.copy(alpha = 0.5f), androidx.compose.ui.geometry.Offset(cx, cy + s * c),
+            androidx.compose.ui.geometry.Offset(cx, cy + s * c * 0.4f), cw)
+    }
+}
+
+/**
+ * The success aperture, in the unlock's iris language. Over [t] (0..1, the whole ~2.6s):
+ *   0.00..0.40  the twelve segments finish, hold lit, and give one bright pulse , the lock is made;
+ *   0.40..1.00  the whole lit ring blows OPEN , it scales outward and fades while a green bloom
+ *               swells from the centre and a bright shockwave ring races out past it, the camera
+ *               there behind the opening.
+ * shimmer is a free clock for a faint breathe on the held ring. Nothing is drawn opaque , the AR
+ * camera stays visible throughout, which is the whole point.
+ */
+private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawSuccessAperture(
+    cx: Float, cy: Float, radius: Float, shimmer: Float, t: Float,
+) {
+    val centre = androidx.compose.ui.geometry.Offset(cx, cy)
+    val tint = TerminalGreen
+    val segs = QrApertureModel.SEGMENTS
+    val gap = 4f
+    val sweep = 360f / segs - gap
+    val hold = (t / 0.40f).coerceIn(0f, 1f)         // 0..1 over the make
+    val open = ((t - 0.40f) / 0.60f).coerceIn(0f, 1f) // 0..1 over the blow-open
+    val eased = 1f - (1f - open) * (1f - open)         // ease-out, like the unlock iris
+
+    // the lit ring: held tight while the lock is made, then scaling out (1x -> 2.4x) and fading
+    val pulse = if (t < 0.42f) 0.85f + 0.15f * kotlin.math.sin(shimmer * 3f) else 1f
+    val r = radius * (1f - 0.08f * hold) * (1f + 1.4f * eased)
+    val ringAlpha = (1f - eased) * pulse
+    if (ringAlpha > 0.01f) {
+        val stroke = radius * 0.11f * (1f - 0.4f * eased)
+        val topLeft = androidx.compose.ui.geometry.Offset(cx - r, cy - r)
+        val arcSize = androidx.compose.ui.geometry.Size(r * 2, r * 2)
+        for (i in 0 until segs) {
+            val start = QrApertureModel.segmentAngle(i, segs) - sweep / 2f + eased * 24f // a slight twist as it opens
+            drawArc(color = tint.copy(alpha = 0.9f * ringAlpha), startAngle = start, sweepAngle = sweep, useCenter = false,
+                topLeft = topLeft, size = arcSize,
+                style = androidx.compose.ui.graphics.drawscope.Stroke(width = stroke, cap = androidx.compose.ui.graphics.StrokeCap.Round))
+        }
+    }
+
+    // the bloom from the centre , brightest at the moment of opening, then gone
+    val bloom = kotlin.math.sin(eased * Math.PI.toFloat())
+    if (bloom > 0.01f) {
+        val br = radius * (0.6f + 1.6f * eased)
+        drawCircle(
+            brush = androidx.compose.ui.graphics.Brush.radialGradient(
+                0.0f to tint.copy(alpha = 0.28f * bloom),
+                0.6f to tint.copy(alpha = 0.10f * bloom),
+                1.0f to androidx.compose.ui.graphics.Color.Transparent,
+                center = centre, radius = br),
+            radius = br, center = centre)
+    }
+
+    // the shockwave: a bright thin ring racing out past the opening
+    if (open > 0.01f) {
+        val wr = radius * (0.4f + 3.0f * eased)
+        drawCircle(color = tint.copy(alpha = (1f - eased) * 0.7f), radius = wr, center = centre,
+            style = androidx.compose.ui.graphics.drawscope.Stroke(width = radius * 0.05f * (1f - eased)))
+    }
 }

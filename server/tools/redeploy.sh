@@ -270,23 +270,33 @@ if [ -x "$REPO/bin/ghost-update-guard" ]; then
     # once per start: a unit rendered since 30 Sep 2026 has the line itself, older ones get a drop-in
     if grep -q ghost-update-guard /etc/systemd/system/ghost.secd.service 2>/dev/null; then
         rm -f /etc/systemd/system/ghost.secd.service.d/update-guard.conf
+        echo "update guard: $SYSTEM_BIN/ghost-update-guard (the unit runs it)"
     else
         printf '[Unit]\nStartLimitIntervalSec=120\nStartLimitBurst=20\n[Service]\nExecStartPre=-%s/ghost-update-guard\n' "$SYSTEM_BIN" > /etc/systemd/system/ghost.secd.service.d/update-guard.conf
+        echo "update guard: $SYSTEM_BIN/ghost-update-guard (unit drop-in update-guard.conf)"
     fi
+else
+    echo "update guard: NOT installed (no bin/ghost-update-guard; was the build skipped?)"
 fi
 # THE UPDATER'S TOOLS, where secd can run them (it cannot see /home): the mirror's verifier and the
 # site key it pins, for a release the phone hands the box (secd update_http.go)
 install -d -m755 /opt/localghost/tools
 for t in mirror_fetch.sh mirror-key.asc; do
-    [ -e "$REPO/tools/$t" ] && install -m644 "$REPO/tools/$t" "/opt/localghost/tools/$t"
+    if [ -e "$REPO/tools/$t" ]; then
+        install -m644 "$REPO/tools/$t" "/opt/localghost/tools/$t"
+    else
+        echo "update tools: $t is not in the repo , a release from the phone cannot be checked until it is"
+    fi
 done
 chmod 755 /opt/localghost/tools/mirror_fetch.sh 2>/dev/null || true
+[ -e /opt/localghost/tools/mirror_fetch.sh ] && [ -e /opt/localghost/tools/mirror-key.asc ] &&
+    echo "update tools: mirror_fetch.sh + the site key in /opt/localghost/tools"
 systemctl daemon-reload
 echo "systemctl restart ghost.secd"
 systemctl restart ghost.secd
 echo "restart returned"
 sleep 1
-systemctl --no-pager --lines=0 status ghost.secd 2>/dev/null | head -3 || true
+systemctl --no-pager --lines=0 status ghost.secd 2>/dev/null | head -5 || true
 
 cat <<EOF
 

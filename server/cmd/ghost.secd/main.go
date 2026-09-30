@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -32,7 +33,7 @@ import (
 
 func main() {
 	harden.NoDump() // same-user processes cannot read this one through /proc; no core file
-	addr := flag.String("addr", "127.0.0.1:8443", "listen address (behind nginx, which terminates public TLS)")
+	addr := flag.String("addr", "127.0.0.1:8443", "listen address: the phone's TLS forwarded raw by nginx (stream, by name), or plain HTTP from the old nginx site until /etc/ghost/edge says tls")
 	stateDir := flag.String("state", "/var/lib/ghost", "unencrypted state dir (certs, models)")
 	disk := flag.String("disk", os.Getenv("GHOST_DISK"), "the raw LUKS data disk to mount on unlock (e.g. /dev/nvme1n1); defaults to $GHOST_DISK")
 	runUser := flag.String("user", os.Getenv("GHOST_RUN_USER"), "run the ghost.*d cohort as this user (default: the ghost user); defaults to $GHOST_RUN_USER")
@@ -47,11 +48,13 @@ func main() {
 	httpSrv := &http.Server{
 		Addr:    *addr,
 		Handler: srv.Handler(),
-		// ReadHeaderTimeout only , protects against a stalled header phase without touching body
-		// reads. Deliberately NO ReadTimeout/WriteTimeout: a 4K video upload streams for minutes, and
-		// a body timeout would kill it mid-flight. nginx fronts this listener and applies its own
-		// client pacing; enrolled devices are the only things that get this far.
+		// ReadHeaderTimeout only , protects against a stalled header phase (and bounds the TLS
+		// handshake) without touching body reads. Deliberately NO ReadTimeout/WriteTimeout: a 4K
+		// video upload streams for minutes, and a body timeout would kill it mid-flight.
 		ReadHeaderTimeout: 10 * time.Second,
+		// "TLS handshake error from <address>" for every scanner on the internet would put their
+		// addresses in the OS disk's journal; the rest of what net/http logs stays
+		ErrorLog: log.New(quietHandshakes{}, "ghost.secd http: ", 0),
 	}
 
 	// Control socket for ghost-cli, on the UNENCRYPTED state dir (not the volume): secd is the one
@@ -71,6 +74,12 @@ func main() {
 	})
 	cli.Handle("status", func(json.RawMessage) (ctlsock.Response, error) {
 		data, _ := json.Marshal(srv.Status())
+		return ctlsock.Response{OK: true, Data: data}, nil
+	})
+	// edge: how the phone reaches secd , its own TLS or the old nginx header , and whether the
+	// switch is safe (ghost-ctl edge-passthrough reads this before it changes nginx)
+	cli.Handle("edge", func(json.RawMessage) (ctlsock.Response, error) {
+		data, _ := json.Marshal(srv.Edge())
 		return ctlsock.Response{OK: true, Data: data}, nil
 	})
 	// halt: the MAINTENANCE stop , everything down, volume stays mounted, resume by PIN unlock.
@@ -132,8 +141,19 @@ func main() {
 		log.Fatal(err)
 	}
 	secd.NotifyReady()
-	if err := httpSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
+	if err := httpSrv.Serve(srv.Listener(ln)); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
 	log.Printf("ghost.secd stopped")
+}
+
+// quietHandshakes drops net/http's per-connection TLS handshake errors (they name the client's
+// address) and passes everything else to stderr.
+type quietHandshakes struct{}
+
+func (quietHandshakes) Write(p []byte) (int, error) {
+	if strings.Contains(string(p), "TLS handshake error") {
+		return len(p), nil
+	}
+	return os.Stderr.Write(p)
 }

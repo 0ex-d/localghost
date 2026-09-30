@@ -51,6 +51,8 @@ func main() {
 		restartDaemon(os.Args[2:])
 	case "daemon-status":
 		daemonStatus(os.Args[2:])
+	case "edge-passthrough":
+		edgePassthrough(os.Args[2:])
 	default:
 		usage()
 	}
@@ -63,6 +65,8 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  migrate-to-software [flags]   re-wrap the disk key from the TPM into the software tier")
 	fmt.Fprintln(os.Stderr, "  restart-daemon <name> [flags] restart one ghost.*d daemon via watchd (deploy: drop new binary, restart)")
 	fmt.Fprintln(os.Stderr, "  daemon-status [flags]         show the supervised cohort's state from watchd")
+	fmt.Fprintln(os.Stderr, "  edge-passthrough --domain X   nginx forwards the phone's raw TLS to ghost.secd by name; other sites move to :4443")
+	fmt.Fprintln(os.Stderr, "  edge-passthrough --undo       put the nginx config back the way it was")
 	fmt.Fprintln(os.Stderr, "migration never touches the disk , the LUKS key is re-wrapped, not changed")
 	os.Exit(2)
 }

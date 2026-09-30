@@ -36,6 +36,23 @@ object UnlockTidbits {
 
     private fun pct(m: ModelLoad): String = if (m.pct in 1..99) ": ${m.pct}%" else ""
 
+    /**
+     * Why a step takes the time it does, in one plain clause, for the steps where the wait is real
+     * work rather than a formality. Shown under [doing] so a step that sits for a second or two
+     * reads as "this is doing something", not "this is stuck". "" for the quick steps.
+     */
+    fun why(stage: UnlockStage?): String = when (stage) {
+        UnlockStage.RESOLVE -> "the box checks the PIN in its secure chip, which answers at its own pace so guesses cannot be rushed"
+        UnlockStage.UNSEAL -> "the key is unwrapped from the secure chip, the one step that turns your PIN into the key to the store"
+        UnlockStage.MOUNT -> "the encrypted store is opened and checked before anything reads from it"
+        UnlockStage.START_DB -> "Postgres opens its files and replays anything it had not finished writing"
+        UnlockStage.START_CACHE -> "each service comes up in turn: photos, search, memories, voice"
+        UnlockStage.DAEMONS -> "the box waits for every service to report it is ready"
+        UnlockStage.STOP_DB -> "Postgres writes its last checkpoint so nothing is lost before the store closes"
+        UnlockStage.UNMOUNT -> "the store is closed and the key wiped from memory"
+        else -> ""
+    }
+
     /** Things the app does that are easy to miss. Each names where to find it. */
     val tips: List<String> = listOf(
         "record a voice note on the daily check-in in MEMORIES; the box writes it down for you",

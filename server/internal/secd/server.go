@@ -34,6 +34,7 @@ type Server struct {
 	unlock         *unlockService
 	session        *sessionManager // the one live session token (foreground + poller share it)
 	retired        retiredCerts    // device certificates replaced by a rotation: answered as if down
+	edge           edgeState       // the phone's TLS, served here (edge.go)
 	upd            updateState     // a server release put on from the phone (update_http.go)
 	mute           *hw.MuteStore   // notification mute read/write (in-volume Postgres/Redis), per scope
 	notif          *hw.NotifStore  // notification produce/read/seen/delete (in-volume Postgres/Redis)
@@ -86,7 +87,8 @@ type Config struct {
 	StateDir string // unencrypted: /var/lib/ghost (certs, models)
 	Disk     string // the raw LUKS-formatted data disk, e.g. /dev/nvme1n1 (used by the TPM backend)
 	RunUser  string // if set (--user <name>), watchd runs the ghost.*d cohort as this user
-	CaDir    string // the box CA for device key rotation (rekey.go); empty: /etc/ghost/ca
+	CaDir    string // the box CA for device key rotation (rekey.go) and secd's TLS (edge.go); empty: /etc/ghost/ca
+	EdgeFile string // "tls" in it: plain HTTP is refused (edge.go); empty: /etc/ghost/edge
 }
 
 // StatusView is the front-door state ghost-cli reads over secd's control socket. It works even when
@@ -319,21 +321,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/models", s.handleModels)
 	mux.HandleFunc("/v1/models/", s.handleModelBytes) // /v1/models/{id}
 	mux.HandleFunc("/v1/openapi.json", s.handleOpenAPI)
-	// Observe verified clients: the first request nginx forwards with a verified client cert means a
-	// phone finished enrolment. Mark it (best-effort) so provisioning can stop rotating the QR. This
-	// wraps every route and changes no response , purely a side signal.
-	observed := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// a certificate replaced by a rotation (rekey.go) reaches nothing, the unlock included
-		if s.retired.has(certID(r)) {
-			s.appearsDown(w)
-			return
-		}
-		if verifiedClient(r) {
-			s.noteVerifiedDevice()
-		}
-		mux.ServeHTTP(w, r)
-	})
-	return logRequests(observed)
+	// The front door (edge.go): who is asking, from the phone's own TLS or the old nginx header; a
+	// certificate replaced by a rotation (rekey.go) reaches nothing, the unlock included; the first
+	// verified request marks enrolment done for provisioning (enrolflag.go).
+	return logRequests(s.front(mux))
 }
 
 // handleHealth is the cheap reachability check the app's reachable() calls. It needs no account.

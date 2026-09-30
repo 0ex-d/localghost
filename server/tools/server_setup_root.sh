@@ -180,27 +180,40 @@ else
     echo "  WARNING: no /dev/tpmrm0 (enable Intel PTT / firmware TPM in BIOS)"
 fi
 
-# --- scoped sudo: ghost.* service management for the service user (nginx is already granted) ---
-echo "> Scoped sudo for $SVC_USER to manage ghost.* services..."
+# --- scoped sudo: ONE unit, by exact name, for the service user (nginx is already granted) ---
+# ghost.secd is the only LocalGhost systemd unit , ghost.watchd and the cohort are its children, not
+# units , so the service user needs to manage that one and nothing else. The old rule used
+# "ghost.*", where the "*" also matches a trailing " -H other.host", " -M container" or extra
+# arguments, so it let the service user reach systemctl options it was never meant to. Named units,
+# no wildcard, and only the verbs a deploy uses (restart, status, start, stop, plus daemon-reload
+# for a changed unit). enable/disable are a one-time admin action, left to root.
+echo "> Scoped sudo for $SVC_USER to manage ghost.secd (exact unit, no wildcard)..."
 SYSTEMCTL="$(command -v systemctl || echo /usr/bin/systemctl)"
 SUDOERS=/etc/sudoers.d/localghost-services
-if [ "$DRY" = 1 ]; then
-    echo "  [would] write $SUDOERS granting $SVC_USER passwordless: $SYSTEMCTL {start,stop,restart,status,enable,disable} ghost.* + daemon-reload"
-    echo "  [would] validate it with visudo -c (and delete it if invalid)"
-else
-cat > "$SUDOERS" <<EOF
-# LocalGhost: let $SVC_USER manage ONLY ghost.* systemd units (and daemon-reload). Narrow by design.
-# nginx access is NOT here , $SVC_USER already has its own nginx deploy sudo rule on this box.
-$SVC_USER ALL=(root) NOPASSWD: $SYSTEMCTL start ghost.*
-$SVC_USER ALL=(root) NOPASSWD: $SYSTEMCTL stop ghost.*
-$SVC_USER ALL=(root) NOPASSWD: $SYSTEMCTL restart ghost.*
-$SVC_USER ALL=(root) NOPASSWD: $SYSTEMCTL status ghost.*
-$SVC_USER ALL=(root) NOPASSWD: $SYSTEMCTL enable ghost.*
-$SVC_USER ALL=(root) NOPASSWD: $SYSTEMCTL disable ghost.*
+write_sudoers() {
+    cat <<EOF
+# LocalGhost: let $SVC_USER manage ONLY the ghost.secd unit (and reload a changed unit file). Narrow
+# by design , exact names, no wildcard (a "ghost.*" pattern also matches extra systemctl arguments).
+# nginx access is NOT here , $SVC_USER has its own nginx deploy rule on this box.
+$SVC_USER ALL=(root) NOPASSWD: $SYSTEMCTL restart ghost.secd, $SYSTEMCTL restart ghost.secd.service
+$SVC_USER ALL=(root) NOPASSWD: $SYSTEMCTL start ghost.secd, $SYSTEMCTL start ghost.secd.service
+$SVC_USER ALL=(root) NOPASSWD: $SYSTEMCTL stop ghost.secd, $SYSTEMCTL stop ghost.secd.service
+$SVC_USER ALL=(root) NOPASSWD: $SYSTEMCTL status ghost.secd, $SYSTEMCTL status ghost.secd.service
+$SVC_USER ALL=(root) NOPASSWD: $SYSTEMCTL --no-pager status ghost.secd, $SYSTEMCTL --no-pager status ghost.secd.service
 $SVC_USER ALL=(root) NOPASSWD: $SYSTEMCTL daemon-reload
 EOF
+}
+if [ "$DRY" = 1 ]; then
+    echo "  [would] write $SUDOERS granting $SVC_USER passwordless: $SYSTEMCTL {restart,start,stop,status} ghost.secd + daemon-reload (no wildcard)"
+    echo "  [would] validate it with visudo -c (and delete it if invalid)"
+else
+if [ -f "$SUDOERS" ] && grep -q 'ghost\.\*' "$SUDOERS"; then
+    cp -a "$SUDOERS" "$SUDOERS.wildcard-$(date -u +%Y%m%dT%H%M%SZ).bak"
+    echo "  the existing rule used ghost.* ; the old file is kept as $SUDOERS.wildcard-*.bak"
+fi
+write_sudoers > "$SUDOERS"
 chmod 440 "$SUDOERS"
-if visudo -c -f "$SUDOERS" >/dev/null 2>&1; then echo "  installed + validated $SUDOERS"
+if visudo -c -f "$SUDOERS" >/dev/null 2>&1; then echo "  installed + validated $SUDOERS (ghost.secd only, no wildcard)"
 else echo "  ERROR: sudoers validation failed; removing to avoid breaking sudo"; rm -f "$SUDOERS"; exit 1; fi
 fi
 

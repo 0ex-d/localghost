@@ -32,17 +32,19 @@ fun PinScreen(busy: Boolean, error: String?, progress: UnlockSnapshot?, opening:
         // lighting step by step, the bar, step x of y, the time left. At READY the rings open like
         // an iris ([opening]) and the app is behind them. A wrong code comes back with the keypad.
         if (busy && progress != null && progress.failed == null) {
+            // paced so each ring is readable even when a warm box finishes every step in one poll
+            val paced = rememberPaced(progress)
             Column(
                 Modifier.fillMaxSize().padding(pad).padding(horizontal = 32.dp),
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                VaultRings(progress, locking = false, release = opening,
+                VaultRings(paced, locking = false, release = opening && paced.done,
                     modifier = Modifier.fillMaxWidth(0.78f).widthIn(max = 300.dp).aspectRatio(1f))
                 Spacer(Modifier.height(20.dp))
                 Text("UNLOCKING", color = GhostText, style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(20.dp))
-                UnlockProgress(progress, modifier = Modifier.widthIn(max = 360.dp))
+                UnlockProgress(paced, modifier = Modifier.widthIn(max = 360.dp))
             }
         } else Column(
             Modifier.fillMaxSize().padding(pad)
