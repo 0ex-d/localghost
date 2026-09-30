@@ -3444,10 +3444,15 @@ tested; drawn in `ui/QrScanScreen.kt`):
   fragile, device-specific part, and it is gone from the scanning overlay);
 - one segment per frame: the eight fill as the box's rotating enrolment frames land (any eight of its
   twelve complete it), or all eight at once for a single clean code;
-- as it reads, the crosshair becomes a padlock , the QR shown as a lock, its body carrying a little
-  QR grid and its shackle closing as the frames come in, shut at eight (`drawQrLock`);
+- the middle stays a crosshair to aim with; each frame read flashes a green check on the code for
+  a beat, then it is the crosshair again (a padlock over the code was tried and read oddly, so the
+  lock lives in the found sequence instead, where it means "identity pinned");
 - a code that reads but is not a box turns the reticle red with one terse line ("that is a Wi-Fi
-  code, not a box"), no lock.
+  code, not a box").
+
+Once the whole code is found the camera is no longer needed: the screen darkens over the first
+quarter second (a near-opaque scrim) and the establishing sequence below plays on the dark, so its
+words read clearly.
 
 **The found sequence establishes an identity, it does not "open".** Vlad: it should be "more about
 establishing connection than opening ... this is establishing identity, slowly build out as we scan

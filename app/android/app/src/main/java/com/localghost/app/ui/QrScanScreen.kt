@@ -475,10 +475,10 @@ fun QrScanScreen(
                 val have = frameProgress?.first ?: 0
                 val want = frameProgress?.second ?: 1
                 val lit = if (wrong) 0 else QrApertureModel.litSegments(have, want)
-                val lockClose = if (wrong) 0f else QrApertureModel.progress(have, want)
                 val tint = if (wrong) AngryRed else TerminalGreen
-                val justCaptured = System.currentTimeMillis() - frameFlashAt < 350L
-                drawAperture(cx, cy, radius, tint, spin, lit, wrong, justCaptured, lockClose)
+                // a check flashes on the code each time a frame is read (fades over ~450ms)
+                val tick = (1f - (System.currentTimeMillis() - frameFlashAt) / 450f).coerceIn(0f, 1f)
+                drawAperture(cx, cy, radius, tint, spin, lit, wrong, tick)
             }
 
 
@@ -590,7 +590,10 @@ fun QrScanScreen(
             val a = enrolAnim.coerceIn(0f, 1f)
             val step = QrApertureModel.stepAt(a)
             val ready = QrApertureModel.ready(a)
-            Box(Modifier.fillMaxSize()) {
+            // the camera is not needed once the whole code is found: the screen darkens (fast, over
+            // the first ~250ms) so the establishing sequence and its words read clearly.
+            val scrim = (a / 0.10f).coerceIn(0f, 1f) * 0.94f
+            Box(Modifier.fillMaxSize().background(Void.copy(alpha = scrim))) {
                 Canvas(Modifier.fillMaxSize()) {
                     val cx = size.width / 2f
                     val cy = size.height * 0.40f
@@ -882,15 +885,15 @@ private object ScanDiag {
 // --- the vault aperture drawn over the code, in the unlock's language (QrApertureModel) ---
 
 /**
- * The aperture around a code the scanner is reading. A ring of twelve segments: the lit ones bright,
- * the rest a faint outline, so a multi-frame enrolment fills the ring as its frames land. A scan tick
- * sweeps the ring as it turns. Red (wrong == true) when a code read but is not the way in. On a fresh
- * frame capture (justCaptured) the whole ring flares for a beat.
+ * The aiming reticle, fixed in the centre of the screen. A ring of eight segments (one per frame):
+ * the lit ones bright, the rest a faint outline, so a multi-frame enrolment fills the ring as its
+ * frames land. A scan tick sweeps the ring as it turns. In the middle, a crosshair to aim; a green
+ * check flashes there on each frame read ([tick] 1..0 over its fade). Red (wrong == true) when a
+ * code read but is not the way in.
  */
 private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawAperture(
     cx: Float, cy: Float, radius: Float,
-    tint: androidx.compose.ui.graphics.Color, spin: Float, lit: Int, wrong: Boolean, justCaptured: Boolean,
-    lockClose: Float,
+    tint: androidx.compose.ui.graphics.Color, spin: Float, lit: Int, wrong: Boolean, tick: Float,
 ) {
     val segs = QrApertureModel.SEGMENTS   // eight, one per frame
     val gap = 10f                          // degrees of gap between segments
@@ -898,7 +901,7 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawAperture(
     val stroke = radius * 0.11f
     val topLeft = androidx.compose.ui.geometry.Offset(cx - radius, cy - radius)
     val arcSize = androidx.compose.ui.geometry.Size(radius * 2, radius * 2)
-    val flare = if (justCaptured) 0.35f else 0f
+    val flare = 0.35f * tick
     for (i in 0 until segs) {
         val start = QrApertureModel.segmentAngle(i, segs) - sweep / 2f + spin * 0.12f
         val on = i < lit
@@ -918,54 +921,25 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawAperture(
             androidx.compose.ui.geometry.Offset(cx + (radius * kotlin.math.cos(a)).toFloat(),
                 cy + (radius * kotlin.math.sin(a)).toFloat()))
     }
-    // THE MIDDLE. A crosshair to aim with; as the code is read it becomes a lock, the QR itself
-    // shown as a padlock closing (lockClose 0..1). Wrong codes stay a red crosshair, no lock.
-    val g = radius * 0.34f
-    val cross = if (wrong) 1f else (1f - lockClose)
-    if (cross > 0.02f) {
-        val c = g * 0.75f
+    // THE MIDDLE. Just a crosshair to aim at the QR , no lock over it. When a frame is read a green
+    // check flashes on the code (tick 1..0 over its fade), the only thing that appears in the centre.
+    val g = radius * 0.30f
+    if (tick > 0.02f && !wrong) {
+        val sw = g * 0.22f
+        drawLine(tint.copy(alpha = tick), androidx.compose.ui.geometry.Offset(cx - g * 0.5f, cy),
+            androidx.compose.ui.geometry.Offset(cx - g * 0.1f, cy + g * 0.45f), sw, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+        drawLine(tint.copy(alpha = tick), androidx.compose.ui.geometry.Offset(cx - g * 0.1f, cy + g * 0.45f),
+            androidx.compose.ui.geometry.Offset(cx + g * 0.55f, cy - g * 0.45f), sw, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+    } else {
+        val c = g * 0.7f
         val cw = radius * 0.03f
+        val al = if (wrong) 0.6f else 0.45f
         for (s in listOf(-1f, 1f)) {
-            drawLine(tint.copy(alpha = 0.55f * cross), androidx.compose.ui.geometry.Offset(cx + s * c, cy),
+            drawLine(tint.copy(alpha = al), androidx.compose.ui.geometry.Offset(cx + s * c, cy),
                 androidx.compose.ui.geometry.Offset(cx + s * c * 0.4f, cy), cw)
-            drawLine(tint.copy(alpha = 0.55f * cross), androidx.compose.ui.geometry.Offset(cx, cy + s * c),
+            drawLine(tint.copy(alpha = al), androidx.compose.ui.geometry.Offset(cx, cy + s * c),
                 androidx.compose.ui.geometry.Offset(cx, cy + s * c * 0.4f), cw)
         }
-    }
-    if (!wrong && lockClose > 0.02f) {
-        drawQrLock(cx, cy, g, tint, lockClose)
-    }
-}
-
-/**
- * The code shown as a padlock as it is read: a body whose face carries a little QR grid, and a
- * shackle that swings down and shuts as [close] (0..1) rises. At [close] == 1 the lock is shut ,
- * the code is read. Centred at (cx, cy), sized to g.
- */
-private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawQrLock(
-    cx: Float, cy: Float, g: Float, tint: androidx.compose.ui.graphics.Color, close: Float,
-) {
-    val bodyTop = cy - g * 0.15f
-    val bodyW = g * 1.1f
-    val bodyH = g * 0.95f
-    // the shackle: an arc lifted while open, closed onto the body as `close` rises
-    val lift = (1f - close) * g * 0.6f
-    drawArc(color = tint.copy(alpha = 0.5f + 0.5f * close), startAngle = 180f, sweepAngle = 180f, useCenter = false,
-        topLeft = androidx.compose.ui.geometry.Offset(cx - bodyW * 0.32f, bodyTop - g * 0.55f - lift),
-        size = androidx.compose.ui.geometry.Size(bodyW * 0.64f, g * 0.7f),
-        style = androidx.compose.ui.graphics.drawscope.Stroke(width = g * 0.13f, cap = androidx.compose.ui.graphics.StrokeCap.Round))
-    // the body
-    drawRect(tint.copy(alpha = 0.9f), androidx.compose.ui.geometry.Offset(cx - bodyW / 2f, bodyTop),
-        androidx.compose.ui.geometry.Size(bodyW, bodyH))
-    // the QR on its face: a 3x3 grid punched out of the body (Void), so the lock IS the code
-    val pattern = intArrayOf(1, 0, 1, 0, 1, 0, 1, 0, 1)
-    val cell = bodyW * 0.22f
-    val ox = cx - cell * 1.5f
-    val oy = bodyTop + bodyH * 0.5f - cell * 1.5f
-    for (r in 0..2) for (c in 0..2) {
-        if (pattern[r * 3 + c] == 1)
-            drawRect(Void, androidx.compose.ui.geometry.Offset(ox + c * cell, oy + r * cell),
-                androidx.compose.ui.geometry.Size(cell * 0.72f, cell * 0.72f))
     }
 }
 
@@ -977,7 +951,8 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawQrLock(
  * four beads on it (top, right, bottom, left) fill as each step lands, the current one pulsing; and a
  * small glyph in the middle changes per step , a code grid read, a channel opening, a certificate
  * signed, a lock closing , then a steady tick once READY. [t] is 0..1 over the whole sequence;
- * [shimmer] is a free clock for a faint breathe. Nothing opaque: the camera stays behind it.
+ * [shimmer] is a free clock for a faint breathe. Drawn over the darkened screen (the camera is no
+ * longer needed once the whole code is found), so the words beside it read clearly.
  */
 private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawEstablish(
     cx: Float, cy: Float, radius: Float, shimmer: Float, t: Float,
