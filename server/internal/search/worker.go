@@ -10,18 +10,22 @@ import (
 	"encoding/json"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 )
 
 type Worker struct {
 	modelHoldUntil time.Time // caption/tag lanes rest until here while oracled warms
-	Store    *Store
-	Embed    *Embedder // nil = vector-less; embed jobs are not claimed
-	Caption  Captioner
-	Tag      Tagger // nil = tags parked like vision-less captions
-	Ingester *Ingester
-	Log      *slog.Logger
-	Interval time.Duration
+	holdMu         sync.Mutex
+	holdWhy        string    // why they rest (the error that set the hold), for `queue`
+	lastHoldAt     time.Time // when the lanes last began to rest
+	Store          *Store
+	Embed          *Embedder // nil = vector-less; embed jobs are not claimed
+	Caption        Captioner
+	Tag            Tagger // nil = tags parked like vision-less captions
+	Ingester       *Ingester
+	Log            *slog.Logger
+	Interval       time.Duration
 }
 
 // Run polls all job kinds until ctx ends.
@@ -38,30 +42,86 @@ func (w *Worker) Run(ctx context.Context) {
 	}
 }
 
-// categorizePerTick bounds the category backfill per tick (see tick).
-const categorizePerTick = 30
+// categorizePerRound bounds the category backfill between two captions (see tick).
+const categorizePerRound = 3
 
+// RunOnce is one tick: every lane worked until nothing is runnable (or the model lanes rest).
+func (w *Worker) RunOnce(ctx context.Context) { w.tick(ctx) }
+
+func (w *Worker) held() bool {
+	w.holdMu.Lock()
+	defer w.holdMu.Unlock()
+	return time.Now().Before(w.modelHoldUntil)
+}
+
+// hold rests the model lanes for d, and says why (the first line of a storm is logged by the caller).
+func (w *Worker) hold(d time.Duration, why string) (fresh bool) {
+	w.holdMu.Lock()
+	defer w.holdMu.Unlock()
+	fresh = time.Now().After(w.modelHoldUntil)
+	// one resting spell, for `queue`, until the lanes have run for two minutes without a hold
+	if time.Since(w.modelHoldUntil) > 2*time.Minute {
+		w.lastHoldAt = time.Now()
+	}
+	w.modelHoldUntil, w.holdWhy = time.Now().Add(d), why
+	return fresh
+}
+
+// LaneState is whether the model lanes (caption, tag, categorize) are resting, until when and why:
+// the one thing the job counts cannot show, a queue that is full because nothing is taking from it.
+type LaneState struct {
+	Resting      bool   `json:"resting"`
+	Until        int64  `json:"until,omitempty"` // unix seconds
+	Why          string `json:"why,omitempty"`
+	RestingSince int64  `json:"restingSince,omitempty"`
+}
+
+func (w *Worker) Lanes() LaneState {
+	w.holdMu.Lock()
+	defer w.holdMu.Unlock()
+	if !time.Now().Before(w.modelHoldUntil) {
+		return LaneState{}
+	}
+	return LaneState{Resting: true, Until: w.modelHoldUntil.Unix(), Why: w.holdWhy, RestingSince: w.lastHoldAt.Unix()}
+}
+
+// tick works the lanes in ROUNDS until a round finds nothing to do. It used to drain each lane in
+// turn, captions first: with a backlog of captions (thousands, after an unpark or a restore) the
+// tag pass waited behind all of them, so photos got a description and nothing else for days,
+// untitled and untagged, and the embeds for their chunks waited too. A round now is: the embeds,
+// every tag pass that is runnable (text only, seconds each, and each one names a photo that is
+// already described), a few of the category backfill, then ONE caption. So a caption's tag pass
+// runs in the round after it, newest photos first, and a photo that arrives while the backlog
+// runs is described, named and tagged within a couple of rounds.
 func (w *Worker) tick(ctx context.Context) {
-	// Drain greedily per tick but one job at a time per kind , the single-conn store serialises anyway.
-	if w.Embed != nil {
-		for w.one(ctx, "embed_text", w.doEmbed) {
+	for ctx.Err() == nil {
+		did := false
+		if w.Embed != nil {
+			for w.one(ctx, "embed_text", w.doEmbed) {
+				did = true
+			}
 		}
-	}
-	// MODEL GATE , while oracled is warming (llama loading 7GB), model-dependent lanes REST
-	// instead of machine-gunning fast-fails through the queue. The first "no backend" sets the
-	// hold; nothing model-bound runs until it lapses. Embeds and reconsolidation are unaffected.
-	if time.Now().Before(w.modelHoldUntil) {
-		return
-	}
-	for w.one(ctx, "caption", w.doCaption) {
-	}
-	for w.one(ctx, "tag", w.doTags) {
-	}
-	// the category backfill is thousands of jobs: a few per tick, so a photo that arrives while it
-	// runs is captioned and tagged within a tick, not after the whole backlog
-	for n := 0; n < categorizePerTick && w.one(ctx, "categorize", w.doCategorize); n++ {
-	}
-	for w.one(ctx, "reconsolidate", w.doReconsolidate) {
+		// MODEL GATE , while oracled is warming (llama loading 7GB), model-dependent lanes REST
+		// instead of machine-gunning fast-fails through the queue. The first "no backend" sets the
+		// hold; nothing model-bound runs until it lapses. Embeds are unaffected (next tick).
+		if w.held() {
+			return
+		}
+		for !w.held() && w.one(ctx, "tag", w.doTags) {
+			did = true
+		}
+		for n := 0; n < categorizePerRound && !w.held() && w.one(ctx, "categorize", w.doCategorize); n++ {
+			did = true
+		}
+		if !w.held() && w.one(ctx, "caption", w.doCaption) {
+			did = true
+		}
+		for w.one(ctx, "reconsolidate", w.doReconsolidate) {
+			did = true
+		}
+		if !did {
+			return
+		}
 	}
 }
 
@@ -79,10 +139,9 @@ func (w *Worker) one(ctx context.Context, kind string, do func(context.Context, 
 			// caption would fail the same way. Hold the lane and keep the job's attempts, so fixing
 			// the server resumes the queue instead of finding five thousand parked jobs.
 			_ = w.Store.UnclaimJob(job.ID)
-			if time.Now().After(w.modelHoldUntil) {
+			if w.hold(5*time.Minute, err.Error()) {
 				w.Log.Warn("the model takes no images , caption lane held 5 min, jobs kept", "fn", "one", "why", err.Error())
 			}
-			w.modelHoldUntil = time.Now().Add(5 * time.Minute)
 			return false
 		}
 		if strings.Contains(err.Error(), "no backend") || strings.Contains(err.Error(), "preempted") {
@@ -90,10 +149,9 @@ func (w *Worker) one(ctx context.Context, kind string, do func(context.Context, 
 			// the attempt (the job did nothing wrong) and hold the model lanes. One log line per
 			// storm, not one per job.
 			_ = w.Store.UnclaimJob(job.ID)
-			if time.Now().After(w.modelHoldUntil) {
+			if w.hold(20*time.Second, err.Error()) {
 				w.Log.Info("model warming or in a chat , caption/tag lanes resting 20s", "fn", "one", "why", err.Error())
 			}
-			w.modelHoldUntil = time.Now().Add(20 * time.Second)
 			return false
 		}
 		if strings.Contains(err.Error(), "too large to decode") {
@@ -251,7 +309,7 @@ func (w *Worker) doTags(ctx context.Context, job *Job) error {
 }
 
 // doCategorize is the backfill for tags written before categories existed, and for whatever the
-// tag pass left at ''. Lexicon first (free); the model only for the remainder. A tag the model
+// tag pass left at ”. Lexicon first (free); the model only for the remainder. A tag the model
 // places nowhere gets OtherCategory, not a guess: before, it stayed empty and the frame was queued
 // again at every stock-take, the same frames asked the same question forever while the rest of the
 // backlog never came up (24k frames "without category" moved by ten in a night).

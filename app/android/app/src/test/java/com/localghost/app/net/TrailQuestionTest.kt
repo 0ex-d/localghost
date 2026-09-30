@@ -25,4 +25,14 @@ class TrailQuestionTest {
         val glitch = TrailQuestion(1, 1, longArrayOf(1), 0.0, 0.0, 60_000.0, 5400, 300.0, "glitch", "Bedford")
         assertTrue(glitch.text(clock).contains("back 1 h 30 min later. It is already left off the map."))
     }
+
+    @Test fun asksAboutTheSea() {
+        val a = org.json.JSONObject("""{"q":[{"from":100,"to":2800,"ts":[100,1000,1900,2800],"lat":39.386,"lon":20.115,
+            "awayM":16600,"goneS":4500,"kmh":66.4,"seaM":12300,"kind":"sea","place":"Kavos, Greece"}]}""").optJSONArray("q")
+        val q = TrailQuestion.listFrom(a).single()
+        assertEquals(12_300.0, q.seaM, 0.0)
+        val clock = { t: Long -> if (t == 100L) "14:10" else "14:55" }
+        assertEquals("At 14:10 the trail goes to Kavos, Greece, 16 km away (4 fixes there until 14:55) and is back 1 h 15 min later. " +
+            "That is 12 km of open sea at 66 km/h. Were you there?", q.text(clock))
+    }
 }

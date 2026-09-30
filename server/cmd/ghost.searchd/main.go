@@ -151,6 +151,9 @@ func main() {
 			lg.Warn("degraded", "fn", "main", "why", embedNote)
 		} else {
 			defer es.Stop()
+			// brought back if it dies (killed from outside, out of memory), not left dead until
+			// the next unlock with every embed failing its way to parked
+			go es.Watch(ctx, func(msg string, args ...any) { lg.Warn(msg, append([]any{"fn", "embedWatch"}, args...)...) })
 			embedder = search.NewEmbedder(es.BaseURL(), cfg.EmbedModelID)
 		}
 	}
@@ -542,9 +545,19 @@ func main() {
 		if err != nil {
 			return ctlsock.Response{}, err
 		}
-		data, _ := json.Marshal(map[string]int64{
+		out := map[string]any{
 			"pendingEmbeds": pending, "staleChunks": stale, "parkedJobs": parked, "runnableJobs": runnable,
-		})
+			// per kind (due, backing off, parked, the newest failure), whether the model lanes are
+			// resting and why, and how far the photos are: "is it moving" in one answer
+			"modelLanes": wk.Lanes(),
+		}
+		if kinds, kerr := storeA.JobKinds(); kerr == nil {
+			out["kinds"] = kinds
+		}
+		if pp, perr := storeA.PhotoProgress(); perr == nil {
+			out["photos"] = pp
+		}
+		data, _ := json.Marshal(out)
 		return ctlsock.Response{OK: true, Data: data}, nil
 	})
 	defer ctl.Cleanup()

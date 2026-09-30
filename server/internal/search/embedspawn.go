@@ -8,11 +8,13 @@ package search
 // conservative default; flip in conf if the GPU is idle).
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -25,8 +27,11 @@ type EmbedServerConfig struct {
 }
 
 type EmbedServer struct {
-	cfg EmbedServerConfig
-	cmd *exec.Cmd
+	cfg    EmbedServerConfig
+	cmd    *exec.Cmd
+	exited chan struct{} // closed when the child is reaped (one waiter, in Start)
+	mu     sync.Mutex
+	stop   bool
 }
 
 func NewEmbedServer(cfg EmbedServerConfig) *EmbedServer { return &EmbedServer{cfg: cfg} }
@@ -60,10 +65,25 @@ func (e *EmbedServer) Start(within time.Duration) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start embed llama-server: %w", err)
 	}
-	e.cmd = cmd
+	exited := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(exited) }()
+	e.mu.Lock()
+	stopped := e.stop
+	e.cmd, e.exited = cmd, exited
+	e.mu.Unlock()
+	if stopped { // Stop came while this was starting: nothing may outlive it
+		e.end(false)
+		return fmt.Errorf("embed llama-server stopped while starting")
+	}
 	deadline := time.Now().Add(within)
 	url := fmt.Sprintf("http://127.0.0.1:%d/health", e.cfg.Port)
 	for time.Now().Before(deadline) {
+		select {
+		case <-exited: // died (or was stopped) before it was ready: say so now, not in two minutes
+			e.end(false)
+			return fmt.Errorf("embed llama-server exited before it was healthy")
+		default:
+		}
 		resp, err := http.Get(url)
 		if err == nil {
 			resp.Body.Close()
@@ -73,26 +93,92 @@ func (e *EmbedServer) Start(within time.Duration) error {
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
-	e.Stop()
+	e.end(false)
 	return fmt.Errorf("embed llama-server not healthy within %s", within)
 }
 
 // BaseURL for the Embedder.
 func (e *EmbedServer) BaseURL() string { return fmt.Sprintf("http://127.0.0.1:%d", e.cfg.Port) }
 
-// Stop TERMs then KILLs the child.
-func (e *EmbedServer) Stop() {
-	if e.cmd == nil || e.cmd.Process == nil {
+// Stop TERMs then KILLs the child, and ends Watch.
+func (e *EmbedServer) Stop() { e.end(true) }
+
+// end stops the child; for good (Watch ends too) when final.
+func (e *EmbedServer) end(final bool) {
+	e.mu.Lock()
+	if final {
+		e.stop = true
+	}
+	cmd, exited := e.cmd, e.exited
+	e.cmd = nil
+	e.mu.Unlock()
+	if cmd == nil || cmd.Process == nil {
 		return
 	}
-	_ = e.cmd.Process.Signal(syscall.SIGTERM)
-	done := make(chan struct{})
-	go func() { _, _ = e.cmd.Process.Wait(); close(done) }()
+	_ = cmd.Process.Signal(syscall.SIGTERM)
 	select {
-	case <-done:
+	case <-exited:
 	case <-time.After(5 * time.Second):
-		_ = e.cmd.Process.Kill()
-		<-done
+		_ = cmd.Process.Kill()
+		<-exited
 	}
-	e.cmd = nil
+}
+
+// embedBackoff is how long Watch waits before each start after a death (tests shorten it).
+var embedBackoff = []time.Duration{10 * time.Second, 30 * time.Second, time.Minute, 5 * time.Minute}
+
+// Watch starts the child again whenever it dies (killed from outside, out of memory): searchd
+// started it once and, when it went, embedded nothing until the next unlock, every embed job
+// failing its way to parked. 10 s after a death, then longer while it keeps dying soon after
+// starting. Returns when ctx ends or Stop is called.
+func (e *EmbedServer) Watch(ctx context.Context, logf func(msg string, args ...any)) {
+	backoff := embedBackoff
+	fails := 0
+	for {
+		e.mu.Lock()
+		exited, stopped := e.exited, e.stop
+		e.mu.Unlock()
+		if stopped || exited == nil {
+			return
+		}
+		upAt := time.Now()
+		select {
+		case <-ctx.Done():
+			return
+		case <-exited:
+		}
+		e.mu.Lock()
+		stopped = e.stop
+		e.mu.Unlock()
+		if stopped {
+			return
+		}
+		if time.Since(upAt) > 10*time.Minute {
+			fails = 0
+		}
+		wait := backoff[min(fails, len(backoff)-1)]
+		fails++
+		logf("embedding server died , starting it again", "up", time.Since(upAt).Round(time.Second).String(), "in", wait.String())
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(wait):
+			}
+			if err := e.Start(2 * time.Minute); err == nil {
+				logf("embedding server back")
+				break
+			} else {
+				logf("embedding server did not come back", "err", err.Error())
+				wait = backoff[min(fails, len(backoff)-1)]
+				fails++
+			}
+			e.mu.Lock()
+			stopped = e.stop
+			e.mu.Unlock()
+			if stopped {
+				return
+			}
+		}
+	}
 }

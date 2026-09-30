@@ -22,6 +22,14 @@ import (
 // systemctl timeout). SIGTERM first, [grace] later SIGKILL, and each one named in the log with
 // its age. Returns the names of what it had to kill.
 func KillStrays(prefix string, grace time.Duration) []string {
+	return KillStraysMatching(prefix, grace, nil)
+}
+
+// KillStraysMatching is KillStrays for only the processes whose command line [match] accepts (nil:
+// all). oracled uses it before it spawns its llama-server: the same binary also runs searchd's
+// embedder, which is alive, owned and nobody's stray, and killing every llama-server from the
+// volume took it down at each model start (search lost its vectors until searchd restarted).
+func KillStraysMatching(prefix string, grace time.Duration, match func(args []string) bool) []string {
 	self := os.Getpid()
 	type stray struct {
 		pid  int
@@ -43,6 +51,9 @@ func KillStrays(prefix string, grace time.Duration) []string {
 		}
 		exe = strings.TrimSuffix(exe, " (deleted)")
 		if !strings.HasPrefix(exe, prefix) {
+			continue
+		}
+		if match != nil && !match(Cmdline(pid)) {
 			continue
 		}
 		comm := strings.TrimPrefix(exe, prefix)
@@ -103,6 +114,25 @@ func KillStrays(prefix string, grace time.Duration) []string {
 		}
 	}
 	return names
+}
+
+// Cmdline is a process's arguments (/proc/<pid>/cmdline split on NUL), nil when it cannot be read.
+func Cmdline(pid int) []string {
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline")
+	if err != nil || len(b) == 0 {
+		return nil
+	}
+	return strings.Split(strings.TrimSuffix(string(b), "\x00"), "\x00")
+}
+
+// HasFlag reports whether args carry flag followed by value ("--port", "18080"), or flag=value.
+func HasFlag(args []string, flag, value string) bool {
+	for i, a := range args {
+		if a == flag+"="+value || (a == flag && i+1 < len(args) && args[i+1] == value) {
+			return true
+		}
+	}
+	return false
 }
 
 // Unkillable reports a process that has SIGKILL pending and is still running , delivered, not

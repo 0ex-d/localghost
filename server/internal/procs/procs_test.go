@@ -119,3 +119,76 @@ func TestPendingSignalsAndUnkillable(t *testing.T) {
 		t.Fatalf("after wait the process is gone, state %q", s)
 	}
 }
+
+// A copy of this test binary under a volume's bin, started with PROCS_TEST_SLEEP, only sleeps: a
+// stand-in for a llama-server with whatever arguments the test gives it.
+func init() {
+	if os.Getenv("PROCS_TEST_SLEEP") != "" {
+		time.Sleep(5 * time.Minute)
+		os.Exit(0)
+	}
+}
+
+// oracled ends the llama-server on ITS port before it spawns its own, and leaves searchd's
+// embedder (the same binary, another port, --embedding) alone.
+func TestKillStraysMatchingSparesTheEmbedder(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Skip(err)
+	}
+	src, err := os.ReadFile(self)
+	if err != nil {
+		t.Skip(err)
+	}
+	bin := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	llama := filepath.Join(bin, "llama-server")
+	if err := os.WriteFile(llama, src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	start := func(args ...string) *exec.Cmd {
+		c := exec.Command(llama, args...)
+		c.Env = append(os.Environ(), "PROCS_TEST_SLEEP=1")
+		if err := c.Start(); err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	orphan := start("-m", "gemma.gguf", "--port", "18080", "-ngl", "99")
+	embedder := start("--model", "emb.gguf", "--port", "18081", "--embedding")
+	defer func() { _ = embedder.Process.Kill(); _, _ = embedder.Process.Wait() }()
+	time.Sleep(200 * time.Millisecond) // the copies are running their init
+	if got := Cmdline(embedder.Process.Pid); !HasFlag(got, "--port", "18081") || HasFlag(got, "--port", "18080") {
+		t.Fatalf("cmdline %q", got)
+	}
+	ours := func(args []string) bool {
+		if !HasFlag(args, "--port", "18080") {
+			return false
+		}
+		for _, a := range args {
+			if a == "--embedding" {
+				return false
+			}
+		}
+		return true
+	}
+	names := KillStraysMatching(llama, 2*time.Second, ours)
+	if len(names) != 1 {
+		t.Fatalf("strays = %v, want the one on port 18080", names)
+	}
+	done := make(chan error, 1)
+	go func() { done <- orphan.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the orphan on our port is still alive")
+	}
+	if !stillRunning(embedder.Process.Pid) {
+		t.Fatal("the embedder was killed")
+	}
+	if !HasFlag([]string{"--port=18080"}, "--port", "18080") || HasFlag([]string{"--port"}, "--port", "18080") {
+		t.Fatal("HasFlag forms")
+	}
+}

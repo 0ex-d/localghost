@@ -3548,3 +3548,113 @@ on. A failure shows the real snapshot at once, no pacing.
 
 Tested: `UnlockPacerTest` (a warm unlock walked one step at a time, a slow step keeping its length, a
 failure passing through, the floor). The screen wiring is structure-checked only.
+
+## Corfu: the trail asks about the sea, and a fix can be picked by hand (framed, landtiles, secd, app)
+
+Vlad: "it sends me to corfu but I have not been there ... should be able to zoom in on a point and
+select it and delete it, but only when i'm very zoomed in ... on the map we should be able to get
+the question ... the 50km was a bit off it seems we have gaps of 15 min between gps".
+
+Why the line to Corfu was drawn and never asked about. Lakka to Kavos is about 16 km, and with a fix
+every quarter hour that is about 65 km/h. The old "fast" rule wanted 200 km/h, there are roads at
+both ends so it was not "offroad", and the phone sat on the Kavos tower for four fixes, so the glitch
+rules did not call it a parked tower either.
+
+What the questions ask now (`internal/framed/questions.go`):
+
+- **sea** (new), a hop of the trail runs across 2.5 km or more of open water on the box's land
+  tiles, 5 km when the run over there is longer than three fixes (a coast road's chord cuts across
+  bays, not straits), at 35 km/h or more, or out and back within 90 minutes. The run over there may
+  be up to eight fixes and four hours, since a tower across the strait holds the phone for a while.
+  `internal/landtiles/lookup.go` (new) answers "is this point on land" from the same tiles the map
+  draws, a coast cell's edges filed in 512 bands so a test reads a handful of edges, sixteen cells
+  kept in memory. Where there are no tiles the box does not ask.
+- **fast** from 90 km/h (was 200) and from a 3 km hop (was 5 km).
+- **the edges of the data**, a jump in the first or last few fixes has nothing to come back to, so
+  it is asked about on its own when it fits sea, or fast at 180 km/h (a motorway at the edge of the
+  data is not odd).
+- visits to the same place in one afternoon (a phone flipping between two islands' towers) are one
+  question, so one "no" takes them all.
+
+On the map. Each of the lit day's questions is a red "?" where it points, and its card sits under the
+map whether the trail panel is open or not, one at a time with "next ›". The card for the sea reads
+"At 14:10 the trail goes to Kavos, Greece, 16 km away (4 fixes there until 14:55) and is back 1 h 15
+min later. That is 12 km of open sea at 66 km/h. Were you there?"
+
+A fix picked by hand. The map now zooms to 1,000,000x (a phone's screen about 30 m across), and from
+about a kilometre across (a metre a pixel, `ui/MapPick.kt`) every fix of the lit day is a ring to tap.
+A tapped fix turns red with its clock, the phone asks the box which fixes a delete would take, and
+the card says so before anything goes, "The fix at 14:10, and 3 more at this spot (14:10 to 15:00).
+Delete them for good?" with **DELETE** and **CANCEL**. The box takes the fix and its neighbours in
+time within 150 m of it, up to the first fix somewhere else (`framed/forget.go`), because a tower's
+fix repeats and the map's simplified line keeps only one of them. More than 200 at one spot is
+refused, that is a place and not a glitch. A fix the phone has not sent yet is sent first, so the
+box knows it and does not get it again after the delete.
+
+`POST /v1/geo/trail/forget {"ts","radiusM","dry"}` gives `{"ok","ts":[...],"deleted"}` (secd to the
+framed ctl `trail-forget`); dry only says which. The points go from `location_points` (every
+source) and the phone's own ring, and the day is rebuilt.
+
+Stay names on the map claim their rectangle now, so two stays a street apart keep both rings and the
+second name is left off instead of drawn through the first (the place names skip what the stays
+claimed).
+
+Days built before this have the old questions until they are rebuilt:
+
+    sudo ./tools/ns.sh ./bin/ghost-cli ghost.framed day-routes days=60
+
+Tested: `TestLookupOnLand` (an island with a lake, a land cell, the sea, no tiles),
+`questions_test.go` (the Corfu crossing asked as sea and not asked without tiles, a slow boat not
+asked, a flip between towers as one question, a jump at either edge of the data, 100 km/h out and
+back asked, a drive at the data's edge not asked, `WaterRunM`), `TestSpotRunTakesTheTowersRepeats`,
+`MapPickTest` (only close in, the nearest fix with a clock, the card's words, labels that do not
+overlap), `TrailQuestionTest.asksAboutTheSea`. The map's drawing and taps are structure-checked only.
+
+## Photos are named and tagged while the caption backlog runs (searchd, oracled, procs)
+
+Vlad: "images are still not working ... i mean tagging and naming and all of that".
+
+**The tag pass waited for every caption.** searchd's worker drained each lane in turn, captions
+first, and only then the tag pass, which is what writes a photo's tags and its title (the name).
+With a backlog of captions (thousands, after the captions came back and were unparked) the tag
+pass waited behind all of them. Photos got a description and nothing else, untitled and untagged,
+for as long as the backlog lasted, and the embeds for their chunks waited too, so search did not
+find them either. The worker now runs in rounds (`Worker.tick`). Each round runs the embeds, every
+tag pass that is due (text only, seconds each, and each one names a photo that is already
+described), three of the category backfill, then ONE caption. A caption's tag pass runs in the next
+round, newest photos first, and a photo that arrives while the backlog runs is described, named
+and tagged within a couple of rounds.
+
+**oracled killed searchd's embedder at every model start.** Before it spawns llama-server, oracled
+ends any predecessor's orphan (the sixty-day-old one of 21 Sep). It matched every process running
+`<mount>/bin/llama-server`, and searchd's embedder is the same binary, so every model start or
+restart took the embedder down, and searchd never started it again. Search lost its vectors and
+every embed job failed its way to parked until the next unlock. Now oracled ends only a
+llama-server on ITS port without `--embedding` (`procs.KillStraysMatching`), and searchd watches
+its embedder and starts it again when it dies (`EmbedServer.Watch`, 10 s after a death, longer
+while it keeps dying).
+
+**`queue` says whether it is moving.** `ghost.searchd queue` now also gives each job kind's due,
+backing-off and parked counts with its newest failure, whether the model lanes are resting (until
+when, and the error that rested them), and the photos described, named and tagged, in all and in
+the last hour.
+
+    sudo ./tools/ns.sh ./bin/ghost-cli ghost.searchd queue
+    sudo ./tools/ns.sh ./bin/ghost-cli ghost.oracled models
+
+Reading it:
+- `photos.describedLastHour` climbing and `taggedLastHour` 0 was the old worker, gone with this drop.
+- `modelLanes.resting` with "no backend" in `why` for more than a few minutes means the model is
+  not up. `ghost.oracled models` says why (`ready`, `verdict`), and oracled's log has the start
+  attempts.
+- "no vision" in `why` means llama-server runs without its projector. Put `mmproj-F16.gguf` back
+  (see "Captions come back") and restart oracled.
+- parked jobs with a `lastError` are failures the model keeps making. `unpark kind=caption` (or
+  `kind=tag`) once the cause is fixed.
+
+Tested: `TestTagPassesFollowTheirCaptions` against Postgres (three captions queued, the model asked
+caption, tags, caption, tags, caption, tags; every photo described, named and tagged; the queue
+report's photo counts; a model with no backend rests the lanes with its reason and keeps the job's
+lives; a parked tag job's error reported), `TestKillStraysMatchingSparesTheEmbedder` (the orphan on
+the model's port ended, the embedder on its own port untouched), `TestEmbedServerComesBack` (the
+embedder killed from outside is started again, and Stop ends the watch).

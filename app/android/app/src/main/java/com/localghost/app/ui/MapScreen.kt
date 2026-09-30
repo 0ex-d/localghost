@@ -61,7 +61,8 @@ import kotlin.math.sinh
  * file (binary-cached after that, see WorldRings), held as pre-built Paths at three detail levels,
  * and a frame costs one transform + one drawPath per VISIBLE ring at the level that is under a
  * pixel of error , tens of draw calls at world zoom, a handful at street zoom, and zero per-vertex
- * work anywhere. The camera is Double: at 250,000x a Float map unit is thirty pixels wide.
+ * work anywhere. The camera is Double: at 250,000x a Float map unit is thirty pixels wide, and the
+ * map goes to a million (a screen about thirty metres across, MapPick.MAX_ZOOM).
  */
 
 private const val WORLD = 1024f // == WORLD_UNITS, the Float twin for screen-space arithmetic
@@ -116,6 +117,34 @@ private fun TrailQuestionCard(q: com.localghost.app.net.TrailQuestion, clock: (L
     }
 }
 
+/** A fix picked on the map, zoomed right in (MapPick): where it is, and once the box has said,
+ *  every fix a delete would take ([run]). [state]: 0 asking the box, 1 ready, 2 the box did not
+ *  answer, 3 deleting. */
+private data class FixPick(val ts: Long, val x: Double, val y: Double, val phone: Boolean,
+                           val run: LongArray? = null, val state: Int = 0)
+
+/** The picked fix under the map: what a delete takes, then [ DELETE ] and [ CANCEL ]. */
+@Composable
+private fun FixPickCard(f: FixPick, clock: (Long) -> String, onDelete: () -> Unit, onRetry: () -> Unit, onCancel: () -> Unit) {
+    Column(Modifier.fillMaxWidth().padding(vertical = 6.dp).border(1.dp, Warning, RectangleShape).padding(10.dp)) {
+        val text = when (f.state) {
+            0 -> "The fix at ${clock(f.ts)}. Asking the box which fixes are at this spot…"
+            2 -> "The fix at ${clock(f.ts)}. The box did not answer, nothing was deleted."
+            3 -> MapPick.describe(f.ts, f.run, clock) + " Deleting…"
+            else -> MapPick.describe(f.ts, f.run, clock) + " Delete " + (if ((f.run?.size ?: 1) > 1) "them" else "it") + " for good?"
+        }
+        Text(text, color = GhostText, style = MaterialTheme.typography.labelMedium)
+        Row(Modifier.padding(top = 8.dp)) {
+            if (f.state == 1) Text("[ DELETE ]", color = Warning, style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.clickable { onDelete() }.padding(end = 16.dp, top = 4.dp, bottom = 4.dp))
+            if (f.state == 2) Text("[ TRY AGAIN ]", color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.clickable { onRetry() }.padding(end = 16.dp, top = 4.dp, bottom = 4.dp))
+            if (f.state != 3) Text("[ CANCEL ]", color = GhostTextDim, style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.clickable { onCancel() }.padding(top = 4.dp, bottom = 4.dp))
+        }
+    }
+}
+
 /** The app's lock teardown: the map forgets the box's data it kept for a quick reopen. */
 fun clearMapMemory() {
     MapMemory.cells = emptyList(); MapMemory.labels = emptyList(); MapMemory.tracks = null; MapMemory.newest = null
@@ -147,7 +176,7 @@ private object MapCamera {
             val zoom = f.getOrNull(2)?.toFloatOrNull() ?: return null
             View(cx, cy, zoom)
         }
-        return if (v.cx.isFinite() && v.cy.isFinite() && v.cx in 0.0..WORLD_UNITS && v.cy in 0.0..WORLD_UNITS && v.zoom in 1f..40000f) v else null
+        return if (v.cx.isFinite() && v.cy.isFinite() && v.cx in 0.0..WORLD_UNITS && v.cy in 0.0..WORLD_UNITS && v.zoom in 1f..MapPick.MAX_ZOOM) v else null
     }
 
     fun save(ctx: android.content.Context, cx: Double, cy: Double, zoom: Float) {
@@ -218,14 +247,14 @@ private fun distanceOf(pts: List<com.localghost.app.sync.LocationLog.Point>): Do
 private fun zoomForRadiusKm(radiusKm: Double, lat: Double): Float {
     val degLat = 2 * radiusKm / 111.0
     val units = degLat * (WORLD_UNITS / 360.0) / kotlin.math.cos(lat * PI / 180).coerceAtLeast(0.2)
-    return (WORLD_UNITS / units).toFloat().coerceIn(1f, 250000f)
+    return (WORLD_UNITS / units).toFloat().coerceIn(1f, MapPick.MAX_ZOOM)
 }
 
 /** The camera never leaves the map: zoom stops where the world fills the view's short side, and
  *  the centre is held so no edge of the world comes inside the screen (when the whole world is
  *  narrower than the view on an axis, it sits centred on that axis). */
 private fun clampCamera(cx: Double, cy: Double, zoom: Float, viewW: Float, viewH: Float): Triple<Double, Double, Float> {
-    val z = zoom.coerceIn(1f, 250000f)
+    val z = zoom.coerceIn(1f, MapPick.MAX_ZOOM)
     if (viewW <= 0f || viewH <= 0f) return Triple(cx, cy, z)
     val pxz = (minOf(viewW, viewH) / WORLD) * z
     val halfW = viewW / 2.0 / pxz; val halfH = viewH / 2.0 / pxz
@@ -304,6 +333,11 @@ fun MapScreen() {
     // the box's "were you there?" per day (framed/questions.go), and the one being answered
     var questions by remember { mutableStateOf(MapMemory.questions) }
     var answering by remember { mutableStateOf<com.localghost.app.net.TrailQuestion?>(null) }
+    // which of the lit day's questions the card under the map shows (a "?" on the map picks one)
+    var askAt by remember { mutableIntStateOf(0) }
+    // ONE FIX, PICKED: zoomed right in, a tap on a fix of the lit day offers to delete it (MapPick)
+    var fixPick by remember { mutableStateOf<FixPick?>(null) }
+    var fixNote by remember { mutableStateOf("") }
     // THE TRAIL PANEL: which day is lit, and where along it the scrubber sits (0..1).
     var trailOpen by remember { mutableStateOf(false) }
     // ONE DAY AT A TIME: the map draws the newest day (today when there is one) and nothing else;
@@ -359,6 +393,40 @@ fun MapScreen() {
     var roadIndex by remember { mutableStateOf<RoadTileGeom.Index?>(null) }
     val roadCache = remember { RoadTileCache() }
     val mapScope = rememberCoroutineScope()
+    // the days drawn, measured, told and asked about again, after a delete on the box
+    suspend fun reloadTracks() {
+        val batch = BoxClient.geoDayTracks(ctx, 60) ?: return
+        val loaded = batch.filter { it.n >= 2 }.map { t -> trackOf(t.day, t.lat, t.lon, t.times, t.distanceM, phone = false, glitches = t.glitches, line = t.line) }
+        tracks = loaded + phoneTracks(ctx, loaded)
+        MapMemory.tracks = tracks
+        questions = batch.filter { it.questions.isNotEmpty() }.associate { it.day to it.questions }
+        MapMemory.questions = questions
+    }
+    // A FIX PICKED: ask the box (dry) which fixes a delete takes, so the card can say before the
+    // person decides. A fix the phone has not sent yet goes to the box first, or the box would not
+    // know it (and would get it later, after the delete).
+    fun askFix(f: FixPick) {
+        fixPick = f.copy(state = 0, run = null)
+        mapScope.launch {
+            if (f.phone) withContext(Dispatchers.IO) { runCatching { com.localghost.app.sync.LocationLog.flush(ctx) } }
+            val r = withContext(Dispatchers.IO) { BoxClient.trailForget(ctx, f.ts, dry = true) }
+            if (fixPick?.ts == f.ts) fixPick = f.copy(run = r?.ts, state = if (r != null && r.ts.isNotEmpty()) 1 else 2)
+        }
+    }
+    fun deleteFix(f: FixPick) {
+        fixPick = f.copy(state = 3)
+        mapScope.launch {
+            val r = withContext(Dispatchers.IO) { BoxClient.trailForget(ctx, f.ts, dry = false) }
+            if (r == null) { if (fixPick?.ts == f.ts) fixPick = f.copy(state = 2); return@launch }
+            withContext(Dispatchers.IO) { com.localghost.app.sync.LocationLog.forget(ctx, r.ts.toSet() + f.ts) }
+            fixPick = null
+            val n = r.ts.size
+            fixNote = "deleted $n fix${if (n == 1) "" else "es"} , the day is drawn again without " + (if (n == 1) "it" else "them")
+            reloadTracks()
+        }
+    }
+    LaunchedEffect(trailDay) { fixPick = null; askAt = 0 }
+    LaunchedEffect(fixNote) { if (fixNote.isNotEmpty()) { kotlinx.coroutines.delay(5000); fixNote = "" } }
     var loadNote by remember { mutableStateOf("loading…") }
     var cells by remember { mutableStateOf(MapMemory.cells) }
     var level by remember { mutableStateOf(3) }
@@ -667,6 +735,13 @@ fun MapScreen() {
         }
     }
     // One Paint for every cluster label, not one per label per frame.
+    val askPaint = remember {
+        android.graphics.Paint().apply {
+            color = android.graphics.Color.rgb(0xFF, 0x8A, 0x8A); textSize = 13f * density
+            typeface = android.graphics.Typeface.create(android.graphics.Typeface.MONOSPACE, android.graphics.Typeface.BOLD)
+            textAlign = android.graphics.Paint.Align.CENTER; isAntiAlias = true
+        }
+    }
     val labelPaint = remember {
         android.graphics.Paint().apply {
             color = android.graphics.Color.rgb(0x39, 0xFF, 0x14)
@@ -773,7 +848,7 @@ fun MapScreen() {
                         // zoom about the finger centroid, then pan , standard camera algebra;
                         // then the camera is held on the map (zoom-out stops at the world, no
                         // edge of it comes inside the screen)
-                        val newZoom = (zoom * gz).coerceIn(1f, 250000f)
+                        val newZoom = (zoom * gz).coerceIn(1f, MapPick.MAX_ZOOM)
                         val sw = size.width.toDouble(); val sh = size.height.toDouble()
                         val scale = minOf(sw, sh) / WORLD_UNITS
                         val pxOld = scale * zoom; val pxNew = scale * newZoom
@@ -791,6 +866,34 @@ fun MapScreen() {
                     detectTapGestures { tap ->
                         val sw = size.width.toDouble(); val sh = size.height.toDouble()
                         val pxz = (minOf(sw, sh) / WORLD_UNITS) * zoom
+                        val tapR = MapPick.TAP_DP * density
+                        val litDay = trailDay?.takeIf { !showAll }
+                        // a "?" on the map: its question comes up under the map
+                        val qs = litDay?.let { questions[it] } ?: emptyList()
+                        val qi = qs.indices.minByOrNull { i ->
+                            val px = (mercXD(qs[i].lon) - cx) * pxz + sw / 2 - tap.x
+                            val py = (mercYD(qs[i].lat) - cy) * pxz + sh / 2 - tap.y
+                            px * px + py * py
+                        }
+                        if (qi != null) {
+                            val px = (mercXD(qs[qi].lon) - cx) * pxz + sw / 2 - tap.x
+                            val py = (mercYD(qs[qi].lat) - cy) * pxz + sh / 2 - tap.y
+                            if (px * px + py * py <= tapR * tapR) { askAt = qi; picked = null; return@detectTapGestures }
+                        }
+                        // ZOOMED RIGHT IN on the lit day: a tap on a fix picks it (MapPick)
+                        if (litDay != null && MapPick.canPick(MapPick.metresPerPx(invMercY(cy), pxz))) {
+                            var hit: FixPick? = null; var hitD = Double.MAX_VALUE
+                            for (t in tracks) {
+                                if (t.day != litDay || !t.hasTimes) continue
+                                val i = MapPick.nearest(t.xs, t.ys, t.times, cx, cy, pxz, sw, sh, tap.x.toDouble(), tap.y.toDouble(), tapR)
+                                if (i < 0) continue
+                                val px = (t.xs[i] - cx) * pxz + sw / 2 - tap.x
+                                val py = (t.ys[i] - cy) * pxz + sh / 2 - tap.y
+                                val dd = px * px + py * py
+                                if (dd < hitD) { hitD = dd; hit = FixPick(t.times[i], t.xs[i], t.ys[i], t.phone) }
+                            }
+                            if (hit != null) { picked = null; askFix(hit); return@detectTapGestures }
+                        }
                         var best: BoxClient.GeoCell? = null; var bestD = 44.0 * 44.0
                         for (d in dots) {
                             val px = (d.x - cx) * pxz + sw / 2
@@ -803,7 +906,7 @@ fun MapScreen() {
                         best?.let { b ->
                             if (b.n > 1) {
                                 cx = mercXD(b.lon); cy = mercYD(b.lat)
-                                zoom = (zoom * 6f).coerceAtMost(250000f)
+                                zoom = (zoom * 6f).coerceAtMost(MapPick.MAX_ZOOM)
                             }
                         }
                     }
@@ -997,7 +1100,11 @@ fun MapScreen() {
                 }
                 // THE DAY ROUTE: the lit day as the box told it. Walks along the streets in green, a
                 // dark halo under them; rides as dashed blue chords; each stay a ring with its name
-                // and hours, drawn last so a name never hides under a line.
+                // and hours, drawn last so a name never hides under a line. A stay's name claims its
+                // rectangle (and the place names below skip what the stays claimed): two stays a
+                // street apart keep their rings, and the later name is left off rather than drawn
+                // through the first.
+                val claimedLabels = ArrayList<FloatArray>()
                 route?.takeIf { routeShown }?.let { rt ->
                     for (mv in rt.moves) {
                         if (mv.xs.size < 2) continue
@@ -1022,10 +1129,49 @@ fun MapScreen() {
                                 st.s.kind == "near" -> "near ${st.s.name} · ${span(st.s.from, st.s.to)}"
                                 else -> "${st.s.name} · ${span(st.s.from, st.s.to)}"
                             }
-                            nc.drawText(name, x, y - 12f, roadNameHalo)
-                            nc.drawText(name, x, y - 12f, roadNamePaint)
+                            val w = roadNamePaint.measureText(name) + 6f * density
+                            val h = roadNamePaint.textSize + 4f * density
+                            if (MapPick.claim(claimedLabels, floatArrayOf(x - w / 2, y - 12f - h, x + w / 2, y - 12f + 3f * density))) {
+                                nc.drawText(name, x, y - 12f, roadNameHalo)
+                                nc.drawText(name, x, y - 12f, roadNamePaint)
+                            }
                         }
                     }
+                }
+                // WERE YOU THERE? on the map: a "?" where each of the lit day's questions points,
+                // the one the card under the map shows ringed twice
+                val litQs = trailDay?.takeIf { !showAll }?.let { d -> questions[d] } ?: emptyList()
+                litQs.forEachIndexed { qi, q ->
+                    val x = sx(mercXD(q.lon)); val y = sy(mercYD(q.lat))
+                    if (x < -30f || x > sw + 30f || y < -30f || y > sh + 30f) return@forEachIndexed
+                    val on = qi == askAt.coerceIn(0, litQs.size - 1)
+                    drawCircle(MapWater, radius = 12f * density, center = Offset(x, y))
+                    drawCircle(Warning, radius = 10f * density, center = Offset(x, y), style = Stroke(width = (if (on) 3f else 2f) * density))
+                    if (on) drawCircle(Warning.copy(alpha = 0.5f), radius = 15f * density, center = Offset(x, y), style = Stroke(width = 1.5f * density))
+                    drawContext.canvas.nativeCanvas.drawText("?", x, y + 4.5f * density, askPaint)
+                }
+                // THE FIXES, PICKABLE: zoomed right in on the lit day (MapPick), every fix with a
+                // clock is a ring to tap; the picked one is red, with its clock
+                val mppNow = MapPick.metresPerPx(invMercY(cy), pxzD)
+                if (trailDay != null && !showAll && MapPick.canPick(mppNow)) {
+                    for (t in tracks) {
+                        if (t.day != trailDay || !t.hasTimes) continue
+                        for (i in 0 until t.n) {
+                            val x = sx(t.xs[i]); val y = sy(t.ys[i])
+                            if (x < -20f || x > sw + 20f || y < -20f || y > sh + 20f) continue
+                            drawCircle(MapWater, radius = 8f * density, center = Offset(x, y))
+                            drawCircle(if (t.phone) TerminalGreen else GhostText, radius = 6f * density, center = Offset(x, y), style = Stroke(width = 2f * density))
+                        }
+                    }
+                }
+                fixPick?.let { f ->
+                    val x = sx(f.x); val y = sy(f.y)
+                    drawCircle(MapWater, radius = 14f * density, center = Offset(x, y))
+                    drawCircle(Warning, radius = 12f * density, center = Offset(x, y), style = Stroke(width = 2.5f * density))
+                    drawCircle(Warning, radius = 4f * density, center = Offset(x, y))
+                    val nc = drawContext.canvas.nativeCanvas
+                    nc.drawText(clock(f.ts), x, y - 18f * density, roadNameHalo)
+                    nc.drawText(clock(f.ts), x, y - 18f * density, roadNamePaint)
                 }
                 // The scrubber's point on the lit day, with its clock.
                 scrubAt?.takeIf { trailOpen }?.let { at ->
@@ -1038,7 +1184,7 @@ fun MapScreen() {
                 // sits on top of its country's name, and a crowded coast shows the few that fit.
                 // A country name is drawn in capitals. Under the dots: a photo is the point.
                 if (labels.isNotEmpty()) {
-                    val claimed = ArrayList<FloatArray>(labels.size)
+                    val claimed = claimedLabels
                     val nc = drawContext.canvas.nativeCanvas
                     for (l in labels) {
                         val x = sx(l.x); val y = sy(l.y)
@@ -1114,6 +1260,17 @@ fun MapScreen() {
                     }
                 }
             }
+            // what a tap does this close in: come closer to pick a fix, or tap one; then what went
+            val mppHere = MapPick.metresPerPx(invMercY(cy), (minOf(viewW, viewH) / WORLD).toDouble() * zoom)
+            val hint = when {
+                fixNote.isNotEmpty() -> fixNote
+                trailDay == null || showAll || fixPick != null -> ""
+                MapPick.canPick(mppHere) -> "tap a fix to delete it"
+                mppHere <= MapPick.HINT_M_PER_PX -> "zoom in closer to pick a fix"
+                else -> ""
+            }
+            if (hint.isNotEmpty()) Text(hint, color = GhostText, style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.align(Alignment.TopStart).padding(8.dp).background(Void.copy(alpha = 0.8f)).padding(horizontal = 8.dp, vertical = 4.dp))
         }
         // THE TRAIL , where this phone has been, by day. One line closed; open, a strip of days
         // with their distance (a dot after the label means part of it is still only on the phone),
@@ -1142,6 +1299,37 @@ fun MapScreen() {
                         modifier = Modifier.clickable(enabled = newer) { stepDay(older = false) }.padding(horizontal = 10.dp, vertical = 2.dp))
                 }
                 Text(if (trailOpen) "▴" else "▾", color = TerminalDim, style = MaterialTheme.typography.labelMedium)
+            }
+            // THE PICKED FIX, open or closed panel alike: what a delete takes, and the choice
+            fixPick?.let { f ->
+                FixPickCard(f, clock = { clock(it) }, onDelete = { deleteFix(f) }, onRetry = { askFix(f) }, onCancel = { fixPick = null })
+            }
+            // WERE YOU THERE? The box's questions about the lit day, under the map whether the panel
+            // is open or not (a "?" on the map marks each): no deletes the points on the box (and on
+            // this phone) for good, yes keeps them and it never asks again. One at a time.
+            val dayQs = trailDay?.takeIf { !showAll && fixPick == null }?.let { questions[it] } ?: emptyList()
+            if (dayQs.isNotEmpty()) {
+                val qi = askAt.coerceIn(0, dayQs.size - 1)
+                val q = dayQs[qi]
+                if (dayQs.size > 1) Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("question ${qi + 1} of ${dayQs.size}", color = GhostTextDim, style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
+                    Text("next ›", color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.clickable { askAt = (qi + 1) % dayQs.size }.padding(horizontal = 10.dp, vertical = 2.dp))
+                }
+                TrailQuestionCard(q, clock = { clock(it) }, busy = answering == q) { keep ->
+                    answering = q
+                    mapScope.launch {
+                        val done = withContext(Dispatchers.IO) { BoxClient.trailAnswer(ctx, q, keep) }
+                        if (done != null) {
+                            if (!keep) withContext(Dispatchers.IO) { com.localghost.app.sync.LocationLog.forget(ctx, q.ts.toSet()) }
+                            questions = questions.mapValues { (_, l) -> l.filter { it != q } }.filterValues { it.isNotEmpty() }
+                            MapMemory.questions = questions
+                            // the day drawn, measured and told again without those points
+                            if (!keep) reloadTracks()
+                        }
+                        answering = null
+                    }
+                }
             }
             if (trailOpen && days.isNotEmpty()) {
                 Row(Modifier.horizontalScroll(rememberScrollState())) {
@@ -1196,31 +1384,6 @@ fun MapScreen() {
                                 color = GhostText, style = MaterialTheme.typography.labelMedium)
                         }
                         if (rt.r.note.isNotEmpty()) Text(rt.r.note, color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
-                    }
-                    // WERE YOU THERE? The box's questions about this day: no deletes the points on the
-                    // box (and on this phone) for good, yes keeps them and it never asks again.
-                    questions[d]?.forEach { q ->
-                        TrailQuestionCard(q, clock = { clock(it) }, busy = answering == q) { keep ->
-                            answering = q
-                            mapScope.launch {
-                                val done = withContext(Dispatchers.IO) { BoxClient.trailAnswer(ctx, q, keep) }
-                                if (done != null) {
-                                    if (!keep) withContext(Dispatchers.IO) { com.localghost.app.sync.LocationLog.forget(ctx, q.ts.toSet()) }
-                                    questions = questions.mapValues { (_, l) -> l.filter { it != q } }.filterValues { it.isNotEmpty() }
-                                    MapMemory.questions = questions
-                                    if (!keep) {
-                                        // the day drawn, measured and told again without those points
-                                        val batch = BoxClient.geoDayTracks(ctx, 60)
-                                        if (batch != null) {
-                                            val loaded = batch.filter { it.n >= 2 }.map { t -> trackOf(t.day, t.lat, t.lon, t.times, t.distanceM, phone = false, glitches = t.glitches, line = t.line) }
-                                            tracks = loaded + phoneTracks(ctx, loaded)
-                                            MapMemory.tracks = tracks
-                                        }
-                                    }
-                                }
-                                answering = null
-                            }
-                        }
                     }
                     if (dayPts.size >= 2) {
                         Slider(value = scrub, onValueChange = { scrub = it },

@@ -1288,6 +1288,23 @@ object BoxClient {
         null
     }
 
+    /** The fixes a delete of the fix at [ts] takes (POST /v1/geo/trail/forget): it and its
+     *  neighbours in time at the same spot (framed/forget.go). [dry] only asks which. */
+    class Forgotten(val ts: LongArray, val deleted: Int)
+
+    suspend fun trailForget(ctx: Context, ts: Long, dry: Boolean): Forgotten? = try {
+        val r = BoxHttp.postJson(ctx, "/v1/geo/trail/forget", org.json.JSONObject()
+            .put("ts", ts).put("dry", dry), readTimeoutMs = 45_000)
+        if (r.optBoolean("ok", false)) {
+            val a = r.optJSONArray("ts")
+            Forgotten(LongArray(a?.length() ?: 0) { a!!.optLong(it) }, r.optInt("deleted", 0))
+        } else null
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        null
+    }
+
     /** One day's track as ordered lat/lon pairs, pulled from framed's GeoJSON LineStrings. */
     suspend fun geoDayTrack(ctx: Context, day: String): List<Pair<Double, Double>>? = try {
         val gj = BoxHttp.getJson(ctx, "/v1/geo/day?d=$day")

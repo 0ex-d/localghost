@@ -256,6 +256,9 @@ func main() {
 	// world, once; background, idempotent, the old tiles stay served until the new set is whole.
 	// Also runs by itself at start when the shapefile is newer than the tiles.
 	tilesOut := filepath.Join(*mount, "landtiles")
+	// the same tiles tell the trail questions where the sea is ("that hop crosses the sea")
+	land := landtiles.NewLookup(tilesOut)
+	pipe.SetLandCheck(land.OnLand)
 	var tilesBusy sync.Mutex
 	buildTiles := func(why string) string {
 		shp := landtiles.FindShapefile(filepath.Join(*mount, "geo"))
@@ -276,6 +279,7 @@ func main() {
 				return
 			}
 			lg.Info("land tiles: done , "+st.String(), "fn", "geo-tiles")
+			land.Reset()
 			b, _ := json.Marshal(map[string]any{"state": "ready", "coastTiles": st.CoastCell, "landCells": st.LandCells, "points": st.Points, "bytes": st.Bytes})
 			_ = store.SetState("landtiles", b)
 		}()
@@ -502,6 +506,24 @@ func main() {
 			return ctlsock.Response{}, err
 		}
 		data, _ := json.Marshal(map[string]any{"deleted": n})
+		return ctlsock.Response{OK: true, Data: data}, nil
+	})
+	// trail-forget: the person zoomed in on a fix they know is wrong (framed/forget.go): the fix
+	// and its neighbours at the same spot; dry says which without deleting
+	ctl.Handle("trail-forget", func(args json.RawMessage) (ctlsock.Response, error) {
+		var a struct {
+			TS      int64   `json:"ts"`
+			RadiusM float64 `json:"radiusM"`
+			Dry     bool    `json:"dry"`
+		}
+		if len(args) == 0 || json.Unmarshal(args, &a) != nil || a.TS <= 0 {
+			return ctlsock.Response{}, fmt.Errorf("trail-forget requires ts (and radiusM, dry)")
+		}
+		run, n, err := pipe.ForgetSpot(a.TS, a.RadiusM, a.Dry)
+		if err != nil {
+			return ctlsock.Response{}, err
+		}
+		data, _ := json.Marshal(map[string]any{"ts": run, "deleted": n})
 		return ctlsock.Response{OK: true, Data: data}, nil
 	})
 	ctl.Handle("rebuild-day", func(args json.RawMessage) (ctlsock.Response, error) {

@@ -120,11 +120,19 @@ type Pipeline struct {
 	// nearRoad, when set, says whether a road passes near a point (roadgraph.NearRoad): a trail
 	// question asks "no road goes there" only with it
 	nearRoad func(lat, lon, withinM float64) (near, known bool)
+	// onLand, when set, says whether a point is on land (landtiles.Lookup): a trail question asks
+	// "that hop crosses the sea" only with it
+	onLand func(lat, lon float64) (land, known bool)
 }
 
 // SetRoadCheck gives the trail questions the road tiles (nil: never "no road").
 func (p *Pipeline) SetRoadCheck(fn func(lat, lon, withinM float64) (near, known bool)) {
 	p.nearRoad = fn
+}
+
+// SetLandCheck gives the trail questions the land tiles (nil: never "across the sea").
+func (p *Pipeline) SetLandCheck(fn func(lat, lon float64) (land, known bool)) {
+	p.onLand = fn
 }
 
 func NewPipeline(dirs Dirs, store *Store, log *slog.Logger) *Pipeline {
@@ -583,7 +591,7 @@ func (p *Pipeline) RebuildDay(day string) {
 		}
 		return false
 	}
-	questions := TrailQuestions(pts, start, end, p.nearRoad, kept)
+	questions := TrailQuestions(pts, start, end, AskChecks{NearRoad: p.nearRoad, OnLand: p.onLand, Kept: kept})
 	for i := range questions {
 		if p.resolvePlace != nil {
 			questions[i].Place = placeName(p.resolvePlace(questions[i].Lat, questions[i].Lon))

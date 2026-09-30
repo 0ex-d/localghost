@@ -994,3 +994,91 @@ func (s *Store) TierCount(tiers ...int) (int64, error) {
 	n, _ := strconv.ParseInt(*rows.Vals[0][0], 10, 64)
 	return n, nil
 }
+
+// KindState is one job kind's queue: due now, backing off after a failure, parked after five,
+// and the newest failure's message.
+type KindState struct {
+	Runnable  int64  `json:"runnable"`
+	Waiting   int64  `json:"waiting"`
+	Parked    int64  `json:"parked"`
+	LastError string `json:"lastError,omitempty"`
+}
+
+// JobKinds is every job kind's KindState.
+func (s *Store) JobKinds() (map[string]KindState, error) {
+	rows, err := s.db.Query(`
+		SELECT kind,
+		       count(*) FILTER (WHERE attempts < 5 AND run_after <= now()),
+		       count(*) FILTER (WHERE attempts < 5 AND run_after > now()),
+		       count(*) FILTER (WHERE attempts >= 5),
+		       coalesce((array_agg(last_error ORDER BY id DESC) FILTER (WHERE coalesce(last_error, '') <> ''))[1], '')
+		FROM search.jobs GROUP BY kind`)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]KindState{}
+	num := func(v *string) int64 {
+		if v == nil {
+			return 0
+		}
+		n, _ := strconv.ParseInt(*v, 10, 64)
+		return n
+	}
+	for _, r := range rows.Vals {
+		if len(r) != 5 || r[0] == nil {
+			continue
+		}
+		k := KindState{Runnable: num(r[1]), Waiting: num(r[2]), Parked: num(r[3])}
+		if r[4] != nil {
+			k.LastError = *r[4]
+		}
+		out[*r[0]] = k
+	}
+	return out, nil
+}
+
+// PhotoProgress is how far the photos are along: described (a caption's SCENE), named (a title),
+// tagged, and how many of each in the last hour, so "is it moving" has an answer.
+type PhotoProgress struct {
+	Photos        int64 `json:"photos"`
+	Described     int64 `json:"described"`
+	Named         int64 `json:"named"`
+	Tagged        int64 `json:"tagged"`
+	DescribedHour int64 `json:"describedLastHour"`
+	TaggedHour    int64 `json:"taggedLastHour"`
+}
+
+func (s *Store) PhotoProgress() (PhotoProgress, error) {
+	var p PhotoProgress
+	hour := time.Now().UTC().Unix() - 3600
+	rows, err := s.db.Query(`
+		SELECT count(*) FILTER (WHERE kind = 'photo'),
+		       count(*) FILTER (WHERE kind = 'photo' AND coalesce(description, '') <> ''),
+		       count(*) FILTER (WHERE kind = 'photo' AND coalesce(display_name, '') <> ''),
+		       count(*) FILTER (WHERE kind = 'photo' AND coalesce(description, '') <> '' AND described_at >= $1)
+		FROM frames`, hour)
+	if err != nil {
+		return p, err
+	}
+	get := func(r []*string, i int) int64 {
+		if i >= len(r) || r[i] == nil {
+			return 0
+		}
+		n, _ := strconv.ParseInt(*r[i], 10, 64)
+		return n
+	}
+	if len(rows.Vals) == 1 {
+		r := rows.Vals[0]
+		p.Photos, p.Described, p.Named, p.DescribedHour = get(r, 0), get(r, 1), get(r, 2), get(r, 3)
+	}
+	rows, err = s.db.Query(`
+		SELECT count(DISTINCT hash), count(DISTINCT hash) FILTER (WHERE created_at >= $1)
+		FROM frame_tags WHERE source = 'model'`, hour)
+	if err != nil {
+		return p, err
+	}
+	if len(rows.Vals) == 1 {
+		p.Tagged, p.TaggedHour = get(rows.Vals[0], 0), get(rows.Vals[0], 1)
+	}
+	return p, nil
+}

@@ -136,6 +136,18 @@ type trailAnsweredDoc struct {
 	Deleted int  `json:"deleted"`
 }
 
+type trailForgetDoc struct {
+	TS      int64   `json:"ts"`
+	RadiusM float64 `json:"radiusM,omitempty"`
+	Dry     bool    `json:"dry,omitempty"`
+}
+
+type trailForgottenDoc struct {
+	OK      bool    `json:"ok"`
+	TS      []int64 `json:"ts"`
+	Deleted int     `json:"deleted"`
+}
+
 type updateDoc struct {
 	Version string `json:"version"`
 	Trial   struct {
@@ -207,6 +219,8 @@ func (s *Server) routes() []route {
 			Auth: true, Response: modelState{}, Handler: s.handleModel},
 		{Method: "POST", Path: "/v1/geo/trail/answer", Summary: "Were you there? keep=true remembers the stretch; keep=false deletes its points for good.",
 			Auth: true, Request: trailAnswerDoc{}, Response: trailAnsweredDoc{}, Handler: s.handleTrailAnswer},
+		{Method: "POST", Path: "/v1/geo/trail/forget", Summary: "Delete one fix and its neighbours at the same spot (dry=true only says which).",
+			Auth: true, Request: trailForgetDoc{}, Response: trailForgottenDoc{}, Handler: s.handleTrailForget},
 		{Method: "GET", Path: "/v1/trail/key", Summary: "This device's trail key, to read its own sealed trail while unlocked ({have:false} when none).",
 			Auth: true, Response: trailKeyDoc{}, Handler: s.handleTrailKey},
 		{Method: "POST", Path: "/v1/trail/key", Summary: "The phone hands its trail key (raw X25519, base64) to the vault, once.",

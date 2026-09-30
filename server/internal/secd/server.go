@@ -310,6 +310,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/chat/plan", s.handleChatPlan)       // what the question needs from the web, from the model, before the phone searches
 	mux.HandleFunc("/v1/locations", s.handleLocations)
 	mux.HandleFunc("/v1/geo/trail/answer", s.handleTrailAnswer)      // "were you there?" answered: keep, or delete the points
+	mux.HandleFunc("/v1/geo/trail/forget", s.handleTrailForget)      // one wrong fix on the map, and its neighbours at the spot
 	mux.HandleFunc("/v1/trail/key", s.handleTrailKey)                // the phone's trail key, kept in the vault
 	mux.HandleFunc("/v1/update", s.handleUpdate)                     // what runs, and a release on trial
 	mux.HandleFunc("/v1/update/file", s.handleUpdateFile)            // one file of the signed server set, from the phone

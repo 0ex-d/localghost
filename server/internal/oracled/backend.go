@@ -166,11 +166,17 @@ func (b *llamaBackend) Start(ctx context.Context) error {
 	}
 	args = append(args, b.cfg.ExtraArgs...)
 
-	// A llama-server already running from this binary is a predecessor's orphan (Pdeathsig only
+	// A llama-server already running from this binary on this port is a predecessor's orphan (Pdeathsig only
 	// covers children of THIS build's oracled; one from before it has been seen alive for sixty
 	// days, holding the port and the VRAM, so the next child bound nothing and ran on the CPU).
 	// It has no owner left to stop it: end it here, and say so.
-	if strays := procs.KillStrays(b.cfg.BinPath, 2*time.Second); len(strays) > 0 {
+	// Only one on OUR port: searchd's embedder runs from the same binary on its own port, alive
+	// and owned, and ending it here took search's vectors down at every model start.
+	port := strconv.Itoa(b.cfg.Port)
+	ours := func(args []string) bool {
+		return procs.HasFlag(args, "--port", port) && !hasArg(args, "--embedding")
+	}
+	if strays := procs.KillStraysMatching(b.cfg.BinPath, 2*time.Second, ours); len(strays) > 0 {
 		slog.Warn("killed a stray llama-server before starting ours , it was holding the port and the GPU", "fn", "Start", "strays", strings.Join(strays, ", "))
 	}
 	b.info.resetTail()
@@ -609,4 +615,13 @@ func (b *llamaBackend) StreamChat(ctx context.Context, history []Turn, prompt, t
 		return nil, "", err
 	}
 	return resp.Body, b.cfg.ModelName, nil
+}
+
+func hasArg(args []string, a string) bool {
+	for _, x := range args {
+		if x == a {
+			return true
+		}
+	}
+	return false
 }
