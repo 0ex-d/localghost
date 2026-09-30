@@ -3658,3 +3658,52 @@ report's photo counts; a model with no backend rests the lanes with its reason a
 lives; a parked tag job's error reported), `TestKillStraysMatchingSparesTheEmbedder` (the orphan on
 the model's port ended, the embedder on its own port untouched), `TestEmbedServerComesBack` (the
 embedder killed from outside is started again, and Stop ends the watch).
+
+## Vision was switched off by hand and nothing said so (oracled, searchd, rotlog)
+
+Vlad: "how did we lose vision?"
+
+The queue said it: the caption lane resting on "no vision: llama-server takes no images ... you
+may need to provide the mmproj". On 29 Sep, a full-size photo made the mirror's llama.cpp v0.5.0
+abort and take chat down with it, and the way back that night was to move the projector aside
+(`mmproj-F16.gguf` to `mmproj-F16.gguf.off`) and run the model text only. The next drop fitted
+every image before the engine sees it ("Captions come back"), and its steps ended with putting
+the projector back; that step did not happen, and nothing on the box ever said so.
+- oracled noticed (`mmproj not found , starting TEXT-ONLY`), but through the package's default
+  logger, which went to stderr, and watchd starts every daemon with no stdout or stderr. The line
+  went nowhere.
+- It then dropped the projector from its config for good, so even a file put back was not used
+  until oracled itself restarted.
+- The health line said OK, and `models` said ready: a text-only engine looked like a working one.
+- searchd's "no vision" hold rested every model lane, not only captions, so the tag pass and the
+  category backfill stopped too (one photo tagged in the last hour), though both are text.
+
+Fixed:
+- `rotlog.Logger` also makes itself the process's default logger, so a package-level `slog` line
+  in any daemon lands in that daemon's log.
+- oracled looks for the projector at every start (`projector()`), keeps whether the running
+  engine sees images, and says it three ways: the log ("starting TEXT-ONLY: no photo will be
+  described until the projector is back"), the health line (still OK, so chat and the unlock do
+  not wait on it, with "text only, no photo is described: ..."), and `models` (`vision`,
+  `visionWhy`). A `.off` beside the configured path is named: "the projector is switched off by
+  hand (mmproj-F16.gguf.off): rename it back to mmproj-F16.gguf and restart ghost.oracled".
+- searchd has two holds. "No backend" or a chat rests every model lane; "no vision" rests only
+  captions (`captionLane` in `queue`), and tags and categories go on.
+- Categorize: an answer with no category:tag pair at all ("Please provide the list of tags you
+  would like me to categorize!") no longer fails the job until it parks. The ten tags are asked
+  one at a time, and a tag that still gets no pair is "other".
+
+On the box, put the projector back (the crash it was moved aside for is fixed: every image is
+scaled to 1024 px before the engine sees it) and let the parked embeds go again:
+
+    D=/proc/$(pidof ghost.secd | cut -d' ' -f1)/root/var/lib/ghost/mnt/slot0/ai-models
+    sudo ls -la $D | grep mmproj
+    sudo mv $D/mmproj-F16.gguf.off $D/mmproj-F16.gguf
+    sudo ghost-ctl restart-daemon ghost.oracled
+    sudo ./tools/ns.sh ./bin/ghost-cli ghost.oracled models      # "vision": true
+    sudo ./tools/ns.sh ./bin/ghost-cli ghost.searchd unpark kind=embed_text
+
+Tested: `TestProjectorIsLookedForAtEveryStart` (missing, switched off by hand, put back and used
+without a restart of oracled, not configured), `TestNoVisionHoldsOnlyCaptions` against Postgres
+(the tag pass runs while captions rest, the caption keeps its lives), `TestCategorizeAsksOddTagsAlone`
+(a chunk refused, then tag by tag, the odd one "other").

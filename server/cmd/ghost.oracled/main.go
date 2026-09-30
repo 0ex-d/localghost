@@ -285,6 +285,12 @@ func main() {
 			"speed":   oracled.SpeedVerdict(st.TokPerSecAvg, info),
 			"onGPU":   info.OnGPU(),
 		}
+		// whether it sees images: a text-only engine answers chat and tags, and describes nothing
+		vis, why := llama.Vision()
+		m["vision"] = vis
+		if why != "" {
+			m["visionWhy"] = why
+		}
 		data, _ := json.Marshal(m)
 		return ctlsock.Response{OK: true, Data: data}, nil
 	})
@@ -298,6 +304,11 @@ func main() {
 	// Health: OK once the process is up; degraded until the model is ready. secd/watchd poll this.
 	rep := ghosthealth.ReporterFunc(func() ghosthealth.Health {
 		if modelReady.Load() {
+			// text only is still OK (chat and tags work, and the unlock and chat wait on this
+			// code), but the detail says so, where Box Status shows it
+			if vis, why := llama.Vision(); !vis {
+				return ghosthealth.Health{Code: ghosthealth.OK, Name: service, Detail: "text only, no photo is described: " + why}
+			}
 			return ghosthealth.Health{Code: ghosthealth.OK, Name: service}
 		}
 		why, _ := modelWhy.Load().(string)

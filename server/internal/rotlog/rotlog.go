@@ -111,7 +111,13 @@ func Logger(w io.Writer) (*slog.Logger, *slog.LevelVar) {
 			return a
 		},
 	})
-	return slog.New(h), lvl
+	l := slog.New(h)
+	// ...and the process's default: a daemon's output goes nowhere (watchd starts it with no
+	// stdout or stderr), so a package-level slog.Warn was never seen. oracled's "mmproj not
+	// found , starting TEXT-ONLY" was one: the box ran without seeing images for a day and its
+	// own log never said so.
+	slog.SetDefault(l)
+	return l, lvl
 }
 
 // LevelFromEnv maps GHOST_LOG_LEVEL to a slog.Level, defaulting to Info. Exported so secd (which logs

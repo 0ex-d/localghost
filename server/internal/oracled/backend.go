@@ -21,6 +21,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -50,11 +51,42 @@ type LlamaConfig struct {
 	StrikesPath string
 }
 
+// projector is the mmproj path to start with, or "" and why not.
+func (b *llamaBackend) projector() (string, string) {
+	p := b.cfg.MmprojPath
+	if p == "" {
+		return "", "no projector configured (mmprojPath is empty in conf/ghost.oracled.conf)"
+	}
+	if _, err := os.Stat(p); err == nil {
+		return p, ""
+	}
+	if _, err := os.Stat(p + ".off"); err == nil {
+		return "", fmt.Sprintf("the projector is switched off by hand (%s.off): rename it back to %s and restart ghost.oracled", filepath.Base(p), filepath.Base(p))
+	}
+	return "", "no projector at " + p + " (tools/setup_llama.sh puts the pinned one there)"
+}
+
+// Vision is whether the running engine sees images, and why not.
+func (b *llamaBackend) Vision() (bool, string) {
+	b.visionMu.Lock()
+	defer b.visionMu.Unlock()
+	return b.vision, b.visionWhy
+}
+
+func (b *llamaBackend) setVision(on bool, why string) {
+	b.visionMu.Lock()
+	b.vision, b.visionWhy = on, why
+	b.visionMu.Unlock()
+}
+
 // llamaBackend owns a llama-server subprocess.
 type llamaBackend struct {
-	cfg    LlamaConfig
-	proc   *os.Process
-	client *http.Client
+	visionMu  sync.Mutex
+	vision    bool   // the running engine was started with its projector
+	visionWhy string // why not
+	cfg       LlamaConfig
+	proc      *os.Process
+	client    *http.Client
 	// streamClient has NO overall timeout , a streamed deep-think runs for minutes by design, and
 	// killing it at 120s would truncate answers mid-sentence. Cancellation comes from the request
 	// context (the app hanging up propagates all the way here).
@@ -152,17 +184,20 @@ func (b *llamaBackend) Start(ctx context.Context) error {
 		// a box that genuinely lacks one.
 		"-ngl", "99",
 	}
-	if b.cfg.MmprojPath != "" {
-		// Optional: a configured-but-missing projector degrades to TEXT-ONLY with a loud warning
-		// instead of handing llama-server a dead path and dying entirely. Photo captioning needs the
-		// projector; everything else does not.
-		if _, err := os.Stat(b.cfg.MmprojPath); err != nil {
-			slog.Warn("mmproj not found , starting TEXT-ONLY (no image understanding)", "fn", "Start", "path", b.cfg.MmprojPath)
-			b.cfg.MmprojPath = ""
+	// The projector, looked for at EVERY start: a configured-but-missing one degrades to TEXT-ONLY
+	// instead of handing llama-server a dead path and dying entirely (captions need it, nothing
+	// else does). It used to be dropped from the config for good at the first miss, so a projector
+	// put back was not used until oracled itself restarted; and the warning went to a stderr
+	// nobody reads. Now the state is kept (Vision), said in the log, on the health line and in
+	// `models`, and a start after the file is back uses it.
+	if mm, note := b.projector(); mm != "" {
+		args = append(args, "--mmproj", mm)
+		b.setVision(true, "")
+	} else {
+		b.setVision(false, note)
+		if note != "" {
+			slog.Warn("starting TEXT-ONLY: no photo will be described until the projector is back", "fn", "Start", "why", note)
 		}
-	}
-	if b.cfg.MmprojPath != "" {
-		args = append(args, "--mmproj", b.cfg.MmprojPath)
 	}
 	args = append(args, b.cfg.ExtraArgs...)
 

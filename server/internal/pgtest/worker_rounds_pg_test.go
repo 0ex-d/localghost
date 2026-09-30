@@ -116,6 +116,52 @@ func TestTagPassesFollowTheirCaptions(t *testing.T) {
 	}
 }
 
+// An engine that sees no images holds only the caption lane: the tag pass and the category
+// backfill are text and go on, and the caption keeps its lives.
+func TestNoVisionHoldsOnlyCaptions(t *testing.T) {
+	db := fresh(t)
+	ss := search.NewStore(db)
+	lg := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	ing := &search.Ingester{Store: ss, Log: lg}
+	if err := ss.EnqueueJob("caption", map[string]any{"origId": 1, "path": "/p/x.webp"}); err != nil {
+		t.Fatal(err)
+	}
+	sha := make([]byte, 32)
+	sha[0] = 9
+	id, _, err := ss.InsertOriginal(search.Original{Source: "image", SHA256: sha, Path: "/a/x.jpg", CapturedAt: time.Unix(1, 0), Daemon: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ss.EnqueueJob("tag", map[string]any{"origId": id, "path": "/p/" + strings.Repeat("a", 32) + ".webp", "caption": "SCENE: a boat", "captured": 1}); err != nil {
+		t.Fatal(err)
+	}
+	c := &calls{}
+	w := &search.Worker{Store: ss, Caption: blindCaptioner{}, Tag: fakeTagger{c}, Ingester: ing, Log: lg, Interval: time.Second}
+	w.RunOnce(context.Background())
+	if strings.Join(c.log, ",") != "tags" {
+		t.Fatalf("the model was asked %v; the tag pass should run", c.log)
+	}
+	if l := w.CaptionLane(); !l.Resting || !strings.Contains(l.Why, "no vision") {
+		t.Fatalf("caption lane %+v", l)
+	}
+	if l := w.Lanes(); l.Resting {
+		t.Fatalf("every model lane resting for want of vision: %+v", l)
+	}
+	kinds, _ := ss.JobKinds()
+	if k := kinds["caption"]; k.Waiting != 1 || k.Parked != 0 {
+		t.Fatalf("caption %+v", k)
+	}
+	if _, ok := kinds["tag"]; ok {
+		t.Fatalf("the tag job is still there: %+v", kinds["tag"])
+	}
+}
+
+type blindCaptioner struct{}
+
+func (blindCaptioner) Caption(context.Context, string) (string, error) {
+	return "", fmt.Errorf("no vision: llama-server takes no images (started without the mmproj projector?): image input is not supported")
+}
+
 type downCaptioner struct{}
 
 func (downCaptioner) Caption(context.Context, string) (string, error) {

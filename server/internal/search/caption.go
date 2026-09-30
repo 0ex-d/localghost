@@ -12,7 +12,6 @@ package search
 import (
 	"context"
 	"errors"
-	"fmt"
 	"regexp"
 	"strings"
 	"time"
@@ -188,27 +187,52 @@ func (t *TagOracle) Categorize(ctx context.Context, tags []string) ([]Tag, error
 			end = len(tags)
 		}
 		chunk := tags[start:end]
-		resp, err := t.Client.Infer(oracle.Request{
-			Capability: "tags",
-			Class:      oracle.ClassLocalSmall,
-			Priority:   oracle.PriorityBackground,
-			Input:      CategorizePrompt + strings.Join(chunk, ", "),
-			MaxTokens:  24 * len(chunk),
-			DeadlineMS: int(t.deadline().Milliseconds()),
-		})
+		got, ok, err := t.categorizeOnce(chunk)
 		if err != nil {
 			return nil, err
 		}
-		if resp.Err != "" {
-			return nil, errors.New(resp.Err)
-		}
-		got, ok := AssignCategories(chunk, resp.Output)
 		if !ok {
-			return nil, fmt.Errorf("the model's answer has no category:tag pair: %q", clipRunes(resp.Output, 160))
+			// An answer with no pair in it at all: the model did not see these as tags ("Please
+			// provide the list of tags you would like me to categorize!"), usually for one odd tag
+			// in the ten. It used to fail the job, which came back and failed the same way until
+			// it parked. Each tag is asked on its own; one that still gets no pair has been asked
+			// and placed nowhere, which is what OtherCategory means.
+			got = nil
+			for _, tag := range chunk {
+				one, ok1, err1 := t.categorizeOnce([]string{tag})
+				if err1 != nil {
+					return nil, err1
+				}
+				if !ok1 {
+					one = []Tag{{Name: tag, Category: OtherCategory}}
+				}
+				got = append(got, one...)
+			}
 		}
 		out = append(out, got...)
 	}
 	return out, nil
+}
+
+// categorizeOnce asks the model about one chunk; ok is false when its answer has no category:tag
+// pair at all.
+func (t *TagOracle) categorizeOnce(chunk []string) ([]Tag, bool, error) {
+	resp, err := t.Client.Infer(oracle.Request{
+		Capability: "tags",
+		Class:      oracle.ClassLocalSmall,
+		Priority:   oracle.PriorityBackground,
+		Input:      CategorizePrompt + strings.Join(chunk, ", "),
+		MaxTokens:  24 * len(chunk),
+		DeadlineMS: int(t.deadline().Milliseconds()),
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	if resp.Err != "" {
+		return nil, false, errors.New(resp.Err)
+	}
+	got, ok := AssignCategories(chunk, resp.Output)
+	return got, ok, nil
 }
 
 func (t *TagOracle) deadline() time.Duration {

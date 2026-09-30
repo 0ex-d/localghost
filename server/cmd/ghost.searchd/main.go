@@ -549,7 +549,8 @@ func main() {
 			"pendingEmbeds": pending, "staleChunks": stale, "parkedJobs": parked, "runnableJobs": runnable,
 			// per kind (due, backing off, parked, the newest failure), whether the model lanes are
 			// resting and why, and how far the photos are: "is it moving" in one answer
-			"modelLanes": wk.Lanes(),
+			"modelLanes":  wk.Lanes(),
+			"captionLane": wk.CaptionLane(),
 		}
 		if kinds, kerr := storeA.JobKinds(); kerr == nil {
 			out["kinds"] = kinds

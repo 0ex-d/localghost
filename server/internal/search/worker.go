@@ -15,17 +15,43 @@ import (
 )
 
 type Worker struct {
-	modelHoldUntil time.Time // caption/tag lanes rest until here while oracled warms
-	holdMu         sync.Mutex
-	holdWhy        string    // why they rest (the error that set the hold), for `queue`
-	lastHoldAt     time.Time // when the lanes last began to rest
-	Store          *Store
-	Embed          *Embedder // nil = vector-less; embed jobs are not claimed
-	Caption        Captioner
-	Tag            Tagger // nil = tags parked like vision-less captions
-	Ingester       *Ingester
-	Log            *slog.Logger
-	Interval       time.Duration
+	holdMu     sync.Mutex
+	modelHold  laneHold // every model lane (caption, tag, categorize) rests: oracled warming, or a chat
+	visionHold laneHold // only captions rest: the engine is up but sees no images; text work goes on
+	Store      *Store
+	Embed      *Embedder // nil = vector-less; embed jobs are not claimed
+	Caption    Captioner
+	Tag        Tagger // nil = tags parked like vision-less captions
+	Ingester   *Ingester
+	Log        *slog.Logger
+	Interval   time.Duration
+}
+
+// laneHold is a lane resting: until when, why, and since when (one spell, across the short holds
+// that keep renewing it).
+type laneHold struct {
+	until, since time.Time
+	why          string
+}
+
+// set rests the lane for d; fresh when it was not resting (the caller logs one line per storm).
+func (h *laneHold) set(d time.Duration, why string) (fresh bool) {
+	fresh = time.Now().After(h.until)
+	// one resting spell, for `queue`, until the lane has run for two minutes without a hold
+	if time.Since(h.until) > 2*time.Minute {
+		h.since = time.Now()
+	}
+	h.until, h.why = time.Now().Add(d), why
+	return fresh
+}
+
+func (h *laneHold) on() bool { return time.Now().Before(h.until) }
+
+func (h *laneHold) state() LaneState {
+	if !h.on() {
+		return LaneState{}
+	}
+	return LaneState{Resting: true, Until: h.until.Unix(), Why: h.why, RestingSince: h.since.Unix()}
 }
 
 // Run polls all job kinds until ctx ends.
@@ -48,27 +74,22 @@ const categorizePerRound = 3
 // RunOnce is one tick: every lane worked until nothing is runnable (or the model lanes rest).
 func (w *Worker) RunOnce(ctx context.Context) { w.tick(ctx) }
 
+// held: every model lane rests.
 func (w *Worker) held() bool {
 	w.holdMu.Lock()
 	defer w.holdMu.Unlock()
-	return time.Now().Before(w.modelHoldUntil)
+	return w.modelHold.on()
 }
 
-// hold rests the model lanes for d, and says why (the first line of a storm is logged by the caller).
-func (w *Worker) hold(d time.Duration, why string) (fresh bool) {
+// captionsHeld: the caption lane rests (with the rest, or alone for want of vision).
+func (w *Worker) captionsHeld() bool {
 	w.holdMu.Lock()
 	defer w.holdMu.Unlock()
-	fresh = time.Now().After(w.modelHoldUntil)
-	// one resting spell, for `queue`, until the lanes have run for two minutes without a hold
-	if time.Since(w.modelHoldUntil) > 2*time.Minute {
-		w.lastHoldAt = time.Now()
-	}
-	w.modelHoldUntil, w.holdWhy = time.Now().Add(d), why
-	return fresh
+	return w.modelHold.on() || w.visionHold.on()
 }
 
-// LaneState is whether the model lanes (caption, tag, categorize) are resting, until when and why:
-// the one thing the job counts cannot show, a queue that is full because nothing is taking from it.
+// LaneState is whether a lane is resting, until when and why: the one thing the job counts cannot
+// show, a queue that is full because nothing is taking from it.
 type LaneState struct {
 	Resting      bool   `json:"resting"`
 	Until        int64  `json:"until,omitempty"` // unix seconds
@@ -76,13 +97,18 @@ type LaneState struct {
 	RestingSince int64  `json:"restingSince,omitempty"`
 }
 
+// Lanes is the model lanes' hold (all of caption, tag and categorize).
 func (w *Worker) Lanes() LaneState {
 	w.holdMu.Lock()
 	defer w.holdMu.Unlock()
-	if !time.Now().Before(w.modelHoldUntil) {
-		return LaneState{}
-	}
-	return LaneState{Resting: true, Until: w.modelHoldUntil.Unix(), Why: w.holdWhy, RestingSince: w.lastHoldAt.Unix()}
+	return w.modelHold.state()
+}
+
+// CaptionLane is the caption lane's own hold: the engine takes no images.
+func (w *Worker) CaptionLane() LaneState {
+	w.holdMu.Lock()
+	defer w.holdMu.Unlock()
+	return w.visionHold.state()
 }
 
 // tick works the lanes in ROUNDS until a round finds nothing to do. It used to drain each lane in
@@ -113,7 +139,8 @@ func (w *Worker) tick(ctx context.Context) {
 		for n := 0; n < categorizePerRound && !w.held() && w.one(ctx, "categorize", w.doCategorize); n++ {
 			did = true
 		}
-		if !w.held() && w.one(ctx, "caption", w.doCaption) {
+		// a model that sees no images holds only this lane: tags and categories are text
+		if !w.captionsHeld() && w.one(ctx, "caption", w.doCaption) {
 			did = true
 		}
 		for w.one(ctx, "reconsolidate", w.doReconsolidate) {
@@ -139,8 +166,11 @@ func (w *Worker) one(ctx context.Context, kind string, do func(context.Context, 
 			// caption would fail the same way. Hold the lane and keep the job's attempts, so fixing
 			// the server resumes the queue instead of finding five thousand parked jobs.
 			_ = w.Store.UnclaimJob(job.ID)
-			if w.hold(5*time.Minute, err.Error()) {
-				w.Log.Warn("the model takes no images , caption lane held 5 min, jobs kept", "fn", "one", "why", err.Error())
+			w.holdMu.Lock()
+			fresh := w.visionHold.set(5*time.Minute, err.Error())
+			w.holdMu.Unlock()
+			if fresh {
+				w.Log.Warn("the model takes no images , caption lane held 5 min, jobs kept (tags and categories go on)", "fn", "one", "why", err.Error())
 			}
 			return false
 		}
@@ -149,7 +179,10 @@ func (w *Worker) one(ctx context.Context, kind string, do func(context.Context, 
 			// the attempt (the job did nothing wrong) and hold the model lanes. One log line per
 			// storm, not one per job.
 			_ = w.Store.UnclaimJob(job.ID)
-			if w.hold(20*time.Second, err.Error()) {
+			w.holdMu.Lock()
+			fresh := w.modelHold.set(20*time.Second, err.Error())
+			w.holdMu.Unlock()
+			if fresh {
 				w.Log.Info("model warming or in a chat , caption/tag lanes resting 20s", "fn", "one", "why", err.Error())
 			}
 			return false
