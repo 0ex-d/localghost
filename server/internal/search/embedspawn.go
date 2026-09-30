@@ -50,8 +50,15 @@ func (e *EmbedServer) Start(within time.Duration) error {
 		// pooling is what these models were trained for. The batch/ctx sizes cover our chunk
 		// lengths with headroom.
 		"--pooling", "mean",
+		// An embedding model reads an input whole, in ONE physical batch: an input longer than
+		// -ub is refused with a 500 ("input is too large to process. increase the physical batch
+		// size"). -ub was 1024 under a 2048 context, and a chunk of numbers, links or text without
+		// spaces is far more tokens than its words suggest (chunker.go estimates from words), so
+		// such chunks never got a vector. The batch now spans the whole context; what is longer
+		// still is cut to fit by the worker (Embedder.EmbedFitting).
 		"-c", "2048",
-		"-ub", "1024",
+		"-b", "2048",
+		"-ub", "2048",
 		"-ngl", "0",
 	}
 	if e.cfg.Threads > 0 {

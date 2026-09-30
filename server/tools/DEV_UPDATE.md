@@ -3010,7 +3010,7 @@ Order on the box:
    ```
    D=/proc/$(pidof ghost.secd | cut -d' ' -f1)/root/var/lib/ghost/mnt/slot0/ai-models
    sudo mv $D/mmproj-F16.gguf.off $D/mmproj-F16.gguf
-   sudo ghost-ctl restart-daemon ghost.oracled
+   sudo ./tools/ns.sh ./bin/ghost-ctl restart-daemon ghost.oracled
    ```
 3. give the caption jobs that parked while it was text-only another go:
    `sudo ghost-cli ghost.searchd unpark kind=caption`.
@@ -3699,7 +3699,7 @@ scaled to 1024 px before the engine sees it) and let the parked embeds go again:
     D=/proc/$(pidof ghost.secd | cut -d' ' -f1)/root/var/lib/ghost/mnt/slot0/ai-models
     sudo ls -la $D | grep mmproj
     sudo mv $D/mmproj-F16.gguf.off $D/mmproj-F16.gguf
-    sudo ghost-ctl restart-daemon ghost.oracled
+    sudo ./tools/ns.sh ./bin/ghost-ctl restart-daemon ghost.oracled
     sudo ./tools/ns.sh ./bin/ghost-cli ghost.oracled models      # "vision": true
     sudo ./tools/ns.sh ./bin/ghost-cli ghost.searchd unpark kind=embed_text
 
@@ -3707,3 +3707,27 @@ Tested: `TestProjectorIsLookedForAtEveryStart` (missing, switched off by hand, p
 without a restart of oracled, not configured), `TestNoVisionHoldsOnlyCaptions` against Postgres
 (the tag pass runs while captions rest, the caption keeps its lives), `TestCategorizeAsksOddTagsAlone`
 (a chunk refused, then tag by tag, the odd one "other").
+
+## Chunks too long for the embedder get a vector (searchd)
+
+After `unpark kind=embed_text` the embedder took 1,392 of the 1,663 waiting chunks, and 131 jobs
+went back to waiting on "embeddings: http 500". An embedding model reads an input whole, in one
+physical batch, and searchd started it with `-ub 1024` under a 2048 context: an input over 1,024
+tokens is refused ("input is too large to process. increase the physical batch size"). The chunker
+sizes chunks from their words (400 estimated tokens), and a chunk of numbers, links or text without
+spaces is many more tokens than that. One such chunk failed its whole batch of up to 64, five times,
+into parked.
+
+- The embedder runs with `-b 2048 -ub 2048`, the batch as large as the context.
+- `Embedder.EmbedFitting`: a batch the server refuses is tried input by input, and an input it
+  still refuses is cut to half, then half again (five times at most), so its vector is of its
+  beginning rather than nothing; full-text search keeps the whole chunk. The log says how many were
+  cut. An unreachable server is not retried input by input.
+- The refusal now carries the server's own words (`embeddings: http 500: ...`).
+
+After the deploy: `sudo ./tools/ns.sh ./bin/ghost-cli ghost.searchd unpark kind=embed_text` for
+whatever parked meanwhile.
+
+Tested: `TestEmbedFittingCutsWhatTheServerRefuses` (a batch with one long input: three vectors, one
+from a cut text; a batch taken whole is one call; the server's message in the error; an unreachable
+server fails at once).

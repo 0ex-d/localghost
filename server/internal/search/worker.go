@@ -225,9 +225,12 @@ func (w *Worker) doEmbed(ctx context.Context, job *Job) error {
 	if len(texts) == 0 {
 		return nil // chunks deleted since enqueue; done
 	}
-	vecs, err := w.Embed.Embed(ctx, texts)
+	vecs, cut, err := w.Embed.EmbedFitting(ctx, texts)
 	if err != nil {
 		return err
+	}
+	if cut > 0 {
+		w.Log.Info("embedded from the beginning of chunks too long for the embedding model", "fn", "doEmbed", "job", job.ID, "chunks", cut)
 	}
 	for i, id := range ids {
 		if err := w.Store.SetEmbedding(id, vecs[i], w.Embed.ModelID); err != nil {

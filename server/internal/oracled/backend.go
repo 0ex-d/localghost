@@ -61,7 +61,7 @@ func (b *llamaBackend) projector() (string, string) {
 		return p, ""
 	}
 	if _, err := os.Stat(p + ".off"); err == nil {
-		return "", fmt.Sprintf("the projector is switched off by hand (%s.off): rename it back to %s and restart ghost.oracled", filepath.Base(p), filepath.Base(p))
+		return "", fmt.Sprintf("the projector is switched off by hand (%s.off): rename it back to %s and restart ghost.oracled (sudo ./tools/ns.sh ./bin/ghost-ctl restart-daemon ghost.oracled)", filepath.Base(p), filepath.Base(p))
 	}
 	return "", "no projector at " + p + " (tools/setup_llama.sh puts the pinned one there)"
 }

@@ -9,7 +9,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"strconv"
@@ -41,7 +43,9 @@ func (e *Embedder) Embed(ctx context.Context, texts []string) ([][]float32, erro
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("embeddings: http %d", resp.StatusCode)
+		// the server's own words: "input is too large to process" and friends are the reason
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 400))
+		return nil, &EmbedHTTPError{Code: resp.StatusCode, Msg: strings.TrimSpace(string(msg))}
 	}
 	var out struct {
 		Data []struct {
@@ -59,6 +63,53 @@ func (e *Embedder) Embed(ctx context.Context, texts []string) ([][]float32, erro
 		vecs[i] = normalize(d.Embedding)
 	}
 	return vecs, nil
+}
+
+// EmbedHTTPError is the embeddings server refusing a request: it was reached, and said no.
+type EmbedHTTPError struct {
+	Code int
+	Msg  string
+}
+
+func (e *EmbedHTTPError) Error() string {
+	if e.Msg == "" {
+		return fmt.Sprintf("embeddings: http %d", e.Code)
+	}
+	return fmt.Sprintf("embeddings: http %d: %s", e.Code, e.Msg)
+}
+
+// EmbedFitting is Embed for a batch that may hold an input the server refuses (too long for one
+// physical batch, or its context). The batch is tried whole; when the server says no, each input
+// is tried alone, and one it still refuses is cut to half its length, then half again, up to five
+// times, so its vector is of its beginning rather than nothing at all (full-text search still
+// has the whole of it). An unreachable server is not retried input by input. cut counts the
+// inputs embedded from a shortened text.
+func (e *Embedder) EmbedFitting(ctx context.Context, texts []string) (vecs [][]float32, cut int, err error) {
+	vecs, err = e.Embed(ctx, texts)
+	var he *EmbedHTTPError
+	if err == nil || !errors.As(err, &he) {
+		return vecs, 0, err
+	}
+	vecs = make([][]float32, len(texts))
+	for i, t := range texts {
+		v, err := e.Embed(ctx, []string{t})
+		for halves := 0; err != nil && errors.As(err, &he) && halves < 5; halves++ {
+			r := []rune(t)
+			if len(r) < 16 {
+				break
+			}
+			t = string(r[:len(r)/2])
+			v, err = e.Embed(ctx, []string{t})
+			if err == nil {
+				cut++
+			}
+		}
+		if err != nil {
+			return nil, cut, err
+		}
+		vecs[i] = v[0]
+	}
+	return vecs, cut, nil
 }
 
 func normalize(v []float32) []float32 {
