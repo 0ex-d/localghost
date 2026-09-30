@@ -3439,24 +3439,46 @@ our guidelines, it's a bit silly now." The angry ghost, its speech bubbles and t
 are gone. In their place, the same language as the unlock rings (`ui/QrApertureModel.kt`, pure and
 tested; drawn in `ui/QrScanScreen.kt`):
 
-- a vault aperture locks over the code, twelve segments around a crosshair, turning slowly with a
-  scan tick sweeping the ring;
-- the segments light as the box's rotating enrolment frames land (any eight of twelve complete it),
-  or all at once for a single clean code;
-- on success the lit ring blows open like the unlock's iris , it scales outward and fades through a
-  green bloom while a shockwave races past it, the camera there behind it , then BOX FOUND snaps in
-  with a little overshoot, the connection address types itself out (the host the phone will reach,
-  e.g. lgs.localghost.ai, not the box's nickname), and the pinned fingerprint fills in group by
-  group , the same identity the app checks on every connection;
-- a code that reads but is not a box turns the ring red, with one terse line ("that is a Wi-Fi code,
-  not a box") instead of a shouting ghost.
+- an eight-segment reticle sits fixed in the middle of the screen with a crosshair to aim , you point
+  it at the QR, it does not chase the code across the frame (that finder-to-view mapping was the
+  fragile, device-specific part, and it is gone from the scanning overlay);
+- one segment per frame: the eight fill as the box's rotating enrolment frames land (any eight of its
+  twelve complete it), or all eight at once for a single clean code;
+- as it reads, the crosshair becomes a padlock , the QR shown as a lock, its body carrying a little
+  QR grid and its shackle closing as the frames come in, shut at eight (`drawQrLock`);
+- a code that reads but is not a box turns the reticle red with one terse line ("that is a Wi-Fi
+  code, not a box"), no lock.
 
-The decode pipeline (finders, sampling, frame assembly, the two-frame confirmation, auto-torch and
-auto-zoom) is untouched; only the overlay changed. `qr-aperture-preview.html` (this drop) shows the
-geometry in a browser.
+**The found sequence establishes an identity, it does not "open".** Vlad: it should be "more about
+establishing connection than opening ... this is establishing identity, slowly build out as we scan
+and then show how we gain and sign a new certificate ... and then a now ready to login with your PIN
+message ... less messy and more minimalist." Once a box is found the camera view gives way to one
+minimalist sequence (`QrApertureModel.Step`, pure and tested; `drawEstablish`): a single ring builds
+out clockwise, four beads on it fill as each step lands, and a small glyph in the middle changes per
+step , the box's identity read from the code (a code grid), a secure channel to the host (two nodes
+and a pulse), this phone's certificate signed (a document with a signature drawn across it), the
+box's identity pinned (a padlock closing) , then a steady tick and "READY , unlock with your PIN".
+One quiet line of words under it, the rest carried by the animation. The scanning overlay is hidden
+the moment a box is found, so the two never sit on screen together.
 
-Tested: `QrApertureModelTest` (segments as frames land, a clean code fills at once, the iris easing,
-the phase from what the scanner sees). The drawing is structure-checked only.
+Three earlier extras went at the same time, all at Vlad's ask:
+
+- **The corner-bracket reticle is gone.** It drew from the sampled quad at the same time as the
+  aperture, so two shapes sat over the code. The aperture is the only overlay now.
+- **Auto-zoom is gone, replaced by a manual slider.** The old auto-zoom fired on a no-decode streak,
+  zoomed 2x, and made a small code it had zoomed into look worse (a 720p frame magnified is not more
+  detail). Now a ZOOM slider under the frame drives the camera at the person's pace; it starts at 1x
+  every time the scanner opens and is shown only when the camera can zoom.
+- **Auto-torch is gone.** The scanner no longer turns the flash on by itself; a dark code is lit by
+  moving to better light or the phone's own flashlight. No `enableTorch`, no luma sampling. The
+  per-frame pip row under the camera also went , the aperture's own segments show the frame progress.
+
+The decode pipeline (finders, sampling, frame assembly, the two-frame confirmation) is untouched;
+only the overlay and the found sequence changed. `qr-aperture-preview.html` (this drop) shows both.
+
+Tested: `QrApertureModelTest` (segments as frames land, a clean code fills at once, the establishing
+steps walked then held at READY, per-step progress, the phase from what the scanner sees). The
+drawing is structure-checked only.
 
 ## The phone's TLS is checked by secd itself, not by a header (secd, setup, ctl)
 

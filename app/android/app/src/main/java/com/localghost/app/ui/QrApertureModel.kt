@@ -10,8 +10,9 @@ package com.localghost.app.ui
  * turns the ring red. No ghosts, no fireworks , the lock either opens or it does not.
  */
 object QrApertureModel {
-    /** Segments around the aperture. Twelve reads clearly at a phone's arm length. */
-    const val SEGMENTS = 12
+    /** Segments around the aiming reticle: eight, one for each frame the box's rotating enrolment
+     *  needs (any eight of its twelve). A clean single code lights all eight at once. */
+    const val SEGMENTS = 8
 
     /**
      * How many segments are lit for a capture of [have] of [want] frames. [want] <= 1 (a single
@@ -32,13 +33,6 @@ object QrApertureModel {
     /** Angle of segment [i] of [segments] around the ring, degrees, 0 at the top, clockwise. */
     fun segmentAngle(i: Int, segments: Int = SEGMENTS): Float = -90f + i * (360f / segments)
 
-    /** How far the iris is open (0 shut, 1 wide) at [ms] into an open of [openMs], eased. */
-    fun irisOpen(ms: Long, openMs: Long): Float {
-        if (openMs <= 0) return 1f
-        val t = (ms.toFloat() / openMs).coerceIn(0f, 1f)
-        return 1f - (1f - t) * (1f - t) // ease-out
-    }
-
     /** What the aperture is doing, for the drawing to switch on. */
     enum class Phase { HUNTING, LOCKING, READING, WRONG, FOUND }
 
@@ -53,4 +47,43 @@ object QrApertureModel {
         codeInView -> Phase.LOCKING
         else -> Phase.HUNTING
     }
+
+    // --- establishing identity: the sequence played once a box is found, told in animation ---
+    //
+    // Enrolment is the phone gaining a signed identity with the box. Rather than an iris "opening",
+    // the found screen walks four steps that build the identity out, then hands over to the PIN. Pure,
+    // so the step at a given moment and its progress are tested; the screen draws each step's glyph.
+
+    /** The steps of the establishing sequence, in order. READY is the arrival, not a step. */
+    enum class Step { IDENTITY, CHANNEL, CERTIFICATE, PINNED }
+
+    /** The fraction of the sequence spent on the steps; the rest holds on READY. */
+    const val STEPS_FRAC = 0.82f
+
+    /** The step at [t] (0..1 over the whole sequence), or null once it is READY. */
+    fun stepAt(t: Float): Step? {
+        if (t >= STEPS_FRAC) return null
+        val n = Step.entries.size
+        val i = (t / STEPS_FRAC * n).toInt().coerceIn(0, n - 1)
+        return Step.entries[i]
+    }
+
+    /** How far through its own step [t] is (0..1); 1 once READY. */
+    fun stepProgress(t: Float): Float {
+        if (t >= STEPS_FRAC) return 1f
+        val n = Step.entries.size
+        val each = STEPS_FRAC / n
+        val i = (t / each).toInt().coerceIn(0, n - 1)
+        return ((t - i * each) / each).coerceIn(0f, 1f)
+    }
+
+    /** How many steps are fully done at [t] , for the beads that fill as the identity builds out. */
+    fun stepsDone(t: Float): Int {
+        val n = Step.entries.size
+        if (t >= STEPS_FRAC) return n
+        return (t / STEPS_FRAC * n).toInt().coerceIn(0, n)
+    }
+
+    /** READY: the identity is established, waiting on the PIN. */
+    fun ready(t: Float): Boolean = t >= STEPS_FRAC
 }

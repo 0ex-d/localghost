@@ -1,6 +1,7 @@
 package com.localghost.app.ui
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -11,24 +12,42 @@ class QrApertureModelTest {
         assertEquals(1f, QrApertureModel.progress(1, 1))
     }
 
-    @Test fun aMultiFrameCodeFillsAsFramesLand() {
-        // eight of twelve is the erasure-coded threshold; the ring is proportional
+    @Test fun eightSegmentsOnePerFrame() {
+        assertEquals(8, QrApertureModel.SEGMENTS)
         assertEquals(0, QrApertureModel.litSegments(0, 8))
         assertEquals(1, QrApertureModel.litSegments(1, 8))          // always at least one while reading
-        assertEquals(6, QrApertureModel.litSegments(4, 8))          // half of twelve
-        assertEquals(QrApertureModel.SEGMENTS, QrApertureModel.litSegments(8, 8))
+        assertEquals(4, QrApertureModel.litSegments(4, 8))          // one segment per frame
+        assertEquals(8, QrApertureModel.litSegments(8, 8))
         assertTrue(QrApertureModel.progress(4, 8) in 0.49f..0.51f)
     }
 
     @Test fun segmentAnglesRingTheClock() {
         assertEquals(-90f, QrApertureModel.segmentAngle(0), 0.001f)       // first at the top
-        assertEquals(-90f + 30f, QrApertureModel.segmentAngle(1), 0.001f) // 12 segments, 30 apart
+        assertEquals(-90f + 45f, QrApertureModel.segmentAngle(1), 0.001f) // 8 segments, 45 apart
     }
 
-    @Test fun irisEasesOpen() {
-        assertEquals(0f, QrApertureModel.irisOpen(0, 550), 0.001f)
-        assertEquals(1f, QrApertureModel.irisOpen(550, 550), 0.001f)
-        assertTrue(QrApertureModel.irisOpen(275, 550) > 0.5f) // ease-out is past halfway at the midpoint
+    @Test fun establishWalksTheStepsThenHoldsReady() {
+        // at the start, the first step, nothing done yet
+        assertEquals(QrApertureModel.Step.IDENTITY, QrApertureModel.stepAt(0f))
+        assertEquals(0, QrApertureModel.stepsDone(0f))
+        assertFalse(QrApertureModel.ready(0f))
+        // a quarter of the way through the steps portion is the second step
+        val q = QrApertureModel.STEPS_FRAC * 0.30f
+        assertEquals(QrApertureModel.Step.CHANNEL, QrApertureModel.stepAt(q))
+        assertEquals(1, QrApertureModel.stepsDone(q))
+        // just before the steps end, the last step
+        assertEquals(QrApertureModel.Step.PINNED, QrApertureModel.stepAt(QrApertureModel.STEPS_FRAC - 0.01f))
+        // past the steps portion it is READY, all four done, no current step
+        assertTrue(QrApertureModel.ready(0.9f))
+        assertEquals(null, QrApertureModel.stepAt(0.9f))
+        assertEquals(4, QrApertureModel.stepsDone(0.9f))
+        assertEquals(1f, QrApertureModel.stepProgress(0.9f), 0.001f)
+    }
+
+    @Test fun stepProgressRunsZeroToOneWithinAStep() {
+        val each = QrApertureModel.STEPS_FRAC / QrApertureModel.Step.entries.size
+        assertTrue(QrApertureModel.stepProgress(0.001f) < 0.1f)          // near the start of step 0
+        assertTrue(QrApertureModel.stepProgress(each * 0.99f) > 0.9f)    // near the end of step 0
     }
 
     @Test fun phaseFollowsWhatTheScannerSees() {
