@@ -52,6 +52,7 @@ fun SettingsScreen(
         // Read and written right here, like the phrase switches: this is per-phone state, and the
         // shell has no reason to carry it.
         val ctx = androidx.compose.ui.platform.LocalContext.current
+        val scope = rememberCoroutineScope()
         var trailTick by remember { mutableIntStateOf(0) }
         val trailOn = remember(trailTick) { com.localghost.app.settings.AppSettings.locationTrail(ctx) }
         val trailAllowed = remember(trailTick) { com.localghost.app.sync.LocationLog.hasPermission(ctx) }
@@ -60,20 +61,21 @@ fun SettingsScreen(
         val today = remember(trailTick) { com.localghost.app.sync.LocationLog.countToday(ctx) }
         val passive = remember(trailTick) { com.localghost.app.sync.LocationLog.passiveToday(ctx) }
         val sealedTo = remember(trailTick) { com.localghost.app.sync.TrailKeys.where(ctx) }
-        val todayLine = "$today today" + (if (passive > 0) " ($passive from other apps' fixes)" else "") +
-            when (sealedTo) {
-                "box" -> " · sealed on this phone, opened only by your box PIN"
-                "phone" -> " · sealed on this phone, opened by the phone's own unlock"
-                else -> ""
-            }
+        // the counts are the lines under the switch (TrailStatus); the switch says how it is kept
+        @Suppress("UNUSED_VARIABLE") val passiveSeen = passive
+        val sealedLine = when (sealedTo) {
+            "box" -> " · sealed on this phone, opened only by your box PIN"
+            "phone" -> " · sealed on this phone, opened by the phone's own unlock"
+            else -> ""
+        }
         toggleRow(
             label = "keep the trail",
             sub = when {
                 !trailOn -> "off, the phone takes no fixes"
                 !trailAllowed -> "on, but location is not allowed for LocalGhost , nothing is recorded"
                 !trailBackground -> "on while the app is open only ('always' not allowed)"
-                waiting > 0 -> "on, a point every quarter hour plus other apps' fixes · $todayLine · $waiting waiting for the box"
-                else -> "on, a point every quarter hour plus other apps' fixes · $todayLine · all on the box"
+                waiting > 0 -> "on, a point every quarter hour plus other apps' fixes$sealedLine · $waiting waiting for the box"
+                else -> "on, a point every quarter hour plus other apps' fixes$sealedLine · all on the box"
             },
             checked = trailOn,
             onChange = { on ->
@@ -82,6 +84,31 @@ fun SettingsScreen(
                 trailTick++
             },
         )
+        // WHERE THE TRAIL IS: the phone's newest fix it can read, and how the last hand-over to
+        // the box went. "It says no position" and "is it reaching the box" are both answered here.
+        if (trailOn) {
+            val newest = remember(trailTick) { com.localghost.app.sync.LocationLog.newest(ctx) }
+            val send = remember(trailTick) { com.localghost.app.sync.LocationLog.lastSend(ctx) }
+            val now = System.currentTimeMillis() / 1000
+            Text(TrailStatus.fixLine(newest?.ts, now), color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+            val byVia = remember(trailTick) { com.localghost.app.sync.LocationLog.todayByVia(ctx) }
+            val sentToday = remember(trailTick) { com.localghost.app.sync.LocationLog.sentToday(ctx) }
+            val sentTotal = remember(trailTick) { com.localghost.app.sync.LocationLog.sentTotal(ctx) }
+            val ring = remember(trailTick) {
+                if (com.localghost.app.sync.TrailKeys.opener() != null) com.localghost.app.sync.LocationLog.recent(ctx).size else null
+            }
+            Text(TrailStatus.todayLine(today, byVia, sentToday, waiting), color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+            Text(TrailStatus.holdsLine(ring, sentTotal), color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+            Text(TrailStatus.sendLine(send?.at, send?.what, send?.ok, send?.lastOkAt, waiting, now),
+                color = if (send != null && !send.ok && waiting > 0) Warning else GhostTextDim, style = MaterialTheme.typography.labelMedium)
+            Text("[ send the trail to the box now ]", color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.clickable {
+                    scope.launch {
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { com.localghost.app.sync.LocationLog.flush(ctx) }
+                        trailTick++
+                    }
+                }.padding(vertical = 6.dp))
+        }
         // The trail is drawn on the map , by day, with a clock along the line , and the switch
         // that records it lives here; one tap joins the two.
         Text("[ see the trail on the map ]", color = TerminalGreen, style = MaterialTheme.typography.labelMedium,

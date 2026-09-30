@@ -347,7 +347,7 @@ fun MapScreen() {
     var showAll by remember { mutableStateOf(false) }
     var frameTick by remember { mutableIntStateOf(0) } // bumped by a pick or a step: frame that day
     var scrub by remember { mutableStateOf(1f) }
-    val lastFix = remember(tracks) { com.localghost.app.sync.LocationLog.last(ctx) }
+    val lastFix = remember(tracks) { com.localghost.app.sync.LocationLog.newest(ctx) }
     val nowSec = remember(tracks) { System.currentTimeMillis() / 1000 }
     val todayKey = remember(nowSec) { dayKeyOf(nowSec) }
     val yesterdayKey = remember(nowSec) { dayKeyOf(nowSec - 86400) }
@@ -529,7 +529,7 @@ fun MapScreen() {
     // phone's last fix is known at once (prefs), so the first frame is already here; without a
     // fix ever taken, the newest photo at the same span; without either, the world.
     var openerDone by remember { mutableStateOf(lastView != null) }
-    val startFix = remember { com.localghost.app.sync.LocationLog.last(ctx) }
+    val startFix = remember { com.localghost.app.sync.LocationLog.newest(ctx) }
     LaunchedEffect(Unit) {
         val f = startFix ?: return@LaunchedEffect
         if (!openerDone && f.lat.isFinite() && f.lon.isFinite() && f.lat > -90.0 && f.lat < 90.0 && f.lon >= -180.0 && f.lon <= 180.0) {
@@ -758,7 +758,7 @@ fun MapScreen() {
             Text("[ where I am ]", color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
                 modifier = Modifier.clickable {
                     // back to the phone, a town's worth around it; twice narrows to the streets
-                    val f = com.localghost.app.sync.LocationLog.last(ctx)
+                    val f = com.localghost.app.sync.LocationLog.newest(ctx)
                     if (f != null) {
                         val close = kotlin.math.abs(cx - mercXD(f.lon)) < 0.01 && kotlin.math.abs(cy - mercYD(f.lat)) < 0.01 && zoom >= zoomForRadiusKm(12.0, f.lat) * 0.9f
                         cx = mercXD(f.lon); cy = mercYD(f.lat)
@@ -1260,15 +1260,8 @@ fun MapScreen() {
                     }
                 }
             }
-            // what a tap does this close in: come closer to pick a fix, or tap one; then what went
-            val mppHere = MapPick.metresPerPx(invMercY(cy), (minOf(viewW, viewH) / WORLD).toDouble() * zoom)
-            val hint = when {
-                fixNote.isNotEmpty() -> fixNote
-                trailDay == null || showAll || fixPick != null -> ""
-                MapPick.canPick(mppHere) -> "tap a fix to delete it"
-                mppHere <= MapPick.HINT_M_PER_PX -> "zoom in closer to pick a fix"
-                else -> ""
-            }
+            // what a delete took (no hint before it: a person zoomed right in taps a fix anyway)
+            val hint = fixNote
             if (hint.isNotEmpty()) Text(hint, color = GhostText, style = MaterialTheme.typography.labelMedium,
                 modifier = Modifier.align(Alignment.TopStart).padding(8.dp).background(Void.copy(alpha = 0.8f)).padding(horizontal = 8.dp, vertical = 4.dp))
         }

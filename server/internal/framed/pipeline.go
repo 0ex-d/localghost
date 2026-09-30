@@ -41,6 +41,7 @@ import (
 	"github.com/LocalGhostDao/localghost/server/internal/exif"
 	"github.com/LocalGhostDao/localghost/server/internal/geo"
 	"github.com/LocalGhostDao/localghost/server/internal/imgfit"
+	"github.com/LocalGhostDao/localghost/server/internal/workcount"
 )
 
 // Dirs is the frames layout under <mount>/frames.
@@ -93,6 +94,8 @@ type Pipeline struct {
 	dirs  Dirs
 	store *Store
 	log   *slog.Logger
+	// work counts what this framed did, by kind, for the Box Status drill-in (ctl `work`)
+	work *workcount.Counter
 	// Bundled ffmpeg (tools/bundle_ffmpeg.sh): binary + its private library closure ON the
 	// volume, so the OS disk carries no media software. Empty = fall back to PATH.
 	ffmpegBin string
@@ -136,8 +139,11 @@ func (p *Pipeline) SetLandCheck(fn func(lat, lon float64) (land, known bool)) {
 }
 
 func NewPipeline(dirs Dirs, store *Store, log *slog.Logger) *Pipeline {
-	return &Pipeline{dirs: dirs, store: store, log: log}
+	return &Pipeline{dirs: dirs, store: store, log: log, work: workcount.New()}
 }
+
+// Work is what this framed has done since it started, by kind, over the last hour and day.
+func (p *Pipeline) Work() workcount.Snapshot { return p.work.Snapshot() }
 
 // SetRouter gives the day route its streets (nil: chords).
 func (p *Pipeline) SetRouter(r dayroute.Router) { p.router = r }
@@ -196,6 +202,7 @@ func (p *Pipeline) DrainIncoming() int {
 			// problem across thousands of files), one line per file per tick wrote GIGABYTES of
 			// identical warnings. First few get detail; the rest become one summary line below.
 			failed++
+			p.work.Add("failed", 1)
 			if failed <= 3 {
 				p.log.Warn("process failed, leaving in incoming for retry", "fn", "DrainIncoming",
 					"file", e.Name(), "err", err)
@@ -251,6 +258,7 @@ func (p *Pipeline) processOne(path string) (string, error) {
 	if dup, err := p.store.HasFrame(hash); err == nil && dup {
 		// Already archived (re-sent upload). Drop the incoming copy; the archive has the bytes.
 		_ = os.Remove(path)
+		p.work.Add("duplicates", 1)
 		p.log.Debug("duplicate dropped", "fn", "processOne", "hash", hash)
 		return "", nil
 	}
@@ -262,6 +270,7 @@ func (p *Pipeline) processOne(path string) (string, error) {
 	// file, and let the phone-side SIZE filter (queued app work) stop them at the source.
 	if st, serr := os.Stat(path); serr == nil && st.Size() == 0 {
 		p.log.Info("empty upload skipped (cloud placeholder?)", "fn", "processOne", "path", filepath.Base(path))
+		p.work.Add("empty", 1)
 		_ = os.Remove(path)
 		return "", nil
 	}
@@ -409,6 +418,7 @@ func (p *Pipeline) processOne(path string) (string, error) {
 	}
 	p.log.Info("archived", "fn", "processOne", "hash", hash, "day", day, "gps", meta.HasGPS,
 		"bytes", len(raw))
+	p.work.Add("archived "+kindStr, 1)
 	if render := renderFor(kindStr, archPath, prevPath); p.notifySearch != nil && render != "" {
 		// Photos AND videos enter the caption lane, both through their RENDER: the upright 1600px
 		// preview for a still, the grabbed frame for a clip. Videos used to be excluded because the
@@ -475,7 +485,11 @@ func (p *Pipeline) makePreviews(raw []byte, src, hash string, orientation int) (
 		}
 		return out
 	}
-	return write(p.dirs.Preview, previewEdge), write(p.dirs.Thumb, thumbEdge)
+	prev, thumb = write(p.dirs.Preview, previewEdge), write(p.dirs.Thumb, thumbEdge)
+	if prev != "" {
+		p.work.Add("previews", 1)
+	}
+	return prev, thumb
 }
 
 // toWebP converts a JPEG on disk to WebP next to it using the cwebp binary. Empty string when cwebp
@@ -497,8 +511,8 @@ func toWebP(jpgPath string) string {
 
 // locBatch is the spool file secd writes for a location upload.
 type locBatch struct {
-	Source string       `json:"source"`
-	Points []TrackPoint `json:"points"`
+	Source string         `json:"source"`
+	Points []SpooledPoint `json:"points"`
 }
 
 // DrainLocations ingests spooled location batches and rebuilds the days they touch.
@@ -538,11 +552,12 @@ func (p *Pipeline) DrainLocations() int {
 		if src == "" {
 			src = "watch"
 		}
-		if err := p.store.InsertPoints(src, batch.Points); err != nil {
+		if err := p.store.InsertSpooled(src, batch.Points); err != nil {
 			p.log.Warn("point insert failed, leaving for retry", "fn", "DrainLocations", "err", err)
 			continue
 		}
 		_ = os.Remove(full)
+		p.work.Add("track points", len(batch.Points))
 		for _, pt := range batch.Points {
 			daysTouched[time.Unix(pt.TS, 0).UTC().Format("2006-01-02")] = true
 		}
@@ -564,6 +579,7 @@ func (p *Pipeline) RebuildDay(day string) {
 	if err != nil {
 		return
 	}
+	p.work.Add("days redrawn", 1)
 	start := t.UTC().Unix()
 	end := t.UTC().Add(24 * time.Hour).Unix()
 	// Two hours either side: the glitch rules judge a hop by what comes before and after it, and
@@ -962,6 +978,7 @@ func (p *Pipeline) derive(path string, forcePreviews bool) (Frame, bool, error) 
 	if err := p.store.InsertFrame(frame); err != nil {
 		return frame, previewed, fmt.Errorf("frame record: %w", err)
 	}
+	p.work.Add("re-derived", 1) // the stock-take's and reprocess's pass over an archived file
 	return frame, previewed, nil
 }
 

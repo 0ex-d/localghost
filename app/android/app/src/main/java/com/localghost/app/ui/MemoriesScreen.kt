@@ -82,11 +82,30 @@ fun MemoriesScreen(context: LifeContext?) {
     var near by remember { mutableStateOf<BoxClient.Nearby?>(null) }
     var nearLoading by remember { mutableStateOf(false) }
     var nearKm by remember { mutableStateOf(15) }
-    val lastFix = remember { com.localghost.app.sync.LocationLog.last(ctx) }
+    // WHERE "NEAR" IS: this phone's newest fix it can read (the sealed last point, or the recent
+    // ring while unlocked), else the box's newest trail point. It used to be the phone's last
+    // point alone, and when that could not be read it said "no position yet" to a person whose
+    // trail was on and on the box.
+    var nearFix by remember { mutableStateOf(com.localghost.app.sync.LocationLog.newest(ctx)) }
+    var nearFromBox by remember { mutableStateOf(false) }
+    var nearLooked by remember { mutableStateOf(false) }
+    val trailActive = remember { com.localghost.app.sync.LocationLog.active(ctx) }
     fun loadNear() {
-        val fix = lastFix ?: return
         nearLoading = true
-        scope.launch { near = BoxClient.nearby(ctx, fix.lat, fix.lon, nearKm); nearLoading = false }
+        scope.launch {
+            if (nearFix == null) {
+                // the box's newest point: the last vertex of the newest day it has a track for
+                val t = BoxClient.geoDayTracks(ctx, 2)?.filter { it.n >= 1 && it.times.size == it.n }?.maxByOrNull { it.times.last() }
+                if (t != null) {
+                    nearFix = com.localghost.app.sync.LocationLog.Point(t.times.last(), t.lat.last(), t.lon.last())
+                    nearFromBox = true
+                }
+                nearLooked = true
+            }
+            val fix = nearFix
+            near = if (fix != null) BoxClient.nearby(ctx, fix.lat, fix.lon, nearKm) else null
+            nearLoading = false
+        }
     }
     fun reload() { scope.launch { rows = BoxClient.memoriesList(ctx) } }
     LaunchedEffect(Unit) { reload() }
@@ -205,12 +224,20 @@ fun MemoriesScreen(context: LifeContext?) {
                 })
             if (nearOpen) {
                 val n = near
+                val fix = nearFix
                 when {
-                    lastFix == null -> Text("! no position yet , turn on the location trail (settings) and the box can say what is around you",
-                        color = TerminalDim, style = MaterialTheme.typography.labelMedium)
                     nearLoading -> Text("asking the box what is within $nearKm km…", color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+                    fix == null && !trailActive -> Text("! no position , turn on the location trail (settings) and the box can say what is around you",
+                        color = TerminalDim, style = MaterialTheme.typography.labelMedium)
+                    fix == null && nearLooked -> Text("! the trail is on, but neither this phone nor the box has a point to measure from yet , SETTINGS › LOCATION TRAIL says where it is",
+                        color = TerminalDim, style = MaterialTheme.typography.labelMedium)
+                    fix == null -> Text("! no position yet", color = TerminalDim, style = MaterialTheme.typography.labelMedium)
                     n == null -> Text("! the box did not answer", color = TerminalDim, style = MaterialTheme.typography.labelMedium)
-                    else -> NearbyCard(n, nearKm, onKm = { k -> nearKm = k; near = null; loadNear() })
+                    else -> {
+                        Text(TrailStatus.nearFrom(nearFromBox, fix.ts, System.currentTimeMillis() / 1000),
+                            color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+                        NearbyCard(n, nearKm, onKm = { k -> nearKm = k; near = null; loadNear() })
+                    }
                 }
             }
         }

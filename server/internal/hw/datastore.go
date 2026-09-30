@@ -513,6 +513,9 @@ CREATE TABLE IF NOT EXISTS location_points (
   source TEXT NOT NULL DEFAULT 'watch',
   PRIMARY KEY (ts, source)
 );
+-- via: how the phone took the point (w the quarter-hour fix, p another app's fix, a the app
+-- opening); '' for points from before, and from sources that do not say.
+ALTER TABLE location_points ADD COLUMN IF NOT EXISTS via TEXT NOT NULL DEFAULT '';
 `
 
 // initPostgresAuthAndSchema applies the PROVISIONED password (from services.conf) to the ghost role

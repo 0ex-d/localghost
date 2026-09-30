@@ -1806,6 +1806,11 @@ func (s *NotifStore) DaemonSummary(slot int, name string) ([]DaemonKV, error) {
 	if err != nil {
 		return nil, err
 	}
+	return DaemonSummaryFrom(c, name), nil
+}
+
+// DaemonSummaryFrom is DaemonSummary over any connection (the Postgres-backed tests use it).
+func DaemonSummaryFrom(c *poltergres.ReadWrite, name string) []DaemonKV {
 	one := func(q string, args ...any) string {
 		rows, qerr := c.Query(q, args...)
 		if qerr != nil || len(rows.Vals) == 0 || len(rows.Vals[0]) == 0 || rows.Vals[0][0] == nil {
@@ -1869,6 +1874,32 @@ func (s *NotifStore) DaemonSummary(slot int, name string) ([]DaemonKV, error) {
 		add("caption queue", one("SELECT count(*) FROM search.jobs WHERE kind = 'caption' AND attempts < 5"))
 		add("captions exhausted", one("SELECT count(*) FROM search.jobs WHERE kind = 'caption' AND attempts >= 5"))
 		add("track points", one("SELECT count(*) FROM location_points"))
+		// the last day's points by how the phone took them (via: the quarter-hour fix, another
+		// app's fix, the app opening), and the newest one's age: "is the trail still coming"
+		if rows, qerr := c.Query(
+			`SELECT via, count(*) FROM location_points WHERE ts >= extract(epoch from now())::bigint - 86400 GROUP BY via ORDER BY 2 DESC`); qerr == nil {
+			names := map[string]string{"w": "quarter-hour", "p": "other apps' fixes", "a": "app opened", "": "unmarked"}
+			parts := make([]string, 0, len(rows.Vals))
+			for _, v := range rows.Vals {
+				if len(v) == 2 && v[0] != nil && v[1] != nil {
+					name := names[*v[0]]
+					if name == "" {
+						name = *v[0]
+					}
+					parts = append(parts, *v[1]+" "+name)
+				}
+			}
+			if len(parts) > 0 {
+				add("trail, last 24 h", strings.Join(parts, " · "))
+			} else {
+				add("trail, last 24 h", "no points")
+			}
+		}
+		if ago := one("SELECT coalesce(extract(epoch from now())::bigint - max(ts), -1) FROM location_points"); ago != "-1" && ago != "0" {
+			if n, err := strconv.ParseInt(ago, 10, 64); err == nil && n >= 0 {
+				add("newest track point", fmt.Sprintf("%d min ago", n/60))
+			}
+		}
 		add("geo places loaded", one("SELECT count(*) FROM geo_points"))
 		if ts := one("SELECT to_char(to_timestamp(max(taken_at)), 'YYYY-MM-DD HH24:MI') FROM frames"); ts != "0" && ts != "" {
 			add("newest capture", ts)
@@ -1936,7 +1967,7 @@ func (s *NotifStore) DaemonSummary(slot int, name string) ([]DaemonKV, error) {
 	default:
 		add("note", "no drill-in for this daemon yet")
 	}
-	return kv, nil
+	return kv
 }
 
 // GetSetting / SetSetting , the shared settings KV (single row per key).

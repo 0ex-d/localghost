@@ -44,7 +44,7 @@ class PassiveFixReceiver : BroadcastReceiver() {
             // a mock fix (a developer's fake GPS app) is not where the phone is
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && l.isMock) continue
             val acc = if (l.hasAccuracy()) l.accuracy else 0f
-            if (LocationLog.record(context, LocationLog.Point(l.time / 1000, l.latitude, l.longitude, acc))) kept++
+            if (LocationLog.record(context, LocationLog.Point(l.time / 1000, l.latitude, l.longitude, acc, LocationLog.VIA_PASSIVE))) kept++
         }
         if (kept > 0) LocationLog.notePassive(context, kept)
     }

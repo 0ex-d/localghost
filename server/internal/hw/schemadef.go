@@ -296,6 +296,9 @@ var schemaRegistry = []SchemaTable{
 		{"lat", "DOUBLE PRECISION", true, ""},
 		{"lon", "DOUBLE PRECISION", true, ""},
 		{"source", "TEXT", true, "'watch'"},
+		// how the phone took the point: w the quarter-hour fix, p another app's fix, a the app
+		// opening; '' from before, and from sources that do not say
+		{"via", "TEXT", true, "''"},
 	}},
 	// TRAIL DECISIONS , a stretch of the trail the person was asked about ("were you there?",
 	// framed/questions.go) and said yes to: never asked about again. A "no" leaves no row: the

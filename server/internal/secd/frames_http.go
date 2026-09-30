@@ -605,7 +605,9 @@ func (s *Server) handleLocations(w http.ResponseWriter, r *http.Request) {
 		}
 		opened, bad, oerr := openLocationBatch(body, k)
 		if errors.Is(oerr, errNoTrailKey) {
-			// the phone keeps the batch and hands its key over at its next unlock
+			// the phone keeps the batch and hands its key over at its next unlock; said here too,
+			// or a trail that never arrives looks like a phone that never sends
+			secdLog.Info("location upload refused: no trail key for this device yet (the phone keeps it)", "fn", "handleLocations")
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusConflict)
 			_, _ = w.Write([]byte(`{"ok":false,"trailKey":false}`))
@@ -1361,9 +1363,18 @@ func (s *Server) handleDaemonSummary(w http.ResponseWriter, r *http.Request) {
 		// last nvidia-smi answer (the shared probe's, never a fresh one), Xid and RmInitAdapter
 		// lines from the kernel log , a diagnosis from the phone that never opens the device.
 		kv = kv[:0]
-		for _, row := range gpu.Diagnose().Rows() {
+		rows := gpu.Diagnose().Rows()
+		for i, row := range rows {
 			kv = append(kv, hw.DaemonKV{K: row[0], V: row[1]})
+			if i == 0 {
+				// right under the verdict: what the box uses the card for (oracled's `models`)
+				kv = append(kv, gpuUseRows(fmt.Sprintf("%s/mnt/slot%d/run", s.cfg.StateDir, mounted))...)
+			}
 		}
+	}
+	if name == "ghost.framed" || name == "ghost.searchd" {
+		// what the daemon did in the last hour and since it started, ahead of the database's totals
+		kv = append(workRows(name, fmt.Sprintf("%s/mnt/slot%d/run", s.cfg.StateDir, mounted)), kv...)
 	}
 	if name == "ghost.oracled" {
 		// The GPU question, answered by oracled itself (its `models` command: what llama-server

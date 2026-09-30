@@ -111,6 +111,7 @@ func Query(ctx context.Context) (Stats, error) {
 	}
 	last = Stats{UsedMiB: used, TotalMiB: total, Util: util, At: now}
 	lastErr, failures, nextTry = nil, 0, time.Time{}
+	fetchCaps(ctx) // the static facts, once, now that the card has answered (caps.go)
 	return last, nil
 }
 
@@ -135,4 +136,5 @@ func Reset() {
 	mu.Lock()
 	defer mu.Unlock()
 	last, lastErr, failures, nextTry = Stats{}, nil, 0, time.Time{}
+	caps, capsTried = Caps{}, time.Time{}
 }

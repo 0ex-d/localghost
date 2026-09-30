@@ -76,7 +76,7 @@ func TestDiagnoseNarrowLinkAndInitFailures(t *testing.T) {
 	for _, kv := range rows {
 		joined += kv[0] + "=" + kv[1] + "\n"
 	}
-	for _, want := range []string{"card 0000:2e:00.0=answers · driver nvidia", "link=x2 of x16 · 2.5 GT/s PCIe (max 16.0 GT/s PCIe)", "driver lists=0000:2e:00.0", "init failures=2 this boot", "GPU faults=none logged this boot", "nothing here opens the card"} {
+	for _, want := range []string{"card 0000:2e:00.0=answers · driver nvidia", "link=x2 of x16 · 2.5 GT/s PCIe (max 16.0 GT/s PCIe; a card lowers it when idle)", "driver lists=0000:2e:00.0", "init failures=2 this boot", "GPU faults=none logged this boot", "nothing on this screen opens the card", "capabilities=read after the first good answer"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("rows lack %q:\n%s", want, joined)
 		}
@@ -109,5 +109,42 @@ func TestDiagnoseOtherStates(t *testing.T) {
 	last = Stats{UsedMiB: 3100, TotalMiB: 12282, Util: 42, At: time.Now()}
 	if r := Diagnose(); r.Verdict != "working: the card answers and the driver sees it" || !strings.Contains(r.Probe, "3.0/12.0 GB, 42% busy") {
 		t.Fatalf("working: %q / %q", r.Verdict, r.Probe)
+	}
+}
+
+// A x16 card in a slot wired x4 runs at x4 however it is seated: the port above it says so, and
+// the verdict does not send anyone to reseat it.
+func TestDiagnoseSlotWiredNarrow(t *testing.T) {
+	root := withFakes(t, "")
+	real := filepath.Join(root, "..", "pci0000:00", "0000:00:01.2")
+	fakeCard(t, real, "0000:2e:00.0", 4, 16, true, false)
+	os.WriteFile(filepath.Join(real, "max_link_width"), []byte("4\n"), 0o644)
+	if err := os.Symlink(filepath.Join(real, "0000:2e:00.0"), filepath.Join(root, "0000:2e:00.0")); err != nil {
+		t.Fatal(err)
+	}
+	os.MkdirAll(filepath.Join(driverDir, "0000:2e:00.0"), 0o755)
+	last = Stats{UsedMiB: 9064, TotalMiB: 12282, Util: 0, At: time.Now()}
+	r := Diagnose()
+	if len(r.Cards) != 1 || r.Cards[0].SlotWidth != 4 {
+		t.Fatalf("cards %+v", r.Cards)
+	}
+	if !strings.HasPrefix(r.Verdict, "working: the card answers and the driver sees it (at x4, all the slot is wired for") {
+		t.Fatalf("verdict %q", r.Verdict)
+	}
+	joined := ""
+	for _, kv := range r.Rows() {
+		joined += kv[0] + "=" + kv[1] + "\n"
+	}
+	if !strings.Contains(joined, "the slot is wired x4") {
+		t.Fatalf("rows:\n%s", joined)
+	}
+	// the same card in a x16 slot at x4 is still sent to be reseated
+	root = withFakes(t, "")
+	real = filepath.Join(root, "..", "pci0000:00", "0000:00:01.1")
+	fakeCard(t, real, "0000:2e:00.0", 4, 16, true, false)
+	os.WriteFile(filepath.Join(real, "max_link_width"), []byte("16\n"), 0o644)
+	os.Symlink(filepath.Join(real, "0000:2e:00.0"), filepath.Join(root, "0000:2e:00.0"))
+	if r := Diagnose(); !strings.HasPrefix(r.Verdict, "the link came up at x4 of x16: physical") {
+		t.Fatalf("x16 slot: %q", r.Verdict)
 	}
 }

@@ -11,9 +11,6 @@ object MapPick {
      *  (a phone's screen is then about a kilometre across). */
     const val PICK_M_PER_PX = 1.0
 
-    /** From this close the map says a fix can be picked nearer in. */
-    const val HINT_M_PER_PX = 12.0
-
     /** How far from a fix a tap still picks it, in dp. */
     const val TAP_DP = 28.0
 

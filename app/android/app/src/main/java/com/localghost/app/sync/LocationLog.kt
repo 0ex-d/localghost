@@ -74,7 +74,13 @@ object LocationLog {
 
     /** One fix. [acc] is the OS's 68% error radius in metres, 0 when unknown (older spool lines,
      *  points the box hands back). It never leaves the phone: the box gets ts/lat/lon. */
-    data class Point(val ts: Long, val lat: Double, val lon: Double, val acc: Float = 0f)
+    data class Point(val ts: Long, val lat: Double, val lon: Double, val acc: Float = 0f, val via: String = "")
+
+    /** How a point was taken, carried with it to the box ("which one ingested it"): the quarter-
+     *  hour fix, a copy of another app's fix, or the fix the app takes when it opens. */
+    const val VIA_WORKER = "w"
+    const val VIA_PASSIVE = "p"
+    const val VIA_APP = "a"
 
     private fun prefs(ctx: Context) = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
     private fun file(ctx: Context) = File(ctx.filesDir, FILE)
@@ -172,14 +178,16 @@ object LocationLog {
                 // journey. It only says the phone is still somewhere: past the hourly gap, a
                 // heartbeat at the LAST place. A real move shows up with the next proper fix.
                 if (pt.ts - prev.ts < MIN_GAP_S) return false
-                pt = Point(pt.ts, prev.lat, prev.lon, pt.acc) // still here, as far as the phone can tell
+                pt = Point(pt.ts, prev.lat, prev.lon, pt.acc, pt.via) // still here, as far as the phone can tell
             } else if (moved < MIN_MOVE_M && pt.ts - prev.ts < MIN_GAP_S) {
                 return false
             }
         } else if (pt.acc > HOPELESS_M) {
             return false
         }
-        val plain = "${pt.ts} ${pt.lat} ${pt.lon}" + (if (pt.acc > 0f) " ${pt.acc.toInt()}" else "")
+        // "ts lat lon [acc [via]]" (TrailLine): the accuracy stays on the phone, the way it was
+        // taken goes to the box (secd reads the first three and the fifth)
+        val plain = TrailLine.format(pt.ts, pt.lat, pt.lon, pt.acc, pt.via)
         val line = seal(ctx, plain) + "\n"
         val f = file(ctx)
         f.appendText(line)
@@ -191,20 +199,13 @@ object LocationLog {
         r.appendText(line)
         if (r.length() > RING_MAX) trimOldest(r)
         prefs(ctx).edit().putString("last_sealed", com.localghost.app.security.DeviceSealed.seal(plain) ?: "").apply()
-        bumpToday(ctx)
+        bumpToday(ctx, pt.via)
         return true
     }
 
     /** A spool line, "ts lat lon [acc]"; null for anything else. */
-    private fun parseLine(line: String): Point? {
-        val parts = line.trim().split(' ')
-        if (parts.size != 3 && parts.size != 4) return null
-        val ts = parts[0].toLongOrNull() ?: return null
-        val lat = parts[1].toDoubleOrNull() ?: return null
-        val lon = parts[2].toDoubleOrNull() ?: return null
-        val acc = if (parts.size == 4) parts[3].toFloatOrNull() ?: 0f else 0f
-        return Point(ts, lat, lon, acc)
-    }
+    private fun parseLine(line: String): Point? =
+        TrailLine.parse(line)?.let { Point(it.ts, it.lat, it.lon, it.acc, it.via) }
 
     /** The phone's own points from the last [RECENT_S] seconds (synced or not), oldest first ,
      *  what the map draws for today before and beside what the box has. Sealed lines open only
@@ -397,11 +398,13 @@ object LocationLog {
      *     exactly there. Nothing is ever sent twice AND kept twice.
      */
     suspend fun flush(ctx: Context): Boolean {
-        if (!BoxConfig.isConfigured(ctx) || SessionStore.read(ctx) == null) return false
+        if (!BoxConfig.isConfigured(ctx)) { noteSend(ctx, "no box enrolled: the points stay on this phone"); return false }
+        if (SessionStore.read(ctx) == null) { noteSend(ctx, "not sent: no box session (it comes with a PIN unlock)"); return false }
         val src = source(ctx)
+        var sent = 0
         while (true) {
             val lines = pendingLines(ctx)
-            if (lines.isEmpty()) return true
+            if (lines.isEmpty()) { noteSend(ctx, if (sent > 0) "sent $sent" else "nothing waiting", ok = true); return true }
             val batch = lines.take(BATCH)
             // sealed lines go as they are, and secd opens them with this phone's key from the vault
             // before anything else on the box sees them; a plain line (from before there was a key)
@@ -410,28 +413,57 @@ object LocationLog {
             val sealed = JSONArray()
             for (l in batch) {
                 if (TrailSeal.isSealed(l)) sealed.put(l)
-                else parseLine(l)?.let { pt -> arr.put(JSONObject().put("ts", pt.ts).put("lat", pt.lat).put("lon", pt.lon)) }
+                else parseLine(l)?.let { pt ->
+                    arr.put(JSONObject().put("ts", pt.ts).put("lat", pt.lat).put("lon", pt.lon).apply { if (pt.via.isNotEmpty()) put("via", pt.via) })
+                }
             }
             val body = JSONObject().put("source", src).put("points", arr)
             if (sealed.length() > 0) body.put("sealed", sealed)
             val code = try {
                 BoxHttp.postJsonCode(ctx, "/v1/locations", body)
             } catch (e: Exception) {
-                android.util.Log.w("LocalGhost", "location flush failed: ${e.message}"); return false
+                android.util.Log.w("LocalGhost", "location flush failed: ${e.message}")
+                noteSend(ctx, "not sent: the box did not answer (${e.javaClass.simpleName})")
+                return false
             }
             if (code == 409) {
                 // the box has no key for this phone's trail yet: it is handed over at the next unlock
                 android.util.Log.i("LocalGhost", "location flush: the box has no trail key for this phone yet; kept")
+                noteSend(ctx, "not sent: the box has no key for this phone's trail yet (handed over at the next PIN unlock)")
                 return false
             }
             if (code != 202 && code != 200) {
                 android.util.Log.w("LocalGhost", "location flush: box answered HTTP $code")
+                noteSend(ctx, "not sent: the box answered HTTP $code")
                 return false
             }
             ack(ctx, batch.toHashSet())
-            if (batch.size < BATCH) return true
+            bumpSent(ctx, batch.size)
+            sent += batch.size
+            if (batch.size < BATCH) { noteSend(ctx, "sent $sent", ok = true); return true }
         }
     }
+
+    /** How the last hand-over to the box went, and when: what SETTINGS › keep the trail shows. */
+    data class SendNote(val at: Long, val what: String, val ok: Boolean, val lastOkAt: Long)
+
+    private fun noteSend(ctx: Context, what: String, ok: Boolean = false) {
+        val now = System.currentTimeMillis() / 1000
+        val e = prefs(ctx).edit().putLong("send_at", now).putString("send_what", what).putBoolean("send_ok", ok)
+        if (ok) e.putLong("send_ok_at", now)
+        e.apply()
+    }
+
+    fun lastSend(ctx: Context): SendNote? {
+        val p = prefs(ctx)
+        val at = p.getLong("send_at", 0L)
+        if (at <= 0) return null
+        return SendNote(at, p.getString("send_what", "") ?: "", p.getBoolean("send_ok", false), p.getLong("send_ok_at", 0L))
+    }
+
+    /** The newest point this phone can read now: the sealed last point (readable in the
+     *  background), else, with the app unlocked, the newest in the recent ring. */
+    fun newest(ctx: Context): Point? = last(ctx) ?: recent(ctx).lastOrNull()
 
     // --- scheduling ---
 
@@ -486,18 +518,45 @@ object LocationLog {
         }
     }
 
-    internal fun bumpToday(ctx: Context) {
-        val cal = java.util.Calendar.getInstance()
-        cal.set(java.util.Calendar.HOUR_OF_DAY, 0); cal.set(java.util.Calendar.MINUTE, 0); cal.set(java.util.Calendar.SECOND, 0)
-        val midnight = cal.timeInMillis / 1000
+    internal fun bumpToday(ctx: Context, via: String = "") {
+        val midnight = localMidnight()
         val p = prefs(ctx)
-        val n = if (p.getLong("today_from", 0L) == midnight) p.getInt("today_n", 0) else 0
-        p.edit().putLong("today_from", midnight).putInt("today_n", n + 1).apply()
+        val same = p.getLong("today_from", 0L) == midnight
+        val n = if (same) p.getInt("today_n", 0) else 0
+        val e = p.edit().putLong("today_from", midnight).putInt("today_n", n + 1)
+        for (v in listOf(VIA_WORKER, VIA_PASSIVE, VIA_APP)) {
+            val have = if (same) p.getInt("today_via_$v", 0) else 0
+            e.putInt("today_via_$v", have + if (v == via) 1 else 0)
+        }
+        e.apply()
     }
+
+    /** Points kept since local midnight, by how they were taken (VIA_*). */
+    fun todayByVia(ctx: Context): Map<String, Int> {
+        val p = prefs(ctx)
+        if (p.getLong("today_from", 0L) != localMidnight()) return emptyMap()
+        return listOf(VIA_WORKER, VIA_PASSIVE, VIA_APP).associateWith { p.getInt("today_via_$it", 0) }.filterValues { it > 0 }
+    }
+
+    /** Points the box has taken (acknowledged), since local midnight and ever. */
+    private fun bumpSent(ctx: Context, n: Int) {
+        val midnight = localMidnight()
+        val p = prefs(ctx)
+        val today = if (p.getLong("sent_from", 0L) == midnight) p.getInt("sent_today", 0) else 0
+        p.edit().putLong("sent_from", midnight).putInt("sent_today", today + n).putLong("sent_total", p.getLong("sent_total", 0L) + n).apply()
+    }
+
+    fun sentToday(ctx: Context): Int {
+        val p = prefs(ctx)
+        return if (p.getLong("sent_from", 0L) == localMidnight()) p.getInt("sent_today", 0) else 0
+    }
+
+    fun sentTotal(ctx: Context): Long = prefs(ctx).getLong("sent_total", 0L)
+
 
     /** Take a fix now (the welcome screen just got the permission; the app just opened). */
     fun sampleNow(ctx: Context) {
-        val request = OneTimeWorkRequestBuilder<LocationWorker>().build()
+        val request = OneTimeWorkRequestBuilder<LocationWorker>().setInputData(androidx.work.workDataOf("now" to true)).build()
         WorkManager.getInstance(ctx).enqueueUniqueWork(NOW_NAME, ExistingWorkPolicy.KEEP, request)
     }
 }
@@ -508,7 +567,7 @@ class LocationWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
     override suspend fun doWork(): Result {
         val ctx = applicationContext
         if (!LocationLog.active(ctx)) return Result.success()
-        val pt = LocationLog.sample(ctx)
+        val pt = LocationLog.sample(ctx)?.copy(via = if (inputData.getBoolean("now", false)) LocationLog.VIA_APP else LocationLog.VIA_WORKER)
         if (pt != null) {
             LocationLog.record(ctx, pt)
             LocationLog.geocode(ctx, pt)?.let { cc ->

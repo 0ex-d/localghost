@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/LocalGhostDao/localghost/server/internal/workcount"
 )
 
 type Worker struct {
@@ -25,6 +27,9 @@ type Worker struct {
 	Ingester   *Ingester
 	Log        *slog.Logger
 	Interval   time.Duration
+	// Work counts what the worker did, by job kind (and "<kind> failed"), for the drill-in; nil
+	// counts nothing
+	Work *workcount.Counter
 }
 
 // laneHold is a lane resting: until when, why, and since when (one spell, across the short holds
@@ -193,13 +198,16 @@ func (w *Worker) one(ctx context.Context, kind string, do func(context.Context, 
 			// unpark would only start it over. The frame keeps its date, place and file.
 			w.Log.Info("image past the size limits, left without a caption", "fn", "one", "kind", kind, "job", job.ID, "why", err.Error())
 			_ = w.Store.CompleteJob(job.ID)
+			w.Work.Add(kind+" too large", 1)
 			return true
 		}
 		w.Log.Warn("job failed", "fn", "one", "kind", kind, "job", job.ID, "err", err)
 		_ = w.Store.FailJob(job.ID, err)
+		w.Work.Add(kind+" failed", 1)
 		return true
 	}
 	_ = w.Store.CompleteJob(job.ID)
+	w.Work.Add(kind, 1)
 	return true
 }
 
@@ -232,6 +240,7 @@ func (w *Worker) doEmbed(ctx context.Context, job *Job) error {
 	if cut > 0 {
 		w.Log.Info("embedded from the beginning of chunks too long for the embedding model", "fn", "doEmbed", "job", job.ID, "chunks", cut)
 	}
+	w.Work.Add("chunks embedded", len(ids))
 	for i, id := range ids {
 		if err := w.Store.SetEmbedding(id, vecs[i], w.Embed.ModelID); err != nil {
 			return err

@@ -205,7 +205,12 @@ func openLocationBatch(body []byte, k *ecdh.PrivateKey) ([]byte, int, error) {
 			bad++
 			continue
 		}
-		p, _ := json.Marshal(map[string]any{"ts": ts, "lat": lat, "lon": lon})
+		point := map[string]any{"ts": ts, "lat": lat, "lon": lon}
+		// "ts lat lon acc via": how the phone took it goes on (the accuracy stays behind)
+		if f := strings.Fields(pt); len(f) == 5 && validVia(f[4]) {
+			point["via"] = f[4]
+		}
+		p, _ := json.Marshal(point)
 		in.Points = append(in.Points, p)
 	}
 	out, err := json.Marshal(map[string]any{"source": in.Source, "points": in.Points})
@@ -213,6 +218,19 @@ func openLocationBatch(body []byte, k *ecdh.PrivateKey) ([]byte, int, error) {
 }
 
 var errNoTrailKey = errors.New("no trail key for this device")
+
+// validVia: a short lowercase word (w, p, a today), nothing a phone could smuggle a query into.
+func validVia(v string) bool {
+	if v == "" || len(v) > 8 {
+		return false
+	}
+	for _, r := range v {
+		if r < 'a' || r > 'z' {
+			return false
+		}
+	}
+	return true
+}
 
 // handleTrailKey , GET /v1/trail/key: this device's key, for the app to read its own trail while
 // unlocked ({"have":false} when the box has none). POST /v1/trail/key {"public","private"}: the

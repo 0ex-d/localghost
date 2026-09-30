@@ -195,6 +195,14 @@ func main() {
 		data, _ := json.Marshal(map[string]int{"pendingFrames": f, "pendingLocationBatches": l})
 		return ctlsock.Response{OK: true, Data: data}, nil
 	})
+	// work: what this framed has done, by kind (archived, previews, duplicates, points ...), over
+	// the last hour and day and since it started, and what waits in the spool. The Box Status
+	// drill-in for ghost.framed reads it.
+	ctl.Handle("work", func(json.RawMessage) (ctlsock.Response, error) {
+		f, l := pipe.PendingCounts()
+		data, _ := json.Marshal(map[string]any{"work": pipe.Work(), "waiting": map[string]int{"uploads": f, "locationBatches": l}})
+		return ctlsock.Response{OK: true, Data: data}, nil
+	})
 	// drain: force a pass now instead of waiting for the tick (operator convenience after a bulk sync).
 	ctl.Handle("drain", func(json.RawMessage) (ctlsock.Response, error) {
 		n := pipe.DrainIncoming() + pipe.DrainLocations()

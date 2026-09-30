@@ -3731,3 +3731,108 @@ whatever parked meanwhile.
 Tested: `TestEmbedFittingCutsWhatTheServerRefuses` (a batch with one long input: three vectors, one
 from a cut text; a batch taken whole is one call; the server's message in the error; an unreachable
 server fails at once).
+
+## Box Status: what the card can do, and what framed and searchd did (gpu, secd, framed, searchd)
+
+Vlad: "on the gpu can we have capabilities listed there and can we see on ghost framed how many
+images we process and on ghost searchd how many things we process as well?"
+
+**host.gpu.** Under the verdict, what the box uses the card for (oracled's `models`): the model,
+whether it is on the card and how much of the card's memory it holds, what it is used for, whether
+it sees photos (with the reason when it does not), and what runs on the CPU by choice (search
+embeddings, voice). After the diagnosis rows, the card's own facts, read ONCE from nvidia-smi
+after the shared probe's first good answer and kept (`internal/gpu/caps.go`): the chip and its
+compute capability with the generation's name, the maths its tensor cores do (FP16, INT8, BF16,
+TF32, FP8 on Ada), memory, driver and CUDA version, power limit (and the card's own maximum), top
+clocks, PCIe generation. An nvidia-smi that refuses the full field list is asked the base fields.
+
+The link verdict now asks the port above the card how wide it can go. "The link came up at x4 of
+x16: physical, reseat the card" was said of a card in a slot WIRED x4, which no reseating changes.
+When the port's own maximum is the card's width, the verdict is "working ... at x4, all the slot
+is wired for" and the link row says "the slot is wired x4"; a x16 slot with a x4 link is still sent
+to be reseated. The link speed row notes that a card lowers its link speed when idle.
+
+**ghost.framed and ghost.searchd.** Each daemon counts what it does by kind, in one-minute buckets
+over the last day and since it started (`internal/workcount`), and answers `work` on its control
+socket; the drill-in lists it above the database's totals, "N last hour · M since start · last 20 s
+ago" (and the last 24 h once it has been up a day).
+- framed: photos, videos and other files archived, previews made, duplicates dropped, empty
+  uploads skipped, uploads failed, files re-read by the stock-take, track points stored, days
+  redrawn; and what waits in the spool.
+- searchd: photos described, photos named and tagged, tags given a category, chunks embedded,
+  items ingested, stock-take checks, searches answered, and the failures of each; and whether the
+  model work or the descriptions are paused, with why.
+The counts live in memory: an unlock starts them again, and the first row says since when.
+
+    sudo ./tools/ns.sh ./bin/ghost-cli ghost.framed work
+    sudo ./tools/ns.sh ./bin/ghost-cli ghost.searchd work
+
+Tested: `TestCapsReadOnceAfterAGoodAnswer` (the full list, the CUDA header, the rows; an older
+nvidia-smi's base fields), `TestArch`, `TestDiagnoseSlotWiredNarrow` (a x4 slot is working, a x16
+slot at x4 is still reseat), `TestCountsByHourDayAndSinceStart`, `TestWorkRowsNameAndOrderTheKinds`,
+`TestGPUUseRows`. The drill-in screens are the app's generic rows: no app change.
+
+## "Near you" said no position with the trail on; the trail says where it is (app, secd)
+
+Vlad: "It says no location but I do have it set up, is it not sent to the box how can I check?"
+
+"Near you" measured from one thing only: the phone's last point, sealed to the phone's hardware
+(`LocationLog.last`). When that could not be read, it said "no position yet , turn on the location
+trail" to a person whose trail was on and whose day on the box was drawn from it. It now measures
+from the newest point it can read (`LocationLog.newest`: the sealed last point, or the recent ring
+while the app is unlocked), and when the phone has none, from the box's newest trail point (the
+last vertex of the newest day in `/v1/geo/tracks`), and says which: "around this phone's last fix,
+12 min ago" or "around the box's newest trail point, 2 h ago". "Turn on the trail" is said only
+when it is off; when it is on and nothing has a point, it says to look in SETTINGS. The map's
+"you" and [ where I am ] use the same newest point.
+
+SETTINGS › LOCATION TRAIL now answers "is it reaching the box" on the phone itself:
+- "last fix: 12 min ago" (or "none this phone can read yet");
+- "to the box: sent 4 · 3 min ago", or why not, with when it last got through: "not sent: the box
+  has no key for this phone's trail yet (handed over at the next PIN unlock)", "not sent: no box
+  session (it comes with a PIN unlock)", "not sent: the box answered HTTP 503", "not sent: the box
+  did not answer";
+- [ send the trail to the box now ].
+`LocationLog.flush` records each outcome (`lastSend`).
+
+On the box, secd now logs the one refusal that was silent: a sealed batch from a device whose trail
+key it does not hold yet ("location upload refused: no trail key for this device yet").
+
+Checking from the box's side:
+
+    sudo ./tools/ns.sh ./bin/ghost-cli ghost.framed trail day=2026-09-30    # the day's points, by source
+    sudo ./tools/ns.sh ./bin/ghost-cli ghost.framed queue                   # batches waiting in the spool
+    sudo journalctl -u ghost.secd --since today | grep -i "location upload"
+
+Tested: `TrailStatusTest` (the fix line, the send line in its outcomes, where "near you" is
+measured from). The screens are structure-checked only.
+
+## The trail says which fix took each point, and how many are on the phone against the box (app, secd, framed, hw)
+
+Vlad: "it stopped reporting, we are at 23:23 now and we went and had food at 19:31 and then came
+back around 21:50 ... can we see which one ingested it and how many we have on the phone vs
+synced? also no need to say on the map that you can zoom in to delete".
+
+The trail report listed long hops only, so a quiet evening at home (a heartbeat an hour, no hop
+of 2 km) read as the trail having stopped at 19:31. Now:
+- `ghost-cli ghost.framed trail day=...` ends with the day's first and last point ("last point
+  20:40:00 (1 h 43 min before now)") and every gap of an hour or more between points.
+- Every point carries how the phone took it, `via`: `w` the quarter-hour fix, `p` a copy of another
+  app's fix (PassiveFixReceiver), `a` the fix the app takes when it opens. The spool line is
+  "ts lat lon acc via" (`sync/TrailLine.kt`; older lines still read); secd keeps the fifth field
+  when it opens a sealed batch (the accuracy stays behind, as before) and framed stores it in
+  `location_points.via` (new column, '' for what came before). The report counts them per source
+  ("phone-84bcf711 51: 30 quarter-hour, 18 other apps' fixes, 3 app opened") and names each
+  listed point's; the framed drill-in has "trail, last 24 h" by via and "newest track point: N
+  min ago".
+- SETTINGS › LOCATION TRAIL, under the switch: "today: 14 kept (9 quarter-hour · 3 other apps'
+  fixes · 2 app opened) · 12 sent to the box · 2 waiting" and "on this phone: 51 points from the
+  last two days · 1,204 sent to the box since the trail began" (the phone counts what the box
+  acknowledged), with the last fix and the last hand-over lines from the section above.
+- The map no longer says "zoom in closer to pick a fix" or "tap a fix to delete it"; only what a
+  delete took is still shown for a few seconds.
+
+Tested: `TestTrailReportSaysTheLastPointAndTheGaps`, `TestTrailReportSaysHowThePhoneTookThem`,
+`TestValidVia`, `TestLocationBatchOpened` (via through a sealed batch), `TestViaStoredAndSummarised`
+against Postgres (stored, read back, the drill-in's lines), `TrailLineTest`, `TrailStatusTest`
+(the today and holds lines).

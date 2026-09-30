@@ -182,26 +182,73 @@ func (s *Store) InsertPoints(source string, pts []TrackPoint) error {
 }
 
 // TrailRow is one stored location point and where it came from (the phone, a watch, a Google
-// Timeline import), for the trail diagnostic.
+// Timeline import), and how the phone took it (Via), for the trail diagnostic.
 type TrailRow struct {
 	TrackPoint
 	Source string
+	Via    string
+}
+
+// SpooledPoint is one point of a location batch as secd spools it: where and when, and how the
+// phone took it ("w" the quarter-hour fix, "p" another app's fix, "a" the app opening; "" when
+// the sender does not say).
+type SpooledPoint struct {
+	TrackPoint
+	Via string `json:"via,omitempty"`
+}
+
+// ViaName is what a via is called in the report.
+func ViaName(via string) string {
+	switch via {
+	case "w":
+		return "quarter-hour"
+	case "p":
+		return "other apps' fixes"
+	case "a":
+		return "app opened"
+	case "":
+		return "unmarked"
+	}
+	return via
+}
+
+// InsertSpooled stores a location batch's points with how each was taken; a point already stored
+// (same second, same source) is left as it is.
+func (s *Store) InsertSpooled(source string, pts []SpooledPoint) error {
+	if len(pts) == 0 {
+		return nil
+	}
+	sql := "INSERT INTO location_points (ts, lat, lon, source, via) VALUES "
+	args := make([]any, 0, len(pts)*5)
+	for i, p := range pts {
+		if i > 0 {
+			sql += ", "
+		}
+		b := i * 5
+		sql += fmt.Sprintf("($%d,$%d,$%d,$%d,$%d)", b+1, b+2, b+3, b+4, b+5)
+		args = append(args, p.TS, p.Lat, p.Lon, source, p.Via)
+	}
+	sql += " ON CONFLICT (ts, source) DO NOTHING"
+	return s.db.Exec(sql, args...)
 }
 
 // TrailRows returns the stored points in [from, to) with their source, time-ordered.
 func (s *Store) TrailRows(from, to int64) ([]TrailRow, error) {
-	rows, err := s.db.Query("SELECT ts, lat, lon, source FROM location_points WHERE ts >= $1 AND ts < $2 ORDER BY ts", from, to)
+	rows, err := s.db.Query("SELECT ts, lat, lon, source, via FROM location_points WHERE ts >= $1 AND ts < $2 ORDER BY ts", from, to)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]TrailRow, 0, len(rows.Vals))
 	for _, r := range rows.Vals {
-		if len(r) != 4 || r[0] == nil || r[1] == nil || r[2] == nil {
+		if len(r) != 5 || r[0] == nil || r[1] == nil || r[2] == nil {
 			continue
 		}
 		tr := TrailRow{TrackPoint: TrackPoint{TS: atoi64(*r[0]), Lat: atof(*r[1]), Lon: atof(*r[2])}}
 		if r[3] != nil {
 			tr.Source = *r[3]
+		}
+		if r[4] != nil {
+			tr.Via = *r[4]
 		}
 		out = append(out, tr)
 	}
@@ -214,6 +261,13 @@ func (s *Store) TrailRows(from, to int64) ([]TrailRow, error) {
 // day=YYYY-MM-DD` prints: the way to see which points draw a line across the map and why they
 // were kept.
 func TrailReport(day time.Time, rows []TrailRow, minHopM float64) string {
+	return TrailReportAt(day, rows, minHopM, time.Now())
+}
+
+// TrailReportAt is TrailReport as of now: it also says when the day's last point was (a quiet
+// evening at home is a point an hour, and a list of long hops cannot show that the points still
+// come) and every gap of an hour or more between points.
+func TrailReportAt(day time.Time, rows []TrailRow, minHopM float64, now time.Time) string {
 	dayStart := time.Date(day.UTC().Year(), day.UTC().Month(), day.UTC().Day(), 0, 0, 0, 0, time.UTC).Unix()
 	dayEnd := dayStart + 86400
 	pts := make([]TrackPoint, len(rows))
@@ -226,6 +280,7 @@ func TrailReport(day time.Time, rows []TrailRow, minHopM float64) string {
 		keptN[k]++
 	}
 	bySource := map[string]int{}
+	byVia := map[string]map[string]int{}
 	var b strings.Builder
 	var lines []string
 	var prev *TrackPoint
@@ -239,6 +294,10 @@ func TrailReport(day time.Time, rows []TrailRow, minHopM float64) string {
 		if r.TS >= dayStart && r.TS < dayEnd {
 			inDay++
 			bySource[r.Source]++
+			if byVia[r.Source] == nil {
+				byVia[r.Source] = map[string]int{}
+			}
+			byVia[r.Source][r.Via]++
 			if !ok {
 				dropped++
 			}
@@ -254,8 +313,12 @@ func TrailReport(day time.Time, rows []TrailRow, minHopM float64) string {
 				if !ok {
 					verdict = "DROPPED"
 				}
-				lines = append(lines, fmt.Sprintf("  %s  %.5f,%.5f  %-16s hop %6.1f km at %5.0f km/h  %s",
-					time.Unix(r.TS, 0).UTC().Format("15:04:05"), r.Lat, r.Lon, r.Source, hop/1000, kmh, verdict))
+				line := fmt.Sprintf("  %s  %.5f,%.5f  %-16s hop %6.1f km at %5.0f km/h  %s",
+					time.Unix(r.TS, 0).UTC().Format("15:04:05"), r.Lat, r.Lon, r.Source, hop/1000, kmh, verdict)
+				if r.Via != "" {
+					line += " · " + ViaName(r.Via)
+				}
+				lines = append(lines, line)
 			}
 		}
 		p := r.TrackPoint
@@ -265,7 +328,23 @@ func TrailReport(day time.Time, rows []TrailRow, minHopM float64) string {
 	}
 	srcs := make([]string, 0, len(bySource))
 	for s, n := range bySource {
-		srcs = append(srcs, fmt.Sprintf("%s %d", s, n))
+		src := fmt.Sprintf("%s %d", s, n)
+		// how the phone took them, when it says: "phone-84bcf711 51: 30 quarter-hour, 18 other apps' fixes"
+		if v := byVia[s]; len(v) > 1 || v[""] == 0 {
+			var parts []string
+			for _, via := range []string{"w", "p", "a", ""} {
+				if v[via] > 0 {
+					parts = append(parts, fmt.Sprintf("%d %s", v[via], ViaName(via)))
+				}
+			}
+			for via, k := range v {
+				if via != "w" && via != "p" && via != "a" && via != "" {
+					parts = append(parts, fmt.Sprintf("%d %s", k, via))
+				}
+			}
+			src += ": " + strings.Join(parts, ", ")
+		}
+		srcs = append(srcs, src)
 	}
 	sort.Strings(srcs)
 	fmt.Fprintf(&b, "%s: %d points (%s), %d dropped by the glitch rules; hops of %.0f km or more, and every dropped point (UTC):\n",
@@ -276,7 +355,42 @@ func TrailReport(day time.Time, rows []TrailRow, minHopM float64) string {
 	for _, l := range lines {
 		b.WriteString(l + "\n")
 	}
+	// when the points were: the last one, and the silences
+	var inDayTS []int64
+	for _, r := range rows {
+		if r.TS >= dayStart && r.TS < dayEnd {
+			inDayTS = append(inDayTS, r.TS)
+		}
+	}
+	if n := len(inDayTS); n > 0 {
+		last := time.Unix(inDayTS[n-1], 0).UTC()
+		fmt.Fprintf(&b, "first point %s, last point %s", time.Unix(inDayTS[0], 0).UTC().Format("15:04:05"), last.Format("15:04:05"))
+		if now.After(last) && now.Unix() < dayEnd+86400 {
+			fmt.Fprintf(&b, " (%s before now)", gapWords(now.Sub(last)))
+		}
+		b.WriteString("\n")
+		var gaps []string
+		for i := 1; i < n; i++ {
+			if d := time.Duration(inDayTS[i]-inDayTS[i-1]) * time.Second; d >= time.Hour {
+				gaps = append(gaps, fmt.Sprintf("%s to %s (%s)", time.Unix(inDayTS[i-1], 0).UTC().Format("15:04"), time.Unix(inDayTS[i], 0).UTC().Format("15:04"), gapWords(d)))
+			}
+		}
+		if len(gaps) > 0 {
+			b.WriteString("gaps of an hour or more: " + strings.Join(gaps, ", ") + "\n")
+		} else {
+			b.WriteString("no gap of an hour or more between points\n")
+		}
+	}
 	return b.String()
+}
+
+// gapWords is "45 min" or "2 h 10 min".
+func gapWords(d time.Duration) string {
+	m := int(d.Minutes())
+	if m < 60 {
+		return fmt.Sprintf("%d min", m)
+	}
+	return fmt.Sprintf("%d h %d min", m/60, m%60)
 }
 
 // DayPoints returns the day's track points (UTC bounds), time-ordered.

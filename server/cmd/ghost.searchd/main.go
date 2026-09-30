@@ -36,6 +36,7 @@ import (
 	"github.com/LocalGhostDao/localghost/server/internal/search"
 	"github.com/LocalGhostDao/localghost/server/internal/svcconf"
 	"github.com/LocalGhostDao/localghost/server/internal/synth"
+	"github.com/LocalGhostDao/localghost/server/internal/workcount"
 )
 
 const service = "ghost.searchd"
@@ -185,8 +186,10 @@ func main() {
 		Probe: oracle.NewClient(oracleRun, 5*time.Second).OnGPU,
 		Log:   func(msg string, args ...any) { lg.Info(msg, append([]any{"fn", "pace"}, args...)...) },
 	}
+	// what this searchd did, by kind, for the Box Status drill-in (ctl `work`)
+	work := workcount.New()
 	wk := &search.Worker{
-		Store: storeW, Embed: embedder,
+		Store: storeW, Embed: embedder, Work: work,
 		Caption:  &search.VisionOracle{Client: oc, Timeout: 2 * time.Minute, SlowTimeout: 15 * time.Minute, Pace: pace},
 		Tag:      &search.TagOracle{Client: oc, Timeout: time.Minute, SlowTimeout: 8 * time.Minute, Pace: pace},
 		Ingester: ing, Log: lg,
@@ -254,6 +257,7 @@ func main() {
 		if err != nil {
 			return ctlsock.Response{}, err
 		}
+		work.Add("searches", 1)
 		data, _ := json.Marshal(res)
 		return ctlsock.Response{OK: true, Data: data}, nil
 	})
@@ -380,6 +384,11 @@ func main() {
 		}
 		if err != nil {
 			return ctlsock.Response{}, err
+		}
+		if a.Ensure {
+			work.Add("stock-take checks", 1)
+		} else {
+			work.Add("ingested", 1)
 		}
 		return ctlsock.Response{OK: true, Text: "ingested id " + strconv.FormatInt(id, 10)}, nil
 	})
@@ -540,6 +549,17 @@ func main() {
 	})
 
 	// queue: the ops view (spec 13.4).
+	// work: what this searchd has done, by kind (captions, tag passes, categories, chunks embedded,
+	// searches, and the failures of each), over the last hour and day and since it started; with
+	// whether the model lanes rest. The Box Status drill-in for ghost.searchd reads it.
+	ctl.Handle("work", func(json.RawMessage) (ctlsock.Response, error) {
+		out := map[string]any{"work": work.Snapshot(), "modelLanes": wk.Lanes(), "captionLane": wk.CaptionLane()}
+		if kinds, kerr := storeA.JobKinds(); kerr == nil {
+			out["queue"] = kinds
+		}
+		data, _ := json.Marshal(out)
+		return ctlsock.Response{OK: true, Data: data}, nil
+	})
 	ctl.Handle("queue", func(json.RawMessage) (ctlsock.Response, error) {
 		pending, stale, parked, runnable, err := storeA.HealthRow()
 		if err != nil {

@@ -22,6 +22,9 @@ type Card struct {
 	Speed     string // "2.5 GT/s PCIe"
 	MaxSpeed  string
 	PowerDraw string // runtime power state, when the kernel reports it
+	// SlotWidth is the widest link the port above the card can make (its max_link_width): a slot
+	// wired x4 holds a x16 card at x4 however well it is seated. 0 when sysfs does not say.
+	SlotWidth int
 }
 
 // Report is the host.gpu drill-in: the cards, the driver's view, the last probe, the kernel log.
@@ -60,6 +63,11 @@ func Cards() []Card {
 		c.Speed = readTrim(filepath.Join(dir, "current_link_speed"))
 		c.MaxSpeed = readTrim(filepath.Join(dir, "max_link_speed"))
 		c.PowerDraw = readTrim(filepath.Join(dir, "power_state"))
+		if real, err := filepath.EvalSymlinks(dir); err == nil {
+			if up := filepath.Dir(real); strings.Count(filepath.Base(up), ":") == 2 {
+				c.SlotWidth, _ = strconv.Atoi(readTrim(filepath.Join(up, "max_link_width")))
+			}
+		}
 		if b, err := os.ReadFile(filepath.Join(dir, "config")); err == nil && len(b) >= 2 && b[0] == 0xff && b[1] == 0xff {
 			c.Present = false
 		}
@@ -135,7 +143,7 @@ func verdict(r Report) string {
 		return "the card is listed but answers nothing: it has fallen off the bus (a cold power cycle, then check seating and power)"
 	case c.Driver == "":
 		return "the card is on the bus but no driver is bound (nvidia module not loaded, or its probe refused the card)"
-	case c.MaxWidth > 0 && c.Width > 0 && c.Width < c.MaxWidth:
+	case c.MaxWidth > 0 && c.Width > 0 && c.Width < c.MaxWidth && !(c.SlotWidth > 0 && c.Width >= c.SlotWidth):
 		s := fmt.Sprintf("the link came up at x%d of x%d: physical , reseat the card, check the riser and the slot", c.Width, c.MaxWidth)
 		if r.InitFails > 0 {
 			s += fmt.Sprintf("; and the driver cannot bring the chip up (RmInitAdapter failed ×%d), most likely because of that link", r.InitFails)
@@ -148,6 +156,9 @@ func verdict(r Report) string {
 	case strings.Contains(r.Probe, "GB,"):
 		if r.Xids > 0 {
 			return fmt.Sprintf("working now, but %d GPU fault(s) logged this boot , watch it", r.Xids)
+		}
+		if c.SlotWidth > 0 && c.Width < c.MaxWidth {
+			return fmt.Sprintf("working: the card answers and the driver sees it (at x%d, all the slot is wired for; the model loads a little slower than in a x%d slot, and answers as fast)", c.Width, c.MaxWidth)
 		}
 		return "working: the card answers and the driver sees it"
 	}
@@ -164,8 +175,11 @@ func (r Report) Rows() [][2]string {
 			if c.Speed != "" {
 				link += " · " + c.Speed
 				if c.MaxSpeed != "" && c.MaxSpeed != c.Speed {
-					link += " (max " + c.MaxSpeed + ")"
+					link += " (max " + c.MaxSpeed + "; a card lowers it when idle)"
 				}
+			}
+			if c.SlotWidth > 0 && c.SlotWidth < c.MaxWidth {
+				link += fmt.Sprintf(" · the slot is wired x%d", c.SlotWidth)
 			}
 		}
 		drv := c.Driver
@@ -198,6 +212,7 @@ func (r Report) Rows() [][2]string {
 	} else {
 		rows = append(rows, [2]string{"GPU faults", "none logged this boot"})
 	}
-	rows = append(rows, [2]string{"read how", "sysfs and the kernel log only , nothing here opens the card"})
+	rows = append(rows, CapsNow().Rows()...)
+	rows = append(rows, [2]string{"read how", "sysfs, the kernel log and the box's shared nvidia-smi probe , nothing on this screen opens the card"})
 	return rows
 }

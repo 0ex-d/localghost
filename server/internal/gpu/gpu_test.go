@@ -9,12 +9,13 @@ import (
 	"time"
 )
 
-// fakeSMI writes a script that counts its calls in a file and either answers a line or fails.
+// fakeSMI writes a script that counts its stats calls in a file and either answers a line or
+// fails. The one-off capabilities queries (caps.go) are not counted.
 func fakeSMI(t *testing.T, dir string, body string) (cmd string, calls func() int) {
 	t.Helper()
 	counter := filepath.Join(dir, "calls")
 	script := filepath.Join(dir, "nvidia-smi")
-	sh := "#!/bin/sh\necho x >> " + counter + "\n" + body + "\n"
+	sh := "#!/bin/sh\ncase \"$1\" in *memory.used*) echo x >> " + counter + ";; esac\n" + body + "\n"
 	if err := os.WriteFile(script, []byte(sh), 0o755); err != nil {
 		t.Fatal(err)
 	}

@@ -161,19 +161,21 @@ func TestTrailReportNamesTheLongHopsAndTheDropped(t *testing.T) {
 	day := time.Date(2026, 9, 27, 0, 0, 0, 0, time.UTC)
 	t0 := day.Unix() + 9*3600
 	rows := []TrailRow{
-		{TrackPoint{t0, 39.150000, 20.220000}, "phone"},
-		{TrackPoint{t0 + 900, 39.150400, 20.220000}, "phone"},
-		{TrackPoint{t0 + 1800, 39.375000, 20.220000}, "phone"}, // a tower 25 km off, twice
-		{TrackPoint{t0 + 2700, 39.376000, 20.221000}, "phone"},
-		{TrackPoint{t0 + 3600, 39.150800, 20.220000}, "phone"},
-		{TrackPoint{t0 + 4500, 39.151000, 20.220000}, "phone"},
-		{TrackPoint{t0 + 7200, 39.600000, 20.500000}, "google-timeline"}, // a real move, kept
-		{TrackPoint{day.Unix() - 600, 39.15, 20.22}, "phone"},            // the day before: context only
+		{TrackPoint{t0, 39.150000, 20.220000}, "phone", ""},
+		{TrackPoint{t0 + 900, 39.150400, 20.220000}, "phone", ""},
+		{TrackPoint{t0 + 1800, 39.375000, 20.220000}, "phone", ""}, // a tower 25 km off, twice
+		{TrackPoint{t0 + 2700, 39.376000, 20.221000}, "phone", ""},
+		{TrackPoint{t0 + 3600, 39.150800, 20.220000}, "phone", ""},
+		{TrackPoint{t0 + 4500, 39.151000, 20.220000}, "phone", ""},
+		{TrackPoint{t0 + 7200, 39.600000, 20.500000}, "google-timeline", ""}, // a real move, kept
+		{TrackPoint{day.Unix() - 600, 39.15, 20.22}, "phone", ""},            // the day before: context only
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].TS < rows[j].TS })
-	out := TrailReport(day, rows, 2000)
+	out := TrailReportAt(day, rows, 2000, day.Add(14*time.Hour))
 	for _, must := range []string{
 		"2026-09-27: 7 points (google-timeline 1, phone 6), 2 dropped",
+		"first point 09:00:00, last point 11:00:00 (3 h 0 min before now)",
+		"no gap of an hour or more between points",
 		"09:30:00  39.37500,20.22000  phone            hop   25.0 km at   100 km/h  DROPPED",
 		"09:45:00  39.37600,20.22100  phone",
 		"11:00:00  39.60000,20.50000  google-timeline  hop   55.4 km at    74 km/h  kept",
@@ -184,5 +186,49 @@ func TestTrailReportNamesTheLongHopsAndTheDropped(t *testing.T) {
 	}
 	if strings.Contains(out, "10:00:00") {
 		t.Fatalf("the short hop home after the dropped points is listed:\n%s", out)
+	}
+}
+
+// A quiet evening: the points go on, an hour apart, and the report says when the last one was and
+// where the silences are.
+func TestTrailReportSaysTheLastPointAndTheGaps(t *testing.T) {
+	day := time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)
+	at := func(h, m int) int64 { return day.Add(time.Duration(h)*time.Hour + time.Duration(m)*time.Minute).Unix() }
+	rows := []TrailRow{
+		{TrackPoint{at(16, 18), 39.20791, 20.15995}, "phone", ""},
+		{TrackPoint{at(16, 37), 39.22432, 20.14078}, "phone", ""},
+		{TrackPoint{at(19, 31), 39.20793, 20.15987}, "phone", ""},
+		{TrackPoint{at(20, 40), 39.20793, 20.15987}, "phone", ""},
+	}
+	out := TrailReportAt(day, rows, 2000, day.Add(22*time.Hour+23*time.Minute))
+	for _, must := range []string{
+		"last point 20:40:00 (1 h 43 min before now)",
+		"gaps of an hour or more: 16:37 to 19:31 (2 h 54 min), 19:31 to 20:40 (1 h 9 min)",
+	} {
+		if !strings.Contains(out, must) {
+			t.Fatalf("report lacks %q:\n%s", must, out)
+		}
+	}
+}
+
+// The report says how the phone took each point, per source and on each listed line.
+func TestTrailReportSaysHowThePhoneTookThem(t *testing.T) {
+	day := time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC)
+	at := func(h, m int) int64 { return day.Add(time.Duration(h)*time.Hour + time.Duration(m)*time.Minute).Unix() }
+	rows := []TrailRow{
+		{TrackPoint{at(16, 18), 39.20791, 20.15995}, "phone-84bcf711", "w"},
+		{TrackPoint{at(16, 37), 39.22432, 20.14078}, "phone-84bcf711", "p"},
+		{TrackPoint{at(19, 31), 39.20793, 20.15987}, "phone-84bcf711", "w"},
+		{TrackPoint{at(20, 31), 39.20793, 20.15987}, "phone-84bcf711", "a"},
+		{TrackPoint{at(21, 0), 39.20793, 20.15987}, "google-timeline", ""},
+	}
+	out := TrailReportAt(day, rows, 2000, day.Add(22*time.Hour))
+	for _, must := range []string{
+		"google-timeline 1, phone-84bcf711 4: 2 quarter-hour, 1 other apps' fixes, 1 app opened",
+		"16:37:00  39.22432,20.14078  phone-84bcf711   hop    2.5 km at     8 km/h  kept · other apps' fixes",
+	} {
+		if !strings.Contains(out, must) {
+			t.Fatalf("report lacks %q:\n%s", must, out)
+		}
 	}
 }

@@ -86,10 +86,18 @@ func TestTrailKeyStaysSecds(t *testing.T) {
 	}
 }
 
+func TestValidVia(t *testing.T) {
+	for v, ok := range map[string]bool{"w": true, "p": true, "a": true, "": false, "P": false, "x;drop": false, "toolongvia": false} {
+		if validVia(v) != ok {
+			t.Fatalf("%q", v)
+		}
+	}
+}
+
 func TestLocationBatchOpened(t *testing.T) {
 	k, _ := ecdh.X25519().GenerateKey(rand.Reader)
 	s1, _ := sealTrail(k.PublicKey(), "1790000000 38.25 20.625 9")
-	s2, _ := sealTrail(k.PublicKey(), "1790000900 38.26 20.63")
+	s2, _ := sealTrail(k.PublicKey(), "1790000900 38.26 20.63 0 p")
 	other, _ := ecdh.X25519().GenerateKey(rand.Reader)
 	s3, _ := sealTrail(other.PublicKey(), "1790001800 1 2")
 	body, _ := json.Marshal(map[string]any{"source": "phone-ab", "points": []any{map[string]any{"ts": 1789999000, "lat": 1.0, "lon": 2.0}},
@@ -104,13 +112,15 @@ func TestLocationBatchOpened(t *testing.T) {
 			TS  int64   `json:"ts"`
 			Lat float64 `json:"lat"`
 			Lon float64 `json:"lon"`
+			Via string  `json:"via"`
 		} `json:"points"`
 		Sealed []string `json:"sealed"`
 	}
 	if err := json.Unmarshal(out, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Source != "phone-ab" || len(got.Points) != 3 || got.Sealed != nil || got.Points[1].TS != 1790000000 || got.Points[1].Lat != 38.25 {
+	if got.Source != "phone-ab" || len(got.Points) != 3 || got.Sealed != nil || got.Points[1].TS != 1790000000 || got.Points[1].Lat != 38.25 ||
+		got.Points[1].Via != "" || got.Points[2].Via != "p" {
 		t.Fatalf("batch %s", out)
 	}
 	if strings.Contains(string(out), "s1:") {
