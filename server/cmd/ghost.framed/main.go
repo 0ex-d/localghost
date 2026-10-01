@@ -29,6 +29,7 @@ import (
 	"github.com/LocalGhostDao/localghost/server/internal/landtiles"
 	"github.com/LocalGhostDao/localghost/server/internal/roadgraph"
 	"github.com/LocalGhostDao/localghost/server/internal/roadtiles"
+	"github.com/LocalGhostDao/localghost/server/internal/tzgrid"
 	"log"
 	"log/slog"
 	"os"
@@ -348,6 +349,91 @@ func main() {
 	})
 	if why := roadtiles.StaleWhy(roadtiles.FindPBFs(roadsIn), roadsOut); why != "" {
 		buildRoads(why)
+	}
+	// tz-grid: the time zone boundaries (the mirror's tz set under <mount>/geo/tz) rasterised to
+	// <mount>/geo/tz/grid.bin (internal/tzgrid), once, and again when the file is newer. With the
+	// grid the trail's newest point names the person's zone (settings local_tz) and the box's
+	// "today" and "19:00" stop being UTC's.
+	tzDir := filepath.Join(*mount, "geo", "tz")
+	tzGrid := filepath.Join(tzDir, "grid.bin")
+	var tzMu sync.Mutex
+	var tzLookup *tzgrid.Lookup
+	useTZ := func() {
+		l, err := tzgrid.Open(tzGrid)
+		if err != nil {
+			return
+		}
+		tzMu.Lock()
+		old := tzLookup
+		tzLookup = l
+		tzMu.Unlock()
+		if old != nil {
+			_ = old.Close()
+		}
+	}
+	pipe.SetZoneLookup(func(lat, lon float64) string {
+		tzMu.Lock()
+		l := tzLookup
+		tzMu.Unlock()
+		return l.Zone(lat, lon)
+	})
+	var tzBusy sync.Mutex
+	buildTZ := func(why string) string {
+		src := tzgrid.FindGeoJSON(tzDir)
+		if src == "" {
+			return "no time zone file under " + tzDir + " , tools/fetch_geo.sh fetches it (set tz on the mirror)"
+		}
+		if !tzBusy.TryLock() {
+			return "a time zone grid build is already running"
+		}
+		go func() {
+			defer tzBusy.Unlock()
+			lg.Info("time zone grid: building", "fn", "tz-grid", "why", why, "from", filepath.Base(src))
+			n, err := tzgrid.Build(src, tzGrid, func(p string) { lg.Info("time zone grid: "+p, "fn", "tz-grid") })
+			if err != nil {
+				lg.Error("time zone grid: build failed", "fn", "tz-grid", "err", err)
+				return
+			}
+			lg.Info("time zone grid: done", "fn", "tz-grid", "zones", n)
+			useTZ()
+		}()
+		return "time zone grid build started from " + filepath.Base(src)
+	}
+	ctl.Handle("tz-grid", func(json.RawMessage) (ctlsock.Response, error) {
+		return ctlsock.Response{OK: true, Text: buildTZ("asked")}, nil
+	})
+	// setting: one shared settings row (local_tz is the one health.sh asks for), and the zone the
+	// grid names for a point (lat=, lon=) to check the grid by hand.
+	ctl.Handle("setting", func(args json.RawMessage) (ctlsock.Response, error) {
+		var a struct {
+			Key string  `json:"key"`
+			Lat float64 `json:"lat"`
+			Lon float64 `json:"lon"`
+		}
+		if len(args) > 0 {
+			_ = json.Unmarshal(args, &a)
+		}
+		out := map[string]any{}
+		if a.Key != "" {
+			v, err := store.Setting(a.Key)
+			if err != nil {
+				return ctlsock.Response{OK: false, Err: err.Error()}, nil
+			}
+			out["key"], out["value"] = a.Key, v
+		}
+		if a.Lat != 0 || a.Lon != 0 {
+			tzMu.Lock()
+			l := tzLookup
+			tzMu.Unlock()
+			out["zone"] = l.Zone(a.Lat, a.Lon)
+			out["grid"] = l != nil
+		}
+		data, _ := json.Marshal(out)
+		return ctlsock.Response{OK: true, Data: data}, nil
+	})
+	useTZ()
+	if src := tzgrid.FindGeoJSON(tzDir); src != "" && tzgrid.Stale(src, tzGrid) {
+		buildTZ("the zone file is newer than the grid")
 	}
 	// reprocess: converge the archive's derived state , frame records, previews (force=true also
 	// re-derives EXISTING previews, the orientation-fix case), search notifies, day paths. Runs in

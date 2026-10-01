@@ -22,11 +22,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"github.com/LocalGhostDao/localghost/server/internal/feeds"
 	"github.com/LocalGhostDao/localghost/server/internal/harden"
 	"github.com/LocalGhostDao/localghost/server/internal/hw"
 	"github.com/LocalGhostDao/localghost/server/internal/poltergres"
+	"github.com/LocalGhostDao/localghost/server/internal/rates"
 	"log"
 	"log/slog"
 	"net/http"
@@ -633,6 +636,14 @@ func main() {
 			lg.Error("health server stopped", "fn", "main", "err", err)
 		}
 	}()
+	// the notification store the digests post through (the mount's own Postgres and Redis)
+	newsProduce := func(n hw.Notification) error { return errors.New("no run dir: notifications off") }
+	if runDir != "" {
+		m := filepath.Dir(runDir)
+		store := hw.NewNotifStore(func(int) string { return hw.SocketForMount(m) })
+		slot := slotOf(m)
+		newsProduce = func(n hw.Notification) error { return store.Produce(slot, n) }
+	}
 	if runDir != "" {
 		mount := filepath.Dir(runDir)
 		ctl := ctlsock.NewServer(service, runDir, lg)
@@ -821,6 +832,106 @@ func main() {
 			data, _ := json.Marshal(out)
 			return ctlsock.Response{OK: true, Data: data}, nil
 		})
+		// news: the feeds and their health, the counts; feeds can be added (add={id,name,url}),
+		// removed (remove=id) or switched (enable=id on=true|false); digest=true posts the digest
+		// now whatever the hour.
+		ctl.Handle("news", func(args json.RawMessage) (ctlsock.Response, error) {
+			var a struct {
+				Add    *feeds.Source `json:"add"`
+				Remove string        `json:"remove"`
+				Enable string        `json:"enable"`
+				On     *bool         `json:"on"`
+				Digest bool          `json:"digest"`
+				Fetch  bool          `json:"fetch"` // the box fetches the feeds now, whatever the phone is on
+			}
+			if len(args) > 0 {
+				_ = json.Unmarshal(args, &a)
+			}
+			db := chatStore(mount)
+			if db == nil {
+				return ctlsock.Response{OK: false, Err: "no database (box locked?)"}, nil
+			}
+			if err := seedFeeds(db); err != nil {
+				return ctlsock.Response{OK: false, Err: err.Error()}, nil
+			}
+			if a.Fetch {
+				select {
+				case newsForce <- struct{}{}:
+				default:
+				}
+			}
+			if a.Add != nil {
+				if a.Add.ID == "" || !strings.HasPrefix(a.Add.URL, "https://") {
+					return ctlsock.Response{OK: false, Err: "add wants id, name and an https url"}, nil
+				}
+				if a.Add.Name == "" {
+					a.Add.Name = a.Add.ID
+				}
+				if err := db.Exec("INSERT INTO news_feeds (id, name, url, added_at) VALUES ($1,$2,$3,$4) ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, url = EXCLUDED.url, enabled = true",
+					a.Add.ID, a.Add.Name, a.Add.URL, time.Now().Unix()); err != nil {
+					return ctlsock.Response{OK: false, Err: err.Error()}, nil
+				}
+			}
+			if a.Remove != "" {
+				if err := db.Exec("DELETE FROM news_feeds WHERE id = $1", a.Remove); err != nil {
+					return ctlsock.Response{OK: false, Err: err.Error()}, nil
+				}
+			}
+			if a.Enable != "" && a.On != nil {
+				if err := db.Exec("UPDATE news_feeds SET enabled = $2 WHERE id = $1", a.Enable, *a.On); err != nil {
+					return ctlsock.Response{OK: false, Err: err.Error()}, nil
+				}
+			}
+			out := map[string]any{}
+			if a.Fetch {
+				out["fetching"] = "the box fetches the feeds now; ask again in a minute"
+			}
+			if a.Digest {
+				now := time.Now()
+				n, err := postDigest(db, now, now.In(hw.LocalZone(db)).Format("15:04"), now.In(hw.LocalZone(db)).Format("2006-01-02"), newsProduce, lg)
+				if err != nil {
+					return ctlsock.Response{OK: false, Err: err.Error()}, nil
+				}
+				out["digested"] = n
+			}
+			st, err := newsStatus(db, time.Now())
+			if err != nil {
+				return ctlsock.Response{OK: false, Err: err.Error()}, nil
+			}
+			out["news"] = st
+			data, _ := json.Marshal(out)
+			return ctlsock.Response{OK: true, Data: data}, nil
+		})
+		// rates: the box's market numbers (ghost.tallyd's), and convert amount= from= to=.
+		ctl.Handle("rates", func(args json.RawMessage) (ctlsock.Response, error) {
+			db := chatStore(mount)
+			if db == nil {
+				return ctlsock.Response{OK: false, Err: "no database (box locked?)"}, nil
+			}
+			var a struct {
+				Amount float64 `json:"amount"`
+				From   string  `json:"from"`
+				To     string  `json:"to"`
+			}
+			if len(args) > 0 {
+				_ = json.Unmarshal(args, &a)
+			}
+			snap, err := hw.RatesNow(db)
+			if err != nil {
+				return ctlsock.Response{OK: false, Err: err.Error()}, nil
+			}
+			out := map[string]any{"rates": snap}
+			if a.Amount != 0 && a.From != "" && a.To != "" {
+				v, err := rates.Convert(a.Amount, a.From, a.To, snap.FX, snap.USD())
+				if err != nil {
+					out["convertErr"] = err.Error()
+				} else {
+					out["converted"] = v
+				}
+			}
+			data, _ := json.Marshal(out)
+			return ctlsock.Response{OK: true, Data: data}, nil
+		})
 		defer ctl.Cleanup()
 		go func() {
 			if err := ctl.Serve(ctx); err != nil {
@@ -845,10 +956,23 @@ func main() {
 	}
 	if mountDir != "" {
 		go distillLoop(ctx, mountDir, runDir, lg)
+		// THE NEWS (news.go): the phone's feed bytes in, stories and two digests a day out
+		go newsLoop(ctx, mountDir, runDir, newsProduce, lg)
 	}
 
 	<-ctx.Done()
 	lg.Info("shutting down", "fn", "main")
+}
+
+// slotOf is the slot number in a mount path (<state>/mnt/slot0), 0 when it has none.
+func slotOf(mount string) int {
+	base := filepath.Base(mount)
+	if strings.HasPrefix(base, "slot") {
+		if n, err := strconv.Atoi(strings.TrimPrefix(base, "slot")); err == nil {
+			return n
+		}
+	}
+	return 0
 }
 
 func envPort(key string) int {
@@ -890,6 +1014,8 @@ var contextSources = []contextSource{
 	memoriesSource,    // FIRST: what the box knows about the PERSON outranks document search
 	photoDigestSource, // the matched photo SET, summarised by category , one item, always fits
 	searchdSource,
+	newsSource,  // then the news the phone fetched (news.go); the web, the phone's, comes with the question
+	ratesSource, // and the box's own market numbers for a money question (rates.go)
 	// PLACEHOLDER recentChatsSource: last N turns of this conversation (needs chat storage first ,
 	//   see docs/context-injection-design.md phase 3).
 	// PLACEHOLDER locationDaySource: "where was I on <date>" prompts answered from framed's day

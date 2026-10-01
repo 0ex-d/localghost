@@ -315,6 +315,7 @@ class MainActivity : ComponentActivity() {
         PollWorker.schedule(this)
         SyncWorker.schedule(this)          // 15-min background sync, Wi-Fi only
         com.localghost.app.sync.HealthSync.schedule(this) // the last week of Health Connect, every six hours
+        com.localghost.app.sync.BoxFetch.schedule(this)   // the news feeds and the tickers, hourly, for the box
         CrashHandler.pending(this)?.let { screen = Screen.Crash(it) }
         // what a killed app left in its cache (a capture in flight is minutes old at most)
         Thread { com.localghost.app.security.CacheSweep.sweep(cacheDir, minAgeMs = 10 * 60_000L) }.start()

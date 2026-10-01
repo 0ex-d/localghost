@@ -43,7 +43,9 @@ private val GLOSSARY = listOf(
             "answers from your archive alone; \"web auto\" (the start) searches on the phone when a question needs " +
             "the outside world (news, prices, weather, who is, how much); \"web on\" searches for every " +
             "question. The phone searches (DuckDuckGo, or Brave with your key) and hands the findings to " +
-            "the box; the box itself never reaches the internet.",
+            "the box; the box never searches the web for you. It does pull general information for " +
+            "context (the news feeds and the market tickers it follows, a plugin's data) when the " +
+            "phone is not on Wi-Fi to fetch it; your words never go out.",
             "Tap the hat to switch to incognito, where the chat is not kept anywhere. Tap the globe to " +
             "choose whether your phone looks things up online for the box: never, when it seems needed, " +
             "or always. Closing the app no longer loses an answer: the box finishes it and it is there " +
@@ -64,6 +66,16 @@ private val GLOSSARY = listOf(
             "Phones get lost and stolen. So nothing important is kept on the phone. Everything " +
             "lives on the box at home, where only you can reach it. No company can see it, " +
             "because no company is involved."),
+        Term("What leaves the box",
+            "Outbound traffic is pull-only and content-free: the box fetches the news feeds and " +
+            "market tickers in its sources list, and what a connected plugin asks for, through " +
+            "one client (internal/egress) with a browser-like agent and no cookies, and only when " +
+            "the phone has not said it is on Wi-Fi in the last twenty minutes (then the phone " +
+            "fetches and hands the bytes over). Nothing from your archive is in a request.",
+            "Your thoughts and words never leave the box. It does pull general things from " +
+            "outside to use in context, the news and the prices it follows, so a publisher or an " +
+            "exchange may see your box's address the way a website sees a browser. It only " +
+            "pulls; it never sends anything of yours."),
     )),
     Section("SYNC", listOf(
         Term("Sync",

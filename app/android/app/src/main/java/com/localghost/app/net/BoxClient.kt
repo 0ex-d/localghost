@@ -1135,6 +1135,139 @@ object BoxClient {
         }
     } catch (_: Exception) { null }
 
+    // --- what the phone fetches for the box: news feeds and market tickers (sync/BoxFetch) ---
+
+    /** The network this phone is on, as the box wants to hear it: wifi, mobile or none. */
+    fun netKind(ctx: Context): String {
+        val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager ?: return "none"
+        val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return "none"
+        return when {
+            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) || caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET) -> "wifi"
+            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "mobile"
+            else -> "none"
+        }
+    }
+
+    /** Tell the box the network (/v1/phone/net): on Wi-Fi this phone fetches for it, else the box does. */
+    suspend fun reportNet(ctx: Context): Boolean = try {
+        BoxHttp.postJson(ctx, "/v1/phone/net", org.json.JSONObject().put("net", netKind(ctx)), 10_000).optBoolean("ok")
+    } catch (_: Exception) { false }
+
+    data class FetchSource(val id: String, val name: String, val url: String, val every: Int)
+    data class FetchList(val feeds: List<FetchSource>, val rates: List<FetchSource>, val feedsEvery: Int)
+
+    /** What the box wants fetched (/v1/fetch/list); null when unreachable. */
+    suspend fun fetchList(ctx: Context): FetchList? = try {
+        val r = BoxHttp.getJson(ctx, "/v1/fetch/list")
+        fun arr(k: String, every: Int): List<FetchSource> {
+            val a = r.optJSONArray(k) ?: return emptyList()
+            return (0 until a.length()).mapNotNull { i ->
+                val o = a.optJSONObject(i) ?: return@mapNotNull null
+                FetchSource(o.optString("id"), o.optString("name"), o.optString("url"), o.optInt("every", every))
+            }
+        }
+        val fe = r.optInt("feedsEvery", 120)
+        FetchList(arr("feeds", fe), arr("rates", 60), fe)
+    } catch (_: Exception) { null }
+
+    /** One fetched body for the box: the id, the HTTP status (0 when the fetch failed), the error, the body. */
+    fun fetchedJson(fetchedAt: Long, key: String, rows: List<Fetched>): org.json.JSONObject {
+        val arr = org.json.JSONArray()
+        rows.forEach { f ->
+            arr.put(org.json.JSONObject().apply {
+                put("id", f.id); put("status", f.status)
+                if (f.error.isNotEmpty()) put("error", f.error)
+                if (f.body.isNotEmpty()) put("body", f.body)
+            })
+        }
+        return org.json.JSONObject().apply { put("fetchedAt", fetchedAt); put(key, arr) }
+    }
+    data class Fetched(val id: String, val status: Int, val error: String, val body: String)
+
+    suspend fun postNewsFetched(ctx: Context, fetchedAt: Long, rows: List<Fetched>): Boolean = try {
+        BoxHttp.postJson(ctx, "/v1/news/fetched", fetchedJson(fetchedAt, "feeds", rows), 60_000).optBoolean("ok")
+    } catch (_: Exception) { false }
+
+    suspend fun postRatesFetched(ctx: Context, fetchedAt: Long, rows: List<Fetched>): Boolean = try {
+        BoxHttp.postJson(ctx, "/v1/rates/fetched", fetchedJson(fetchedAt, "sources", rows), 60_000).optBoolean("ok")
+    } catch (_: Exception) { false }
+
+    data class NewsItem(val feed: String, val outlet: String, val title: String, val link: String, val summary: String, val published: Long)
+    data class NewsStory(val id: Long, val title: String, val summary: String, val sources: Int, val firstSeen: Long, val lastSeen: Long, val items: List<NewsItem>)
+    data class News(val stories: List<NewsStory>, val lastFetch: Long, val lastDigest: Long)
+
+    /** The stories since a time (/v1/news); null when unreachable. */
+    suspend fun news(ctx: Context, since: Long = 0): News? = try {
+        val r = BoxHttp.getJson(ctx, "/v1/news" + (if (since > 0) "?since=$since" else ""))
+        val a = r.optJSONArray("stories") ?: org.json.JSONArray()
+        News((0 until a.length()).mapNotNull { i ->
+            val o = a.optJSONObject(i) ?: return@mapNotNull null
+            val ia = o.optJSONArray("items") ?: org.json.JSONArray()
+            NewsStory(o.optLong("id"), o.optString("title"), o.optString("summary"), o.optInt("sources"),
+                o.optLong("firstSeen"), o.optLong("lastSeen"),
+                (0 until ia.length()).mapNotNull { j ->
+                    val it = ia.optJSONObject(j) ?: return@mapNotNull null
+                    NewsItem(it.optString("feed"), it.optString("outlet"), it.optString("title"), it.optString("link"), it.optString("summary"), it.optLong("published"))
+                })
+        }, r.optLong("lastFetch"), r.optLong("lastDigest"))
+    } catch (_: Exception) { null }
+
+    data class CoinRow(val rank: Int, val symbol: String, val name: String, val priceUsd: Double, val marketCap: Double, val change24: Double)
+    /** The box's USD price of one symbol and how it was made. */
+    data class IndexRow(val symbol: String, val price: Double, val at: Long, val n: Int, val spread: Double, val used: String)
+    /** The market index: one number for crypto as a whole (the fifty largest, weighted by last month's volume). */
+    data class Market(val code: String, val value: Double, val dayChange: Double, val constituents: Int, val priced: Int, val month: String)
+    data class Rates(val fxDay: String, val fx: Map<String, Double>, val index: List<IndexRow>, val btcUsd: Double, val btcAt: Long, val btcN: Int, val btcSpread: Double, val btcUsed: String, val ranksAt: Long, val ranks: List<CoinRow>, val ranksSource: String, val days: Int, val fxDays: Int, val market: Market?)
+
+    /** The box's market numbers (/v1/rates); null when unreachable. */
+    suspend fun rates(ctx: Context): Rates? = try {
+        val r = BoxHttp.getJson(ctx, "/v1/rates")
+        val fx = HashMap<String, Double>()
+        r.optJSONObject("fx")?.let { o -> o.keys().forEach { k -> fx[k] = o.optDouble(k) } }
+        val ra = r.optJSONArray("ranks") ?: org.json.JSONArray()
+        val index = ArrayList<IndexRow>()
+        r.optJSONObject("index")?.let { o ->
+            o.keys().forEach { sym ->
+                val row = o.optJSONObject(sym) ?: return@forEach
+                index.add(IndexRow(sym, row.optDouble("price", 0.0), row.optLong("at"), row.optInt("n"), row.optDouble("spread", 0.0), row.optString("used")))
+            }
+        }
+        index.sortBy { it.symbol }
+        Rates(r.optString("fxDay"), fx, index, r.optDouble("btcUsd", 0.0), r.optLong("btcAt"), r.optInt("btcN"), r.optDouble("btcSpread", 0.0), r.optString("btcUsed"),
+            r.optLong("ranksAt"), (0 until ra.length()).mapNotNull { i ->
+                val o = ra.optJSONObject(i) ?: return@mapNotNull null
+                CoinRow(o.optInt("rank"), o.optString("symbol"), o.optString("name"), o.optDouble("priceUsd", 0.0), o.optDouble("marketCap", 0.0), o.optDouble("change24", 0.0))
+            }, r.optString("ranksSource"), r.optInt("days"), r.optInt("fxDays"),
+            r.optJSONObject("market")?.let { m -> Market(m.optString("code"), m.optDouble("value", 0.0), m.optDouble("dayChange", 0.0), m.optInt("constituents"), m.optInt("priced"), m.optString("month")) })
+    } catch (_: Exception) { null }
+
+    /** One country as the box lists it: the tiles it holds for it, and their size on disk. */
+    data class CountryRow(val code: String, val name: String, val streets: Int, val major: Int, val coast: Int, val bytes: Long)
+    data class Countries(val rows: List<CountryRow>, val roads: Boolean, val land: Boolean)
+
+    /** Every country with what the box holds for it (/v1/geo/countries); null when unreachable. */
+    suspend fun countries(ctx: Context): Countries? = try {
+        val r = BoxHttp.getJson(ctx, "/v1/geo/countries")
+        val a = r.optJSONArray("countries") ?: org.json.JSONArray()
+        Countries((0 until a.length()).mapNotNull { i ->
+            val o = a.optJSONObject(i) ?: return@mapNotNull null
+            CountryRow(o.optString("code"), o.optString("name"), o.optInt("streets"), o.optInt("major"),
+                o.optInt("coast"), o.optLong("bytes"))
+        }, r.optBoolean("roads"), r.optBoolean("land"))
+    } catch (_: Exception) { null }
+
+    /** One country's tiles as index keys (/v1/geo/country?code=); null when unreachable or unknown. */
+    suspend fun countryCells(ctx: Context, code: String): com.localghost.app.local.MapPlan.Country? = try {
+        val r = BoxHttp.getJson(ctx, "/v1/geo/country?code=" + java.net.URLEncoder.encode(code, "UTF-8"))
+        fun ints(k: String): IntArray {
+            val a = r.optJSONArray(k) ?: return IntArray(0)
+            return IntArray(a.length()) { a.optInt(it) }
+        }
+        if (!r.has("code")) null
+        else com.localghost.app.local.MapPlan.Country(r.optString("code"), r.optString("name"),
+            ints("fine"), ints("majorKeys"), ints("coastKeys"), r.optLong("bytes"))
+    } catch (_: Exception) { null }
+
     data class GeoCell(val lat: Double, val lon: Double, val n: Int, val hash: String, val takenAt: Long)
 
     /** A name on the map. kind: C country, R region, X capital, P any other populated place. */

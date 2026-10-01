@@ -1,0 +1,447 @@
+package rates
+
+// THE MARKETS: which exchange pairs the box reads for a symbol, how each exchange is asked for a
+// ticker and for daily candles, and how each answers. Seven venues, all public, no key: Coinbase,
+// Kraken, Bitstamp, Gemini, Binance, Bitfinex, OKX. Binance and OKX quote in USDT; those prices
+// are folded into USD with the USDT/USD rate the USD venues give for USDT itself, so the index
+// is one USD number per symbol.
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// Market is one exchange's pair.
+type Market struct {
+	Exchange string `json:"exchange"`
+	Base     string `json:"base"`
+	Quote    string `json:"quote"` // USD or USDT
+}
+
+// ID is the market's name in the sources list and the marks: "coinbase:BTC-USD".
+func (m Market) ID() string { return m.Exchange + ":" + m.Base + "-" + m.Quote }
+
+// ParseMarketID reads an ID back.
+func ParseMarketID(id string) (Market, bool) {
+	i := strings.IndexByte(id, ':')
+	j := strings.IndexByte(id, '-')
+	if i <= 0 || j <= i+1 || j >= len(id)-1 {
+		return Market{}, false
+	}
+	return Market{Exchange: id[:i], Base: id[i+1 : j], Quote: id[j+1:]}, true
+}
+
+// Exchanges, in the order the index names them.
+var Exchanges = []string{"binance", "bitfinex", "bitstamp", "coinbase", "gemini", "kraken", "okx"}
+
+// DefaultSymbols is what a new box follows; `ghost-cli ghost.tallyd rates add=SOL` extends it.
+var DefaultSymbols = []string{"BTC", "ETH"}
+
+// Markets is every pair to read for the symbols: a USD pair on the USD venues, a USDT pair on
+// Binance and OKX, and the USDT/USD legs that fold the latter into dollars.
+func Markets(symbols []string) []Market {
+	var out []Market
+	seen := map[string]bool{}
+	add := func(m Market) {
+		if !seen[m.ID()] {
+			seen[m.ID()] = true
+			out = append(out, m)
+		}
+	}
+	for _, s := range symbols {
+		s = strings.ToUpper(strings.TrimSpace(s))
+		if s == "" || s == "USDT" || s == "USD" {
+			continue
+		}
+		for _, ex := range []string{"coinbase", "kraken", "bitstamp", "gemini", "bitfinex"} {
+			add(Market{ex, s, "USD"})
+		}
+		for _, ex := range []string{"binance", "okx"} {
+			add(Market{ex, s, "USDT"})
+		}
+	}
+	for _, ex := range []string{"coinbase", "kraken", "bitstamp", "bitfinex"} {
+		add(Market{ex, "USDT", "USD"})
+	}
+	return out
+}
+
+// exchangeSymbol is the pair as the venue spells it.
+func exchangeSymbol(m Market) string {
+	base, quote := m.Base, m.Quote
+	switch m.Exchange {
+	case "coinbase":
+		return base + "-" + quote
+	case "kraken":
+		if base == "BTC" {
+			base = "XBT"
+		}
+		return base + quote
+	case "bitstamp", "gemini":
+		return strings.ToLower(base + quote)
+	case "binance":
+		return base + quote
+	case "bitfinex":
+		if base == "USDT" {
+			base = "UST"
+		}
+		if quote == "USDT" {
+			quote = "UST"
+		}
+		return "t" + base + quote
+	case "okx":
+		return base + "-" + quote
+	}
+	return base + quote
+}
+
+// TickerURL is the venue's public ticker for the pair.
+func (m Market) TickerURL() string {
+	p := exchangeSymbol(m)
+	switch m.Exchange {
+	case "coinbase":
+		return "https://api.exchange.coinbase.com/products/" + p + "/ticker"
+	case "kraken":
+		return "https://api.kraken.com/0/public/Ticker?pair=" + p
+	case "bitstamp":
+		return "https://www.bitstamp.net/api/v2/ticker/" + p + "/"
+	case "gemini":
+		return "https://api.gemini.com/v1/pubticker/" + p
+	case "binance":
+		return "https://api.binance.com/api/v3/ticker/24hr?symbol=" + p
+	case "bitfinex":
+		return "https://api-pub.bitfinex.com/v2/ticker/" + p
+	case "okx":
+		return "https://www.okx.com/api/v5/market/ticker?instId=" + p
+	}
+	return ""
+}
+
+// CandlesURL is the venue's daily candles from a day on (Coinbase and Kraken to an end; the
+// others take a start and a count). Each venue pages differently; the box walks back a page a
+// tick and stops when a page comes back empty.
+func (m Market) CandlesURL(from, to time.Time) string {
+	p := exchangeSymbol(m)
+	switch m.Exchange {
+	case "coinbase": // at most 300 candles between start and end
+		return fmt.Sprintf("https://api.exchange.coinbase.com/products/%s/candles?granularity=86400&start=%s&end=%s", p, from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339))
+	case "kraken": // the last 720 days from since, whatever the end
+		return fmt.Sprintf("https://api.kraken.com/0/public/OHLC?pair=%s&interval=1440&since=%d", p, from.Unix())
+	case "bitstamp":
+		return fmt.Sprintf("https://www.bitstamp.net/api/v2/ohlc/%s/?step=86400&limit=1000&start=%d", p, from.Unix())
+	case "gemini": // no paging: what the venue keeps
+		return fmt.Sprintf("https://api.gemini.com/v2/candles/%s/1day", p)
+	case "binance":
+		return fmt.Sprintf("https://api.binance.com/api/v3/klines?symbol=%s&interval=1d&startTime=%d&endTime=%d&limit=1000", p, from.UnixMilli(), to.UnixMilli())
+	case "bitfinex":
+		return fmt.Sprintf("https://api-pub.bitfinex.com/v2/candles/trade:1D:%s/hist?start=%d&end=%d&limit=1000&sort=1", p, from.UnixMilli(), to.UnixMilli())
+	case "okx": // at most 100 a call, older than `after`
+		return fmt.Sprintf("https://www.okx.com/api/v5/market/history-candles?instId=%s&bar=1D&after=%d&limit=100", p, to.UnixMilli())
+	}
+	return ""
+}
+
+// PageDays is how many days one candles call covers at most, for walking back.
+func (m Market) PageDays() int {
+	switch m.Exchange {
+	case "coinbase":
+		return 300
+	case "okx":
+		return 100
+	case "kraken":
+		return 720
+	}
+	return 1000
+}
+
+// ParseTicker reads one venue's ticker body for a market. fetched is when it was fetched.
+func ParseTicker(m Market, body []byte, fetched time.Time) (Quote, error) {
+	q := Quote{Exchange: m.Exchange, Base: m.Base, QuoteCcy: m.Quote, At: fetched}
+	num := func(v any) float64 {
+		switch x := v.(type) {
+		case float64:
+			return x
+		case string:
+			f, _ := strconv.ParseFloat(x, 64)
+			return f
+		}
+		return 0
+	}
+	switch m.Exchange {
+	case "bitfinex":
+		var arr []any
+		if err := json.Unmarshal(body, &arr); err != nil || len(arr) < 8 {
+			return q, errors.New("bitfinex: not a ticker")
+		}
+		q.Price, q.Volume = num(arr[6]), num(arr[7])
+	default:
+		var obj map[string]any
+		if err := json.Unmarshal(body, &obj); err != nil {
+			return q, err
+		}
+		switch m.Exchange {
+		case "coinbase":
+			q.Price, q.Volume = num(obj["price"]), num(obj["volume"])
+			if t, ok := obj["time"].(string); ok {
+				if at, err := time.Parse(time.RFC3339Nano, t); err == nil {
+					q.At = at
+				}
+			}
+		case "kraken":
+			res, _ := obj["result"].(map[string]any)
+			for k, v := range res {
+				if k == "last" {
+					continue
+				}
+				pair, _ := v.(map[string]any)
+				if c, ok := pair["c"].([]any); ok && len(c) > 0 {
+					q.Price = num(c[0])
+				}
+				if vol, ok := pair["v"].([]any); ok && len(vol) > 1 {
+					q.Volume = num(vol[1])
+				}
+			}
+		case "bitstamp":
+			q.Price, q.Volume = num(obj["last"]), num(obj["volume"])
+			if ts := num(obj["timestamp"]); ts > 0 {
+				q.At = time.Unix(int64(ts), 0)
+			}
+		case "gemini":
+			q.Price = num(obj["last"])
+			if vol, ok := obj["volume"].(map[string]any); ok {
+				q.Volume = num(vol[m.Base])
+				if ts := num(vol["timestamp"]); ts > 0 {
+					q.At = time.UnixMilli(int64(ts))
+				}
+			}
+		case "binance":
+			q.Price, q.Volume = num(obj["lastPrice"]), num(obj["volume"])
+			if ts := num(obj["closeTime"]); ts > 0 {
+				q.At = time.UnixMilli(int64(ts))
+			}
+		case "okx":
+			data, _ := obj["data"].([]any)
+			if len(data) > 0 {
+				row, _ := data[0].(map[string]any)
+				q.Price, q.Volume = num(row["last"]), num(row["vol24h"])
+				if ts := num(row["ts"]); ts > 0 {
+					q.At = time.UnixMilli(int64(ts))
+				}
+			}
+		default:
+			return q, errors.New("unknown exchange " + m.Exchange)
+		}
+	}
+	if q.Price <= 0 {
+		return q, errors.New(m.Exchange + ": no price in the answer")
+	}
+	return q, nil
+}
+
+// Candle is one day of one market.
+type Candle struct {
+	Day                            string // YYYY-MM-DD, UTC
+	Open, High, Low, Close, Volume float64
+}
+
+// ParseCandles reads one venue's daily candles. Days with no close are dropped; the newest first.
+func ParseCandles(m Market, body []byte) ([]Candle, error) {
+	num := func(v any) float64 {
+		switch x := v.(type) {
+		case float64:
+			return x
+		case string:
+			f, _ := strconv.ParseFloat(x, 64)
+			return f
+		}
+		return 0
+	}
+	day := func(sec int64) string { return time.Unix(sec, 0).UTC().Format("2006-01-02") }
+	var out []Candle
+	switch m.Exchange {
+	case "coinbase": // [time, low, high, open, close, volume]
+		var rows [][]any
+		if err := json.Unmarshal(body, &rows); err != nil {
+			return nil, err
+		}
+		for _, r := range rows {
+			if len(r) >= 6 {
+				out = append(out, Candle{day(int64(num(r[0]))), num(r[3]), num(r[2]), num(r[1]), num(r[4]), num(r[5])})
+			}
+		}
+	case "kraken": // result.<pair>: [time, open, high, low, close, vwap, volume, count]
+		var obj struct {
+			Result map[string]json.RawMessage `json:"result"`
+		}
+		if err := json.Unmarshal(body, &obj); err != nil {
+			return nil, err
+		}
+		for k, raw := range obj.Result {
+			if k == "last" {
+				continue
+			}
+			var rows [][]any
+			if json.Unmarshal(raw, &rows) != nil {
+				continue
+			}
+			for _, r := range rows {
+				if len(r) >= 7 {
+					out = append(out, Candle{day(int64(num(r[0]))), num(r[1]), num(r[2]), num(r[3]), num(r[4]), num(r[6])})
+				}
+			}
+		}
+	case "bitstamp": // data.ohlc: [{timestamp, open, high, low, close, volume}]
+		var obj struct {
+			Data struct {
+				OHLC []map[string]any `json:"ohlc"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(body, &obj); err != nil {
+			return nil, err
+		}
+		for _, r := range obj.Data.OHLC {
+			out = append(out, Candle{day(int64(num(r["timestamp"]))), num(r["open"]), num(r["high"]), num(r["low"]), num(r["close"]), num(r["volume"])})
+		}
+	case "gemini": // [time_ms, open, high, low, close, volume]
+		var rows [][]any
+		if err := json.Unmarshal(body, &rows); err != nil {
+			return nil, err
+		}
+		for _, r := range rows {
+			if len(r) >= 6 {
+				out = append(out, Candle{day(int64(num(r[0])) / 1000), num(r[1]), num(r[2]), num(r[3]), num(r[4]), num(r[5])})
+			}
+		}
+	case "binance": // [openTime, open, high, low, close, volume, closeTime, ...]
+		var rows [][]any
+		if err := json.Unmarshal(body, &rows); err != nil {
+			return nil, err
+		}
+		for _, r := range rows {
+			if len(r) >= 6 {
+				out = append(out, Candle{day(int64(num(r[0])) / 1000), num(r[1]), num(r[2]), num(r[3]), num(r[4]), num(r[5])})
+			}
+		}
+	case "bitfinex": // [MTS, OPEN, CLOSE, HIGH, LOW, VOLUME]
+		var rows [][]any
+		if err := json.Unmarshal(body, &rows); err != nil {
+			return nil, err
+		}
+		for _, r := range rows {
+			if len(r) >= 6 {
+				out = append(out, Candle{day(int64(num(r[0])) / 1000), num(r[1]), num(r[3]), num(r[4]), num(r[2]), num(r[5])})
+			}
+		}
+	case "okx": // data: [[ts, o, h, l, c, vol, ...]] as strings
+		var obj struct {
+			Data [][]any `json:"data"`
+		}
+		if err := json.Unmarshal(body, &obj); err != nil {
+			return nil, err
+		}
+		for _, r := range obj.Data {
+			if len(r) >= 6 {
+				out = append(out, Candle{day(int64(num(r[0])) / 1000), num(r[1]), num(r[2]), num(r[3]), num(r[4]), num(r[5])})
+			}
+		}
+	default:
+		return nil, errors.New("unknown exchange " + m.Exchange)
+	}
+	kept := out[:0]
+	for _, c := range out {
+		if c.Close > 0 && c.Day > "2009" {
+			kept = append(kept, c)
+		}
+	}
+	sort.Slice(kept, func(i, j int) bool { return kept[i].Day > kept[j].Day })
+	if len(kept) == 0 {
+		return nil, errors.New(m.Exchange + ": no candles in the answer")
+	}
+	return kept, nil
+}
+
+// USDTRate is the dollar price of one USDT from the fresh USDT/USD quotes: their median, or 1
+// (and false) when none is fresh.
+func USDTRate(quotes []Quote, now time.Time) (float64, bool) {
+	var ps []float64
+	for _, q := range quotes {
+		if q.Base == "USDT" && q.QuoteCcy == "USD" && q.Price > 0 && now.Sub(q.At) <= staleAfter {
+			ps = append(ps, q.Price)
+		}
+	}
+	if len(ps) == 0 {
+		return 1, false
+	}
+	sort.Float64s(ps)
+	if len(ps)%2 == 1 {
+		return ps[len(ps)/2], true
+	}
+	return (ps[len(ps)/2-1] + ps[len(ps)/2]) / 2, true
+}
+
+// InUSD folds a symbol's quotes into dollars: a USDT-quoted price times the USDT/USD rate.
+func InUSD(quotes []Quote, symbol string, usdt float64) []Quote {
+	var out []Quote
+	for _, q := range quotes {
+		if q.Base != symbol {
+			continue
+		}
+		switch q.QuoteCcy {
+		case "USD":
+			out = append(out, q)
+		case "USDT":
+			c := q
+			c.Price = q.Price * usdt
+			c.QuoteCcy = "USD"
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// DailyIndex is one day's USD close for a symbol from the venues' closes: the median, USDT closes
+// folded with the day's USDT/USD close (1 when the day has none).
+func DailyIndex(closes map[Market]float64, symbol string, usdtClose float64) (float64, int) {
+	if usdtClose <= 0 {
+		usdtClose = 1
+	}
+	var ps []float64
+	for m, c := range closes {
+		if m.Base != symbol || c <= 0 {
+			continue
+		}
+		if m.Quote == "USDT" {
+			c *= usdtClose
+		}
+		ps = append(ps, c)
+	}
+	if len(ps) == 0 {
+		return 0, 0
+	}
+	sort.Float64s(ps)
+	// a venue a long way from the rest is a bad print, not a price
+	med := ps[len(ps)/2]
+	if len(ps)%2 == 0 {
+		med = (ps[len(ps)/2-1] + ps[len(ps)/2]) / 2
+	}
+	var kept []float64
+	for _, p := range ps {
+		if math.Abs(p-med)/med <= 0.05 {
+			kept = append(kept, p)
+		}
+	}
+	if len(kept) == 0 {
+		return med, len(ps)
+	}
+	sum := 0.0
+	for _, p := range kept {
+		sum += p
+	}
+	return sum / float64(len(kept)), len(kept)
+}

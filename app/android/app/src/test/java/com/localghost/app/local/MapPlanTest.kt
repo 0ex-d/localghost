@@ -52,4 +52,21 @@ class MapPlanTest {
     @Test fun distance() {
         assertEquals(344.0, MapPlan.km(51.5, -0.12, 48.85, 2.35), 15.0) // London to Paris
     }
+
+    @Test fun aWholeCountryIsStreetsThenMainRoadsThenCoast() {
+        // keys as the box sends them: y * cols + x on each grid
+        val c = MapPlan.Country("GR", "Greece",
+            fine = intArrayOf(1380 * 3600 + 2038, 1380 * 3600 + 2039),
+            major = intArrayOf(138 * 360 + 203),
+            coast = intArrayOf(138 * 360 + 203), bytes = 1234)
+        val t = MapPlan.countryTiles(c)
+        assertEquals(4, t.size)
+        assertEquals(MapPlan.Tile("road", 0, 2038, 1380, 0.0, "GR"), t[0])
+        assertEquals(MapPlan.Tile("road", 0, 2039, 1380, 0.0, "GR"), t[1])
+        assertEquals(MapPlan.Tile("road", 1, 203, 138, 0.0, "GR"), t[2])
+        assertEquals(MapPlan.Tile("land", 1, 203, 138, 0.0, "GR"), t[3])
+        // the same tile wanted for a country and for home is one tile
+        assertEquals(MapPlan.key(t[0]), MapPlan.key(MapPlan.Tile("road", 0, 2038, 1380, 3.2)))
+        assertTrue(MapPlan.key(t[2]) != MapPlan.key(t[3]))
+    }
 }

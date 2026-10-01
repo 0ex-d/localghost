@@ -3953,3 +3953,206 @@ on status is too much text to read and does not have a scroll, i just need the i
 
 Tested: `TestKeyRows`, `DaemonRowsTest`, `TrailStatusTest`, `HealthStatusTest`; the screens are
 structure-checked only.
+
+## Whole countries on the phone (countrycells, secd, app)
+
+Vlad: "can we make sure we can download more on the phone, the roads in the country or the
+squares that overlap in a country somewhere in settings".
+
+The map download kept streets within 25 km of where the phone had been and then the coast and
+main roads outwards until the size was full; a trip to another country started cold. Now a person
+picks countries, and the phone keeps every tile the box holds for them.
+
+- `internal/countrycells`: the countries are Natural Earth's admin-0 polygons, the world.geojson
+  every box already has under `<mount>/geo` (fetch_geo.sh). Each is rasterised onto the road
+  tiles' tenth-of-a-degree grid once per secd run: a cell counts when its centre is inside the
+  country or the border passes through it (every vertex's cell and the cells an edge crosses), so
+  a thin coast is in and the interior is in; even-odd filling keeps holes out (Lesotho). The
+  one-degree cells follow. A million-vertex world rasterises in about a second. ISO alpha-2 where
+  Natural Earth has one (ISO_A2_EH, which fixes France and Norway's "-99"), else the ADM0_A3.
+- secd `GET /v1/geo/countries`: every country with the tiles the box holds for it (streets, main
+  roads, coast) and their size on disk, and whether the box has roads and coast at all; cached and
+  recomputed when either index changes. `GET /v1/geo/country?code=GR`: the cells as index keys
+  (y*cols+x per grid), only cells with a tile, so the count is the count to fetch.
+- Phone, SETTINGS › MAPS ON THIS PHONE › WHOLE COUNTRIES: "[ pick countries ]" lists every
+  country with what the box has ("Greece · 1,234 streets · 40 main · 31 coast · 312 MB"; one the
+  box has nothing for says so and cannot be picked), with a find box. A picked country downloads
+  on this network now (when downloads are on) and the daily run keeps it complete as the box cuts
+  more; its line says "812 of 1,274 tiles on this phone (312 MB in all)". Picked countries sit
+  outside the size budget (the size was shown when picking) and the cache's trim allows for them.
+  The fold's closed line names them. The worker fetches a country's streets first, then its main
+  roads, then its coast, then the usual tiles around where you have been; a tile wanted for both
+  is fetched once.
+
+On the box nothing to run: the world file is there and the indexes are read as they are. A box
+that has not cut roads lists every country with "nothing on the box for it" and the picker says
+what to run.
+
+Tested: `TestRasteriseSquareWithHoleAndIsland`, `TestIdentify`,
+`TestCountriesFromTheWorldAndTheIndexes` (the empty list without a world file, the sizes, the
+keys, the list following a new tile), `MapPlanTest.aWholeCountryIsStreetsThenMainRoadsThenCoast`,
+`MapCountryTextTest`.
+
+## News and rates, fetched by the phone, kept by the box; the time zones (feeds, rates, tzgrid, synthd, tallyd, secd, framed, app)
+
+Vlad, forwarding the mirror side's spec: news and rates for the server repo, the tz, elevation
+and wikipedia sets on the mirror; the design call to confirm, that the box still never fetches
+anything itself. Confirmed and built that way: the phone fetches, the way it already runs the web
+search round; the publication list, parsing, dedup, summaries and history live on the box. The
+cost stands as stated: publishers and exchanges see the phone's address, and the box gets nothing
+while the phone is off.
+
+The round trip:
+- `GET /v1/fetch/list`: what to fetch, the box's list (`news_feeds`, seeded with twelve: BBC,
+  Guardian, FT, Economist, Telegraph, Al Jazeera, NPR, DW, Politico Europe, Ars Technica, Hacker
+  News, CoinDesk; Reuters and AP have no official feed any more) and the market sources (the ECB's
+  eurofxref-daily.xml, Coinbase, Kraken, Bitstamp, Gemini tickers, CoinGecko with CoinPaprika as the
+  fallback), each with how often. Edit the list on the box: `ghost-cli ghost.synthd news
+  add='{"id":"x","name":"X","url":"https://…"}'`, `remove=id`, `enable=id on=false`.
+- The phone (`sync/BoxFetch.kt`, `FetchWorker` hourly, UNMETERED unless mobile data may sync):
+  fetches each address with a browser user agent and no cookies, 3 MB cap, and posts the bodies as
+  they came (`POST /v1/news/fetched`, `POST /v1/rates/fetched`); the tickers every run, the feeds
+  every two hours. SETTINGS › NEWS AND RATES: the switch, the last run, [ fetch now ], the cost in
+  one line. secd spools each batch whole into synthd's and tallyd's inboxes.
+- synthd (`news.go`, `internal/feeds`): parses RSS 2.0, Atom and RDF with the standard library,
+  strips the feeds' HTML, keeps new entries (`news_items`, a month), groups entries into stories by
+  title (content words, light stemming, half the smaller set in common; `news_stories`), writes a
+  one-or-two-sentence summary per story from the outlets' own titles and descriptions on the GPU,
+  held to the day memories' check (every number in a report, no list, no refusal), and posts a
+  digest at 07:00 and 19:00 in the person's zone (kind `news`, the most-told stories first, eight
+  at most; nothing new means no digest). `ghost-cli ghost.synthd news` shows the feeds' health
+  and counts; `digest=true` posts one now. Box Status › ghost.synthd: one key row for the news and
+  a row per feed; a feed that has failed three times in a row is a key row.
+- tallyd (`internal/rates`, `internal/tally/rates.go`): the ECB table (`fx_rates`, one euro in each
+  of 30-odd currencies), each exchange's quote (`btc_quotes`), the index (`btc_index`): quotes older
+  than fifteen minutes go, then quotes more than 2% from the median, the rest averaged by volume,
+  with how many went in and the spread; the top 100 (`coin_ranks`, a week). An exchange missing
+  from a batch joins with its last quote when that is still fresh. `ghost-cli ghost.tallyd rates
+  amount=100 from=EUR to=GBP` converts; Box Status › ghost.tallyd shows the ECB day, the index and
+  the rank list's age.
+- Chat: after the archive and before the web, the news the phone fetched (`newsSource`: full-text
+  over the week's entries) and, for a money question, the box's own numbers (`ratesSource`: the
+  ECB line, the BTC index with its making, the conversion done on the box so the model never does
+  the arithmetic). Offline.
+- The phone's NEWS screen (`NewsScreen`, in the drawer under YOUR ARCHIVE): the stories of the
+  last two days, the most-told first, the summary, the outlets; a story opens to each outlet's own
+  headline and "[ open at BBC ]", which opens the article on the phone. The digest's tap lands
+  there. A markets line at the top.
+- Time zones (`internal/tzgrid`): the mirror's tz set (timezone-boundary-builder with the oceans,
+  under `<geo>/tz`, fetched by fetch_geo.sh) rasterised by ghost.framed into `<geo>/tz/grid.bin`
+  at a twentieth of a degree (two bytes a lookup; `ghost-cli ghost.framed tz-grid` builds it now,
+  `setting lat= lon=` names the zone at a point). The trail's newest point names the person's zone
+  (settings `local_tz`); the digests' hours, synthd's "today" and cued's quiet hours read it
+  (`hw.LocalZone`). The IANA rules ride in the binaries (`time/tzdata`), so a box with no tzdata
+  package still knows Athens. health.sh prints `time zones:`.
+
+Not built this round, said plainly: Wikipedia through kiwix-serve (the 60 GB set is published by
+hand and kiwix-serve's search answers want checking against the real thing) and the elevation
+tiles (a TIFF reader with no outside libraries, against a tile format not yet looked at closely).
+Both are next once the sets are on the mirror.
+
+Tested: `TestParseThreeDialects`, `TestSimilarTitles`, `TestParseECB`, `TestParseQuotes`,
+`TestIndexMethod`, `TestParseCoinsBothSources`, `TestConvert`, `TestBuildAndLookup` (tz),
+`TestNewsIngestStoriesAndDigest` and `TestRatesIngestAgainstPostgres` against Postgres,
+`TestMoneyQuestion`, `TestRatesItems`, `TestGroundedNews`, `TestDigestBody`,
+`TestFetchListAndSpools`, `NewsTextTest`. The phone's fetch and the screens are
+structure-checked only; the real feeds and tickers were not reached from here.
+
+## The box fetches for itself when the phone is away; prices from seven venues, USDT folded into USD, the daily history (egress, rates, tally, tallyd, synthd, secd, app)
+
+Vlad: "let's get directly from exchanges, coinbase, kraken and a few others, binance, for the
+rates, have a usdt to usd rate and combine the usd and usdt prices to just a usd price. let's have
+the box pull the prices from the apis and the news … if the phone is on wifi then the phone gets
+it and sends it back, if the phone is on 4g or unreachable then we pull from the server wherever we
+last left off, we keep daily rates and we can build the daily rates historically".
+
+The rule, in one place (`internal/egress`): the phone tells the box every quarter hour what
+network it is on (`POST /v1/phone/net`, with its notification poll). While it said Wi-Fi within the
+last twenty minutes, the phone is the proxy: it fetches hourly and the box stays off the wire. On
+mobile data, or with the phone silent, ghost.tallyd and ghost.synthd fetch what is due themselves
+through the one outbound client (a browser-like agent, no cookies, short deadlines, a 3 MB cap),
+from where the marks say they left off (every source ingested leaves `settings fetch_<id>`, whoever
+fetched it). `ghost-cli ghost.tallyd rates fetch=true` and `ghost.synthd news fetch=true` fetch now
+regardless; both commands say who fetched the last batch and why the box did or did not.
+
+The honest change to the promise: until today no daemon opened a connection. Now two do, to the
+public addresses in the sources list and to nothing else, and only when the phone is not on Wi-Fi.
+The Hard Truths post and the About page want this sentence: "The box reaches the internet for two
+things, the news feeds and the market tickers it follows, and only when your phone is not on Wi-Fi
+to fetch them for it; the publishers and exchanges see the box's address, nothing else leaves."
+
+Prices (`internal/rates/markets.go`): seven venues, no key: Coinbase, Kraken, Bitstamp, Gemini,
+Bitfinex in USD; Binance and OKX in USDT. The USDT/USD rate is the median of the fresh USDT/USD
+quotes (Coinbase, Kraken, Bitstamp, Bitfinex's tUSTUSD); a USDT-quoted price times that rate is a
+USD price, so the index is one USD number per symbol (`crypto_index`), made as before (fifteen
+minutes stale out, 2% from the median out, volume-weighted, venues named, spread told). Symbols
+followed: BTC and ETH to start; `ghost-cli ghost.tallyd rates add=SOL` follows another (the
+venues' pairs are derived; Kraken's XBT spelling and Bitfinex's UST are handled). `/v1/fetch/list`
+carries the markets for the phone.
+
+The days: every market's daily candles (`crypto_daily`, each venue's own) and the box's daily USD
+close per symbol (`crypto_daily_index`: the venues' closes, USDT folded with that day's USDT/USD
+close, a venue more than 5% from the median left out). The last week comes with the hourly run,
+by phone or box; the years come from the box alone, a venue page a tick (300 days for Coinbase,
+1000 for Binance, Bitstamp and Bitfinex, Kraken's 720 and Gemini's window once, OKX 100), walking
+back from the oldest day held until a venue has nothing older or 2010 (`hist_done_<market>`).
+Where it left off is the table itself, so nothing is lost to a restart or a week on Wi-Fi. The
+ECB's table goes back to 1999 in one fetch of its history file (`ecb-hist`, once), and its 90-day
+file daily fills any day missed. `GET /v1/rates/history?code=BTC&days=365` (or `code=GBP`) reads
+the days back; `/v1/rates` carries the index per symbol and how deep the history goes; Box Status
+› ghost.tallyd shows a key row per symbol and the history's depth.
+
+Tested: `TestProxyRule`, `TestClientFetchesAndCaps`, `TestMarketsAndURLs`, `TestParseTickers`
+(seven venues), `TestParseCandles` (seven venues, the same two days), `TestIndexMethodAndUSDT`,
+`TestDailyIndex`, `TestConvert` (any symbol), `TestRatesIngestAgainstPostgres` (two ECB days, the
+USDT fold, the daily index, the marks, the history read), `TestBackfillWalksBack`,
+`TestNewsFetchedByTheBoxWhenThePhoneIsAway` (a local feed server: left to the phone on Wi-Fi,
+fetched on mobile, nothing due, forced), `TestFetchListAndSpools` (the network word). The real
+venues were not reached from here: the first hour's `ghost-cli ghost.tallyd rates` is the test of
+the seven; a venue that answers something this build does not read shows in `failed`.
+
+## The top fifty in a few calls, and one number for crypto as a whole (rates, tally, tallyd, secd, synthd, app); the copy on what leaves the box
+
+Vlad: "let's do top 50 and let's do an index out of all of them as well, weighted by average
+monthly volume, the weights change every month, it gives us an indication of crypto overall". And:
+"update the copy to say we do pull news and things from external sources so your box ip might be
+used … but your thoughts and words never leave your box".
+
+- The fifty. The symbols followed are the fifty largest by market cap on the newest day of the rank
+  list (stablecoins and wrapped coins out: `rates.NotInIndex`), plus anything added by hand
+  (`rates add=SOL`); BTC and ETH until the first rank list lands. Asking a venue for one pair at a
+  time was three hundred and fifty calls an hour; six of the seven venues answer every pair they
+  trade in one call (Binance, OKX, Kraken, Bitfinex, Bitstamp, Gemini: `<venue>:all`,
+  `rates.ParseBatch`, Kraken's X/Z spellings and Bitfinex's UST read back), and Coinbase, which has
+  no such call, is asked pair by pair for the ten largest and the USDT leg. Gemini's price feed
+  gives no volume, so it is left out of a price that other venues weigh (a price with no weight is
+  not a weight of zero). The daily candles are the box's own now, whatever the phone is on: once a
+  day for every pair the venues were seen quoting (`tally.MarketsSeen`), and the history a page a
+  tick as before, over those pairs.
+- The market index, `CRYPTO50` (`internal/rates/marketindex.go`, `internal/tally/marketindex.go`):
+  each month's constituents are the fifty largest by market cap on the last day of the previous
+  month, weighted by their share of the previous month's average daily dollar volume (the rank
+  list's all-exchange volume, kept a row per coin per day in `coin_daily`); base prices are that
+  day's closes (the venues' where they have them, the rank list's where not); the value is chained,
+  the end of one month the start of the next, from 1000 on the first day there is a rank list, so a
+  change of constituents never jumps it. A coin with no price on a day is held at its last and
+  named. Rebuilt after every rates batch from two days back (a late candle is taken up); the live
+  value uses the venues' indexes of the last two hours, the newest rank price where there is none.
+  `/v1/rates` carries `market` (value, change on the last close, constituents, priced live, the
+  month's weights, the five heaviest); `/v1/rates/history?code=CRYPTO50` the days; `ghost-cli
+  ghost.tallyd rates` shows it; Box Status › ghost.tallyd has a key row; chat answers "how is crypto
+  doing" with it (`marketQuestion`); the NEWS line opens with it.
+- The copy. Every place that said the box never reaches the internet now says what is true: your
+  thoughts and words never leave the box; it pulls general information in to use in context (the
+  feeds and the prices it follows, what a plugin asks for), through the phone when it is on Wi-Fi,
+  itself otherwise, so a publisher or an exchange may see the box's address; it only pulls and tells
+  them nothing. ABOUT has a "WHAT LEAVES THE BOX" section, the glossary a term, the unlock tip and
+  SETTINGS › NEWS AND RATES the same words. The post draft (outputs/hard-truths-what-the-box-does-now.md)
+  has a "What leaves the box" section with its cost, and the web side has the paragraph for the
+  About page (outputs/web-side-what-leaves-the-box.md).
+
+Tested: `TestParseBatchSixVenues`, `TestKrakenAndBitfinexPairs`, `TestSymbolsFromRanks`,
+`TestWeightsAndValue`, `TestMarketIndexAgainstPostgres` (two months, a rebalance from September's
+volumes, the venues' close over the rank list's, a carried coin, the live value against the live
+index, a rebuild that moves nothing), `TestRatesIngestAgainstPostgres` (coin days from the rank
+list, the symbols followed), `TestMarketQuestionAndItem`, `NewsTextTest`.

@@ -43,6 +43,23 @@ class MapPrefetchWorker(ctx: Context, params: WorkerParameters) : CoroutineWorke
             return Result.success()
         }
 
+        // WHOLE COUNTRIES FIRST: the ones picked in SETTINGS, every tile the box holds for them,
+        // outside the size budget (the size was shown when they were picked). The box says which
+        // cells have a tile; a country it cannot describe right now keeps its last progress line.
+        val picked = AppSettings.mapCountries(ctx)
+        val countryTiles = ArrayList<MapPlan.Tile>()
+        var countryBytes = 0L
+        var described = 0
+        for (code in picked) {
+            val c = runCatching { BoxClient.countryCells(ctx, code) }.getOrNull() ?: continue
+            described++
+            val tiles = MapPlan.countryTiles(c)
+            countryBytes += c.bytes
+            MapPrefetch.noteCountry(ctx, c.code, c.name, tiles.count { MapPrefetch.onPhone(ctx, it) }, tiles.size, c.bytes)
+            countryTiles.addAll(tiles)
+        }
+        MapPrefetch.noteCountryBytes(ctx, countryBytes)
+
         // WHERE TO FETCH AROUND: the phone's own points when it can read them (the recent ring
         // opens only while the app is unlocked; the sealed last point always), else the box's
         // trail (the newest days' tracks), else where the map was last looking. The daily run
@@ -57,18 +74,30 @@ class MapPrefetchWorker(ctx: Context, params: WorkerParameters) : CoroutineWorke
             from = "your trail on the box"
         }
         val centers = MapPlan.centers(fixes)
-        if (centers.isEmpty()) {
-            MapPrefetch.note(ctx, "idle", "nothing to go on yet: no fix on this phone and no trail on the box , the outlines are here, tiles follow once the box knows where you have been")
+        if (centers.isEmpty() && countryTiles.isEmpty()) {
+            MapPrefetch.note(ctx, "idle", if (picked.isEmpty())
+                "nothing to go on yet: no fix on this phone and no trail on the box , the outlines are here, tiles follow once the box knows where you have been, or pick a country"
+                else "the box could not describe the countries you picked (is it unlocked?)")
             return Result.success()
         }
-        val plan = MapPlan.plan(centers, land, roads)
+        val around = if (centers.isEmpty()) emptyList() else MapPlan.plan(centers, land, roads)
         var used = MapPrefetch.bytesOnPhone(ctx)
         var fetched = 0
         var failedInARow = 0
-        for (t in plan) {
+        val haveByCountry = HashMap<String, Int>()
+        val totalByCountry = HashMap<String, Int>()
+        for (t in countryTiles) totalByCountry[t.country] = (totalByCountry[t.country] ?: 0) + 1
+        // one pass over both lists: a country's tiles ignore the budget, the rest stop at it
+        val seen = HashSet<String>()
+        val all = countryTiles + around
+        for (t in all) {
+            if (!seen.add(MapPlan.key(t))) continue
             if (isStopped) return Result.retry()
-            if (used >= budget) break
-            if (MapPrefetch.onPhone(ctx, t)) continue
+            if (t.country.isEmpty() && used >= budget) break
+            if (MapPrefetch.onPhone(ctx, t)) {
+                if (t.country.isNotEmpty()) haveByCountry[t.country] = (haveByCountry[t.country] ?: 0) + 1
+                continue
+            }
             if (System.currentTimeMillis() - t0 > RUN_MS) {
                 MapPrefetch.note(ctx, "partial", "$fetched tiles this run; more on the next")
                 return Result.retry() // more to fetch: soon, not tomorrow
@@ -86,13 +115,24 @@ class MapPrefetchWorker(ctx: Context, params: WorkerParameters) : CoroutineWorke
             failedInARow = 0
             used += b.size
             fetched++
+            if (t.country.isNotEmpty()) {
+                val have = (haveByCountry[t.country] ?: 0) + 1
+                haveByCountry[t.country] = have
+                // the country's own line follows the run too
+                if (have % 25 == 0) MapPrefetch.noteCountryHave(ctx, t.country, have, totalByCountry[t.country] ?: 0)
+            }
             // SETTINGS shows this live while it runs
             if (fetched % 10 == 0) MapPrefetch.note(ctx, "running", "$fetched tiles so far this run")
         }
+        for ((code, total) in totalByCountry) MapPrefetch.noteCountryHave(ctx, code, haveByCountry[code] ?: 0, total)
+        val countriesDone = picked.isNotEmpty() && described == picked.size &&
+            totalByCountry.all { (code, total) -> (haveByCountry[code] ?: 0) >= total }
         MapPrefetch.note(ctx, "done", when {
+            centers.isEmpty() -> "$fetched tiles this run; " + (if (countriesDone) "the countries you picked are on this phone" else "the countries you picked are still coming")
             used >= budget && fetched == 0 -> "the size you picked is already full (${used / 1_000_000} MB of tiles, most from browsing) , pick a bigger size to keep more"
             used >= budget -> "$fetched tiles this run; the size you picked is full"
-            else -> "$fetched tiles this run around $from; everything near you is here"
+            else -> "$fetched tiles this run around $from; everything near you is here" +
+                (if (picked.isEmpty()) "" else if (countriesDone) ", and the countries you picked" else "; the countries you picked are still coming")
         })
         return Result.success()
     }
@@ -176,11 +216,49 @@ object MapPrefetch {
     /** How much each tile cache may hold before the oldest go: the defaults, or the picked size
      *  when downloads are on (so the downloaded tiles are not trimmed away by browsing). */
     fun capBytes(ctx: Context, defaultBytes: Long): Long =
-        if (AppSettings.mapDownload(ctx)) maxOf(defaultBytes, AppSettings.mapBudgetMB(ctx).toLong() * 1_000_000 + 50_000_000) else defaultBytes
+        if (AppSettings.mapDownload(ctx)) {
+            // the picked countries sit on top of the size: they are not what the trim is for
+            val countries = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getLong("countryBytes", 0)
+            maxOf(defaultBytes, AppSettings.mapBudgetMB(ctx).toLong() * 1_000_000 + countries + 50_000_000)
+        } else defaultBytes
 
     fun note(ctx: Context, state: String, why: String) {
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString("state", state).putString("why", why).putLong("at", System.currentTimeMillis()).apply()
+    }
+
+    /** One picked country's progress, as the worker last saw it. */
+    data class CountryProgress(val code: String, val name: String, val have: Int, val total: Int, val bytes: Long)
+
+    fun noteCountry(ctx: Context, code: String, name: String, have: Int, total: Int, bytes: Long) {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString("country.$code", "$name|$have|$total|$bytes").apply()
+    }
+
+    fun noteCountryHave(ctx: Context, code: String, have: Int, total: Int) {
+        val p = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val cur = (p.getString("country.$code", "") ?: "").split("|")
+        if (cur.size < 4) return
+        p.edit().putString("country.$code", "${cur[0]}|$have|$total|${cur[3]}").apply()
+    }
+
+    fun noteCountryBytes(ctx: Context, bytes: Long) {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putLong("countryBytes", bytes).apply()
+    }
+
+    /** The picked countries' progress lines, in the order they were picked; a country the worker
+     *  has not described yet has no line. */
+    fun countryProgress(ctx: Context): List<CountryProgress> {
+        val p = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        return AppSettings.mapCountries(ctx).mapNotNull { code ->
+            val f = (p.getString("country.$code", "") ?: "").split("|")
+            if (f.size < 4) null else CountryProgress(code, f[0], f[1].toIntOrNull() ?: 0, f[2].toIntOrNull() ?: 0, f[3].toLongOrNull() ?: 0)
+        }
+    }
+
+    /** Forget a country's line when it is unpicked (its tiles stay until the cache trims them). */
+    fun forgetCountry(ctx: Context, code: String) {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove("country.$code").apply()
     }
 
     /** "312 MB on this phone · done 2 h ago: everything near you is here" */

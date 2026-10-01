@@ -26,6 +26,17 @@ fun AboutScreen() {
              "holds no index and no model. If you lose the phone, the data is on the box, not " +
              "in your pocket.",
              color = GhostText, style = MaterialTheme.typography.bodyMedium)
+        Spacer(Modifier.height(16.dp))
+        SectionLabel("WHAT LEAVES THE BOX")
+        Spacer(Modifier.height(8.dp))
+        Text("Your thoughts and words never leave your box: your photos, notes, trail, health, " +
+             "chats and memories are read and written on it alone, and nothing of them is sent " +
+             "anywhere. The box does pull general information from outside to use in context: " +
+             "the news feeds and the market tickers it follows, and what a plugin you connect " +
+             "asks for. When your phone is on Wi-Fi the phone fetches these for it; otherwise " +
+             "the box fetches them itself, so a publisher or an exchange may see your box's " +
+             "address, the same as a browser's. It pulls only; it tells them nothing.",
+             color = GhostText, style = MaterialTheme.typography.bodyMedium)
 
         Spacer(Modifier.height(24.dp))
         SectionLabel("ACKNOWLEDGEMENTS")

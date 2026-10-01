@@ -7,6 +7,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,6 +16,7 @@ import (
 	"github.com/LocalGhostDao/localghost/server/internal/apparedis"
 	"github.com/LocalGhostDao/localghost/server/internal/outings"
 	"github.com/LocalGhostDao/localghost/server/internal/poltergres"
+	"github.com/LocalGhostDao/localghost/server/internal/tally"
 )
 
 // NotifStore is the per-account notification data model, living INSIDE the encrypted volume (Redis
@@ -652,6 +654,9 @@ func NewNotifStore(pgSocketFor func(slot int) string) *NotifStore {
 // pg returns (lazily building) the slot's ghost_rw poltergres client. NotifStore both reads and writes, so
 // it uses the write role for everything , simpler than juggling two connections for a store whose
 // reads and writes interleave constantly.
+// DB is the slot's connection for the read helpers that take a Querier (news, rates, countries).
+func (s *NotifStore) DB(slot int) (*poltergres.ReadWrite, error) { return s.pg(slot) }
+
 func (s *NotifStore) pg(slot int) (*poltergres.ReadWrite, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2054,6 +2059,67 @@ func DaemonSummaryFrom(c *poltergres.ReadWrite, name string) []DaemonKV {
 		key("distill queue", one("SELECT count(*) FROM journal_entries WHERE NOT distilled"))
 		add("day episodes", one("SELECT count(*) FROM memories WHERE kind = 'episode' AND NOT tombstoned"))
 		add("cached reports", one("SELECT count(*) FROM reports"))
+		// THE NEWS the phone fetches for the box: the feeds and their health (a feed that has
+		// failed three times in a row is a key row: the person wants to know it stopped), the
+		// entries, the stories, the last digest.
+		nowS := time.Now().Unix()
+		ago := func(ts string) string {
+			n, err := strconv.ParseInt(ts, 10, 64)
+			if err != nil || n <= 0 {
+				return "never"
+			}
+			d := time.Duration(nowS-n) * time.Second
+			switch {
+			case d < time.Minute:
+				return "just now"
+			case d < time.Hour:
+				return fmt.Sprintf("%d min ago", int(d.Minutes()))
+			case d < 48*time.Hour:
+				return fmt.Sprintf("%d h ago", int(d.Hours()))
+			}
+			return fmt.Sprintf("%d days ago", int(d.Hours())/24)
+		}
+		key("news", one("SELECT count(*) FROM news_feeds WHERE enabled")+" feeds, "+
+			one("SELECT count(*) FROM news_feeds WHERE enabled AND last_ok >= $1", nowS-3*3600)+" answered in the last 3 h · "+
+			one("SELECT count(*) FROM news_items WHERE published >= $1", nowS-7*86400)+" entries this week · "+
+			one("SELECT count(*) FROM news_stories WHERE last_seen >= $1", nowS-86400)+" stories today · last digest "+
+			ago(one("SELECT coalesce(max(at),0) FROM news_digests")))
+		if rows, qerr := c.Query("SELECT name, enabled, last_fetch, last_ok, last_status, last_items, failures FROM news_feeds ORDER BY name"); qerr == nil {
+			for _, v := range rows.Vals {
+				if len(v) < 7 || v[0] == nil {
+					continue
+				}
+				enabled := v[1] != nil && (*v[1] == "t" || *v[1] == "true")
+				status, items, fails := "", "0", 0
+				if v[4] != nil {
+					status = *v[4]
+				}
+				if v[5] != nil {
+					items = *v[5]
+				}
+				if v[6] != nil {
+					fails, _ = strconv.Atoi(*v[6])
+				}
+				lastFetch, lastOK := "0", "0"
+				if v[2] != nil {
+					lastFetch = *v[2]
+				}
+				if v[3] != nil {
+					lastOK = *v[3]
+				}
+				val := "off"
+				switch {
+				case !enabled:
+				case lastFetch == "0":
+					val = "not fetched yet"
+				case status == "ok":
+					val = "ok " + ago(lastOK) + " · " + items + " entries"
+				default:
+					val = status + " (" + strconv.Itoa(fails) + " in a row) · last ok " + ago(lastOK)
+				}
+				kv = append(kv, DaemonKV{K: "feed " + *v[0], V: val, Key: enabled && lastFetch != "0" && status != "ok" && fails >= 3})
+			}
+		}
 	case "ghost.searchd":
 		key("caption jobs pending", one("SELECT count(*) FROM search.jobs WHERE kind = 'caption' AND attempts < 5"))
 		add("caption jobs exhausted", one("SELECT count(*) FROM search.jobs WHERE kind = 'caption' AND attempts >= 5"))
@@ -2063,6 +2129,42 @@ func DaemonSummaryFrom(c *poltergres.ReadWrite, name string) []DaemonKV {
 		key("indexed chunks", one("SELECT count(*) FROM search.chunks"))
 		add("tags written", one("SELECT count(*) FROM frame_tags WHERE source <> 'user_removed'"))
 	case "ghost.tallyd":
+		// THE RATES the phone fetches for the box: the ECB's day, the BTC index and its making,
+		// the rank list's age. Key rows: a glance says whether the numbers are current.
+		if snap, rerr := RatesNow(c); rerr == nil {
+			if snap.FXDay != "" {
+				key("ECB rates", snap.FXDay+" · "+strconv.Itoa(len(snap.FX))+" currencies")
+			} else {
+				key("ECB rates", "none yet (the phone fetches them hourly while it is on)")
+			}
+			if len(snap.Index) == 0 {
+				key("index", "none yet")
+			}
+			syms := make([]string, 0, len(snap.Index))
+			for sym := range snap.Index {
+				syms = append(syms, sym)
+			}
+			sort.Strings(syms)
+			for _, sym := range syms {
+				r := snap.Index[sym]
+				d := time.Since(time.Unix(r.At, 0)).Truncate(time.Minute)
+				key(sym+" index", fmt.Sprintf("%s USD · %d venues (%s) · spread %.2f%% · %s ago", strconv.FormatFloat(r.Price, 'f', 2, 64), r.N, r.Used, 100*r.Spread, d))
+			}
+			if snap.Days > 0 || snap.FXDays > 0 {
+				add("daily history", fmt.Sprintf("%d days of crypto closes · %d days of ECB rates", snap.Days, snap.FXDays))
+			}
+			if st, merr := tally.MarketNow(c, time.Now()); merr == nil && st.Value > 0 {
+				key("market index", fmt.Sprintf("%s %.1f (%+.2f%% today) · %d constituents, %d priced live · weights of %s · %d days", st.Code, st.Value, st.DayChange, st.Constituents, st.Priced, st.Month, st.Days))
+			} else if len(snap.Index) > 0 {
+				add("market index", "none yet: the rank list's first day sets the constituents")
+			}
+			if len(snap.Ranks) > 0 {
+				d := time.Since(time.Unix(snap.RanksAt, 0)).Truncate(time.Minute)
+				add("top coins", fmt.Sprintf("%d from %s · %s ago", len(snap.Ranks), snap.Source, d))
+			} else {
+				add("top coins", "none yet")
+			}
+		}
 		key("health days", one("SELECT count(DISTINCT day) FROM health_metrics"))
 		key("metrics rows", one("SELECT count(*) FROM health_metrics"))
 		add("high-res samples", one("SELECT count(*) FROM health_samples"))

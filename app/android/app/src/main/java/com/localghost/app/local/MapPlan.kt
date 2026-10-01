@@ -17,8 +17,29 @@ import kotlin.math.sqrt
  * larger one reaches further. Pure: the worker walks the list, the tests check it.
  */
 internal object MapPlan {
-    /** One tile to have: kind "land" (a coast tile) or "road" (level 1 major, 0 streets). */
-    data class Tile(val kind: String, val level: Int, val x: Int, val y: Int, val km: Double)
+    /** One tile to have: kind "land" (a coast tile) or "road" (level 1 major, 0 streets); country
+     *  is the code of the picked country it belongs to, "" for the tiles around where you have been. */
+    data class Tile(val kind: String, val level: Int, val x: Int, val y: Int, val km: Double, val country: String = "")
+
+    /** A whole country as the box describes it (/v1/geo/country): the tiles it holds for it, as
+     *  index keys (y * cols + x) on each grid, and their size on the box. */
+    data class Country(val code: String, val name: String, val fine: IntArray, val major: IntArray, val coast: IntArray, val bytes: Long)
+
+    /**
+     * Every tile of a picked country, streets first (what the person zooms into), then the main
+     * roads, then the coast. Only cells the box has a tile for are listed, so the count is the
+     * count to fetch. Outside the size budget: the person picked the country knowing its size.
+     */
+    fun countryTiles(c: Country): List<Tile> {
+        val out = ArrayList<Tile>(c.fine.size + c.major.size + c.coast.size)
+        for (k in c.fine) out.add(Tile("road", 0, k % RoadTileGeom.FINE_COLS, k / RoadTileGeom.FINE_COLS, 0.0, c.code))
+        for (k in c.major) out.add(Tile("road", 1, k % RoadTileGeom.MAJOR_COLS, k / RoadTileGeom.MAJOR_COLS, 0.0, c.code))
+        for (k in c.coast) out.add(Tile("land", 1, k % LandTileGeom.COLS, k / LandTileGeom.COLS, 0.0, c.code))
+        return out
+    }
+
+    /** A tile's identity regardless of why it is wanted (a country's street is also a street near home). */
+    fun key(t: Tile): String = "${t.kind}/${t.level}/${t.x}/${t.y}"
 
     /** A place the phone has been, with how much it counts (fixes seen there). */
     data class Center(val lat: Double, val lon: Double, val weight: Int = 1)

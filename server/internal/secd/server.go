@@ -48,6 +48,9 @@ type Server struct {
 	// read deadline to now, so even a body read that is blocked on a stalled phone returns at once.
 	upMu    sync.Mutex
 	uploads map[*http.ResponseController]struct{}
+	// countries: the whole-country map download's atlas and tile counts (countries_http.go)
+	countryMu    sync.Mutex
+	countryCache *countryCache
 }
 
 // closeDoors is the first step of every teardown: no new session-authenticated call from here
@@ -273,6 +276,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/geo/landtile", s.handleLandTile)             // one coast cell (?x=&y=), fetched only when zoomed in over it
 	mux.HandleFunc("/v1/geo/labels", s.handleGeoLabels)              // the names on the map for a view, best first
 	mux.HandleFunc("/v1/geo/roadtiles/index", s.handleRoadTileIndex) // roads: which cells have a tile, both grids
+	mux.HandleFunc("/v1/geo/countries", s.handleCountries)           // whole countries: what the box holds for each
+	mux.HandleFunc("/v1/fetch/list", s.handleFetchList)              // what the phone fetches for the box (feeds, tickers)
+	mux.HandleFunc("/v1/phone/net", s.handlePhoneNet)                // the phone's network: Wi-Fi means it fetches, else the box does
+	mux.HandleFunc("/v1/news/fetched", s.handleNewsFetched)          // the feeds' bytes, spooled for synthd
+	mux.HandleFunc("/v1/rates/fetched", s.handleRatesFetched)        // the tickers' bodies, spooled for tallyd
+	mux.HandleFunc("/v1/news", s.handleNews)                         // the stories, for the NEWS screen
+	mux.HandleFunc("/v1/rates", s.handleRates)                       // the ECB table, the index per symbol, the rank list
+	mux.HandleFunc("/v1/rates/history", s.handleRatesHistory)        // a symbol's daily closes or a currency's daily rate
+	mux.HandleFunc("/v1/geo/country", s.handleCountry)               // one country's tiles, as index keys
 	mux.HandleFunc("/v1/geo/roadtile", s.handleRoadTile)             // one road cell (?l=&x=&y=)
 	mux.HandleFunc("/v1/daemon/summary", s.handleDaemonSummary)      // per-daemon drill-in
 	mux.HandleFunc("/v1/pipeline", s.handlePipeline)                 // stage-by-stage archive progress + ETA

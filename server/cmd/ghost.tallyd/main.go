@@ -31,6 +31,7 @@ import (
 	"github.com/LocalGhostDao/localghost/server/internal/harden"
 	"github.com/LocalGhostDao/localghost/server/internal/hw"
 	"github.com/LocalGhostDao/localghost/server/internal/poltergres"
+	"github.com/LocalGhostDao/localghost/server/internal/rates"
 	"github.com/LocalGhostDao/localghost/server/internal/rotlog"
 	"github.com/LocalGhostDao/localghost/server/internal/svcconf"
 	"github.com/LocalGhostDao/localghost/server/internal/tally"
@@ -68,8 +69,15 @@ func main() {
 	defer stop()
 
 	ing := &ingestState{}
+	rs := &ratesState{}
+	fs := &fetchState{}
+	forceFetch := make(chan struct{}, 1)
 	srv := ghosthealth.NewServer(service, ghosthealth.ReporterFunc(func() ghosthealth.Health {
-		return ing.health()
+		h := ing.health()
+		if line := rs.line(); line != "" && h.Code == ghosthealth.OK {
+			h.Detail += " · rates: " + line
+		}
+		return h
 	}))
 	go func() {
 		if err := srv.Serve(*port); err != nil {
@@ -109,6 +117,91 @@ func main() {
 			data, _ := json.Marshal(out)
 			return ctlsock.Response{OK: true, Data: data}, nil
 		})
+		// rates: the box's market numbers (the ECB table, the BTC index, the rank list) and how
+		// the last batch went; amount= from= to= converts. `ghost-cli ghost.tallyd rates
+		// amount=100 from=EUR to=GBP`.
+		ctl.Handle("rates", func(args json.RawMessage) (ctlsock.Response, error) {
+			var a struct {
+				Amount float64 `json:"amount"`
+				From   string  `json:"from"`
+				To     string  `json:"to"`
+				Add    string  `json:"add"`    // a symbol to follow (SOL)
+				Remove string  `json:"remove"` // one to stop following
+				Fetch  bool    `json:"fetch"`  // the box fetches now, whatever the phone is on
+			}
+			if len(args) > 0 {
+				_ = json.Unmarshal(args, &a)
+			}
+			mount := filepath.Dir(runDir)
+			out := map[string]any{"ingest": rs.snapshot(), "inbox": inboxDepth(filepath.Join(mount, "tallyd", "rates")), "fetch": fs.snapshot()}
+			cfg, cerr := hw.LoadServicesConfig(mount)
+			if cerr != nil {
+				return ctlsock.Response{OK: false, Err: cerr.Error()}, nil
+			}
+			db := poltergres.NewReadWrite(hw.SocketForMount(mount), cfg.Postgres.Port, cfg.Postgres.RWUser, cfg.Postgres.RWPass, cfg.Postgres.Name)
+			if a.Add != "" || a.Remove != "" {
+				syms := tally.Symbols(db)
+				if a.Add != "" {
+					syms = append(syms, strings.ToUpper(strings.TrimSpace(a.Add)))
+				}
+				if a.Remove != "" {
+					kept := syms[:0]
+					for _, s := range syms {
+						if s != strings.ToUpper(strings.TrimSpace(a.Remove)) {
+							kept = append(kept, s)
+						}
+					}
+					syms = kept
+				}
+				seen := map[string]bool{}
+				uniq := syms[:0]
+				for _, s := range syms {
+					if s != "" && !seen[s] {
+						seen[s] = true
+						uniq = append(uniq, s)
+					}
+				}
+				if err := tally.SetSymbols(db, uniq); err != nil {
+					return ctlsock.Response{OK: false, Err: err.Error()}, nil
+				}
+			}
+			out["symbols"] = tally.Symbols(db)
+			out["marketsSeen"] = len(tally.MarketsSeen(db, time.Now()))
+			if who, at := tally.LastBy(db, "rates_last_by"); who != "" {
+				out["lastBatchBy"], out["lastBatchAt"] = who, at
+			}
+			if st, merr := tally.MarketNow(db, time.Now()); merr == nil {
+				out["market"] = st
+			} else {
+				out["marketErr"] = merr.Error()
+			}
+			if a.Fetch {
+				select {
+				case forceFetch <- struct{}{}:
+					out["fetching"] = "the box fetches now; ask again in a minute"
+				default:
+					out["fetching"] = "a fetch is already running"
+				}
+			}
+			snap, err := hw.RatesNow(db)
+			if err != nil {
+				return ctlsock.Response{OK: false, Err: err.Error()}, nil
+			}
+			if len(snap.Ranks) > 10 {
+				snap.Ranks = snap.Ranks[:10]
+			}
+			out["rates"] = snap
+			if a.Amount != 0 && a.From != "" && a.To != "" {
+				v, err := rates.Convert(a.Amount, a.From, a.To, snap.FX, snap.USD())
+				if err != nil {
+					out["convertErr"] = err.Error()
+				} else {
+					out["converted"] = v
+				}
+			}
+			data, _ := json.Marshal(out)
+			return ctlsock.Response{OK: true, Data: data}, nil
+		})
 		defer ctl.Cleanup()
 		go func() {
 			if err := ctl.Serve(ctx); err != nil {
@@ -124,7 +217,9 @@ func main() {
 	// time-series + diary out , exactly the charter.
 	if runDir != "" {
 		go healthLoop(ctx, filepath.Dir(runDir), ing, lg)
-		lg.Info("health ingestion up", "fn", "main")
+		go ratesLoop(ctx, filepath.Dir(runDir), rs, lg)
+		go ratesFetchLoop(ctx, filepath.Dir(runDir), rs, fs, lg, forceFetch)
+		lg.Info("health and rates ingestion up; the box fetches rates itself when the phone is not on Wi-Fi", "fn", "main")
 	} else {
 		ing.note("", errors.New("no run dir: ingestion is off (started by hand without GHOST_RUN_DIR)"), tally.Result{})
 	}
@@ -300,5 +395,125 @@ func pruneDone(dir string, keep int) {
 	sort.Strings(names)
 	for _, n := range names[:len(names)-keep] {
 		_ = os.Remove(filepath.Join(dir, n))
+	}
+}
+
+// ratesState is how the rates batches have been going, for the `rates` command and the health line.
+type ratesState struct {
+	mu      sync.Mutex
+	lastAt  time.Time
+	last    tally.RatesResult
+	lastErr string
+	taken   int
+}
+
+func (s *ratesState) note(err error, res tally.RatesResult) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err != nil {
+		s.lastErr = err.Error()
+		return
+	}
+	s.lastAt, s.last, s.lastErr = time.Now(), res, ""
+	s.taken++
+}
+
+func (s *ratesState) snapshot() map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := map[string]any{"batchesSinceStart": s.taken}
+	if !s.lastAt.IsZero() {
+		out["lastAt"] = s.lastAt.Unix()
+		out["last"] = s.last
+	}
+	if s.lastErr != "" {
+		out["lastError"] = s.lastErr
+	}
+	return out
+}
+
+func (s *ratesState) line() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.lastErr != "" {
+		return "a batch failed: " + s.lastErr
+	}
+	if s.lastAt.IsZero() {
+		return ""
+	}
+	return fmt.Sprintf("%s ago, %s", time.Since(s.lastAt).Round(time.Minute), s.last.String())
+}
+
+// ratesLoop drains <mount>/tallyd/rates: once at start, then every 30 s. A batch that fails
+// stays and is tried again next tick (the database away); a batch that is not a batch is moved
+// aside once.
+func ratesLoop(ctx context.Context, mount string, rs *ratesState, lg *slog.Logger) {
+	inbox := filepath.Join(mount, "tallyd", "rates")
+	done := filepath.Join(mount, "tallyd", "rates-done")
+	for _, d := range []string{inbox, done} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			lg.Error("rates dirs", "fn", "ratesLoop", "err", err)
+			return
+		}
+	}
+	var db *poltergres.ReadWrite
+	drain := func() {
+		entries, err := os.ReadDir(inbox)
+		if err != nil {
+			return
+		}
+		for _, e := range entries {
+			if e.IsDir() || strings.HasSuffix(e.Name(), ".part") {
+				continue
+			}
+			if db == nil {
+				cfg, cerr := hw.LoadServicesConfig(mount)
+				if cerr != nil {
+					rs.note(fmt.Errorf("services.conf: %v", cerr), tally.RatesResult{})
+					break
+				}
+				db = poltergres.NewReadWrite(hw.SocketForMount(mount), cfg.Postgres.Port, cfg.Postgres.RWUser, cfg.Postgres.RWPass, cfg.Postgres.Name)
+			}
+			path := filepath.Join(inbox, e.Name())
+			raw, rerr := os.ReadFile(path)
+			if rerr != nil {
+				continue
+			}
+			if _, ok := tally.ParseRates(raw); !ok {
+				lg.Warn("rates batch unparseable, moved aside", "fn", "ratesLoop", "file", e.Name())
+				_ = os.Rename(path, filepath.Join(done, e.Name()))
+				continue
+			}
+			res, ierr := tally.IngestRates(db, raw, time.Now())
+			if ierr != nil {
+				lg.Warn("rates ingest failed, will retry next tick", "fn", "ratesLoop", "file", e.Name(), "err", ierr)
+				rs.note(ierr, tally.RatesResult{})
+				db = nil
+				continue
+			}
+			lg.Info("rates batch taken", "fn", "ratesLoop", "file", e.Name(), "what", res.String())
+			if len(res.Failed) > 0 {
+				lg.Debug("rates sources that did not come", "fn", "ratesLoop", "which", res.Failed)
+			}
+			rs.note(nil, res)
+			_ = os.Rename(path, filepath.Join(done, e.Name()))
+			if n, merr := tally.RebuildMarketIndex(db, time.Now()); merr != nil {
+				lg.Warn("market index rebuild failed", "fn", "ratesLoop", "err", merr)
+			} else if n > 0 {
+				lg.Debug("market index rebuilt", "fn", "ratesLoop", "days", n)
+			}
+		}
+		pruneDone(done, 50)
+	}
+	drain()
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			drain()
+		}
 	}
 }

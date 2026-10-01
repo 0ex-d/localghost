@@ -357,14 +357,6 @@ func nearbyLoop(ctx context.Context, mount string, store *hw.NotifStore, slot in
 			return
 		case <-t.C:
 		}
-		h := time.Now().Hour()
-		if h < 9 || h > 20 {
-			continue
-		}
-		today := time.Now().Format("2006-01-02")
-		if v, err := store.GetSetting(slot, "cued_nearby_day"); err == nil && v == today {
-			continue
-		}
 		if db == nil {
 			m := findMount(mount)
 			if m == "" {
@@ -375,6 +367,16 @@ func nearbyLoop(ctx context.Context, mount string, store *hw.NotifStore, slot in
 				continue
 			}
 			db = poltergres.NewReadWrite(hw.SocketForMount(m), sc.Postgres.Port, sc.Postgres.RWUser, sc.Postgres.RWPass, sc.Postgres.Name)
+		}
+		// the person's hours, not the box's: the zone follows the trail (settings local_tz)
+		now := time.Now().In(hw.LocalZone(db))
+		h := now.Hour()
+		if h < 9 || h > 20 {
+			continue
+		}
+		today := now.Format("2006-01-02")
+		if v, err := store.GetSetting(slot, "cued_nearby_day"); err == nil && v == today {
+			continue
 		}
 		sent, _ := store.GetSetting(slot, "cued_nearby_sent")
 		n, why, err := cued.OfferNearby(db, sent, time.Now())

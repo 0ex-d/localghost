@@ -37,6 +37,7 @@ enum class Dest(val label: String, val glyph: String) {
     CHAT("CHAT", "›_"),
     CHATS("CHATS", "≡_"),
     MEMORIES("MEMORIES", "◇"),
+    NEWS("NEWS", "¶"),
     NOTIFICATIONS("NOTIFICATIONS", "△"),
     HARNESS("BOX STATUS", "◉"),
     SYNC("SYNC", "⇅"),
@@ -129,6 +130,7 @@ fun MainShell(
         when (navRequest) {
             "notifications" -> dest = Dest.NOTIFICATIONS
             "memories" -> dest = Dest.MEMORIES
+            "news" -> dest = Dest.NEWS
             "phrases" -> dest = Dest.PHRASES
             "settings" -> dest = Dest.SETTINGS
             "map" -> dest = Dest.MAP
@@ -195,6 +197,7 @@ fun MainShell(
                             onRenameBoxChat = onRenameBoxChat,
                             onDeleteBoxChat = onDeleteBoxChat)
                         Dest.MEMORIES -> MemoriesScreen(lifeContext)
+                        Dest.NEWS -> NewsScreen()
                         Dest.NOTIFICATIONS -> {
                             val nctx = androidx.compose.ui.platform.LocalContext.current
                             val nowSec = System.currentTimeMillis() / 1000
@@ -430,7 +433,7 @@ private fun DrawerPanel(
             // PHRASES appears once the phrases are on , after the offer that comes with landing
             // somewhere new, or the switch in settings; until then the drawer does not mention it.
             val phrasesOn = com.localghost.app.phrases.PhraseState.enabled(androidx.compose.ui.platform.LocalContext.current)
-            listOf(Dest.GALLERY, Dest.MAP, Dest.PHRASES, Dest.HEALTH, Dest.MEMORIES, Dest.SYNC)
+            listOf(Dest.GALLERY, Dest.MAP, Dest.PHRASES, Dest.HEALTH, Dest.MEMORIES, Dest.NEWS, Dest.SYNC)
                 .filter { it != Dest.PHRASES || phrasesOn || current == Dest.PHRASES }
                 .forEach { DrawerRow(it, it == current) { onSelect(it) } }
 

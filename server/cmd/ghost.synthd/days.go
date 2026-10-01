@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LocalGhostDao/localghost/server/internal/hw"
 	"github.com/LocalGhostDao/localghost/server/internal/oracle"
 	"github.com/LocalGhostDao/localghost/server/internal/poltergres"
 )
@@ -34,7 +35,7 @@ const (
 	dayModelPerPass    = 4  // model calls per pass
 	dayModelMaxTries   = 3  // per signature
 	dayModelRewriteGap = 12 * time.Hour
-	dayEveningUTC      = 20 // today's template from this hour on
+	dayEvening         = 20 // today's template from this hour on
 )
 
 var lastDayPass time.Time
@@ -118,7 +119,8 @@ func daySummaryPass(db *poltergres.ReadWrite, oc *oracle.Client, mount string, l
 		}
 		lastDayPass = time.Now()
 	}
-	now := time.Now().UTC()
+	// the person's day, not UTC's: the zone follows the trail (settings local_tz, ghost.framed)
+	now := time.Now().In(hw.LocalZone(db))
 	today := now.Format("2006-01-02")
 	onGPU, gerr := oc.OnGPU()
 	modelOK := gerr == nil && onGPU
@@ -130,7 +132,7 @@ func daySummaryPass(db *poltergres.ReadWrite, oc *oracle.Client, mount string, l
 	if len(only) > 0 {
 		days = only
 	} else {
-		if now.Hour() >= dayEveningUTC || checkedIn(db, today) {
+		if now.Hour() >= dayEvening || checkedIn(db, today) {
 			days = append(days, today)
 		}
 		for i := 1; i <= dayRecentDays; i++ {

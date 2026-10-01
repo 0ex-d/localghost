@@ -160,6 +160,33 @@ if [ "$MIRROR_GEO" = 0 ] && [ "$UPSTREAM" = 1 ]; then
     done
 fi
 
+# THE TIME ZONES. timezone-boundary-builder's zones with the oceans (ODbL) and IANA's rules (set tz
+# on the mirror, always the newest release, so the monthly check updates them by itself).
+# ghost.framed rasterises the zones into <geo>/tz/grid.bin at its next start (or: ghost-cli
+# ghost.framed tz-grid); the trail's newest point then names the person's zone (settings local_tz),
+# and the digests, the day stories and cued's hours read that zone instead of the box clock's.
+TZD="$DEST/tz"
+tz_missing() { ls "$TZD"/*.json "$TZD"/*.geojson >/dev/null 2>&1 && return 1; return 0; }
+if [ -n "$FORCE" ] || tz_missing || behind tz "$TZD/.mirror-tz"; then
+    mkdir -p "$TZD"
+    trc=0; sh "$FETCH" tz "$TZD" || trc=$?
+    case "$trc" in
+        0) for f in "$TZD"/*.zip; do
+               [ -f "$f" ] || continue
+               command -v unzip >/dev/null 2>&1 && unzip -q -o "$f" -d "$TZD" && rm -f "$f"
+           done
+           listed tz > "$TZD/.mirror-tz.tmp" && mv -f "$TZD/.mirror-tz.tmp" "$TZD/.mirror-tz"
+           changed tz
+           echo "  geo: time zones from the mirror, signature and hashes checked ($TZD); ghost.framed builds the grid at its next start" ;;
+        3) why_not 3 tz ;;
+        *) why_not "$trc" tz ;;
+    esac
+elif [ -s "$TZD/.mirror-tz" ]; then
+    echo "  geo: time zones present and current with the mirror ($TZD)"
+else
+    echo "  geo: time zones present, not from a recorded mirror build , kept (GHOST_GEO_REFRESH=1 takes the mirror's)"
+fi
+
 # THE ROADS. OpenStreetMap's roads, Geofabrik's continent extracts (set `roads` on the mirror; ODbL), cut on the box into the map's road tiles , major roads in
 # one-degree cells, every road with its name in tenth-of-a-degree cells , by bin/ghost-roadtiles
 # here, or by ghost.framed at its next start (also: ghost-cli ghost.framed road-tiles). The mirror

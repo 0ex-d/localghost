@@ -283,5 +283,13 @@ func EncodeIndex(idx []byte) []byte {
 	return out
 }
 
+// DecodeIndex is the 64,800 states behind the magic, or an error for anything else.
+func DecodeIndex(b []byte) ([]byte, error) {
+	if len(b) != 4+Cols*Rows || binary.LittleEndian.Uint32(b) != indexMagic {
+		return nil, errors.New("not a coast tile index")
+	}
+	return b[4:], nil
+}
+
 // TileName is the file a coast cell is stored in.
 func TileName(c Cell) string { return fmt.Sprintf("%03d_%03d.lgt", c.X, c.Y) }

@@ -90,6 +90,15 @@ object AppSettings {
     /** How much map the phone keeps, in MB (250, 500, 1000, 2000). */
     fun mapBudgetMB(ctx: Context): Int = prefs(ctx).getInt("map_budget_mb", 500)
     fun setMapBudgetMB(ctx: Context, mb: Int) = prefs(ctx).edit().putInt("map_budget_mb", mb).apply()
+    /** Whole countries to keep on the phone (codes from /v1/geo/countries), outside the size above. */
+    fun mapCountries(ctx: Context): List<String> =
+        (prefs(ctx).getString("map_countries", "") ?: "").split(",").map { it.trim() }.filter { it.isNotEmpty() }
+    fun setMapCountries(ctx: Context, codes: List<String>) =
+        prefs(ctx).edit().putString("map_countries", codes.distinct().joinToString(",")).apply()
+
+    /** The phone fetches the news feeds and the market tickers for the box (sync/BoxFetch). */
+    fun boxFetch(ctx: Context): Boolean = prefs(ctx).getBoolean("box_fetch", true)
+    fun setBoxFetch(ctx: Context, on: Boolean) = prefs(ctx).edit().putBoolean("box_fetch", on).apply()
 
     fun locationTrail(ctx: Context): Boolean = prefs(ctx).getBoolean("location_trail", true)
     fun setLocationTrail(ctx: Context, on: Boolean) = prefs(ctx).edit().putBoolean("location_trail", on).apply()

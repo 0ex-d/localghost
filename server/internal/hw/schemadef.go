@@ -276,6 +276,150 @@ var schemaRegistry = []SchemaTable{
 	}, Indexes: []string{
 		"CREATE INDEX IF NOT EXISTS day_summaries_mmdd ON day_summaries (substr(day, 6, 5))",
 	}},
+	// NEWS , the publications the phone fetches for the box (ghost.synthd is the single writer):
+	// the list itself with each feed's health, every entry seen, the stories they add up to (one
+	// story for the same event across outlets, with the model's grounded summary), and the
+	// digests posted. The box never fetches a page; the phone fetched the feed bytes.
+	{Name: "news_feeds", PK: "id", Cols: []SchemaCol{
+		{"id", "TEXT", true, ""},
+		{"name", "TEXT", true, "''"},
+		{"url", "TEXT", true, ""},
+		{"enabled", "BOOLEAN", true, "true"},
+		{"added_at", "BIGINT", true, "0"},
+		{"last_fetch", "BIGINT", true, "0"},
+		{"last_ok", "BIGINT", true, "0"},
+		{"last_status", "TEXT", true, "''"},
+		{"last_items", "INTEGER", true, "0"},
+		{"failures", "INTEGER", true, "0"},
+	}},
+	{Name: "news_items", PK: "id", Cols: []SchemaCol{
+		{"id", "BIGSERIAL", true, ""},
+		{"feed_id", "TEXT", true, ""},
+		{"guid", "TEXT", true, ""},
+		{"link", "TEXT", true, "''"},
+		{"title", "TEXT", true, ""},
+		{"summary", "TEXT", true, "''"},
+		{"published", "BIGINT", true, "0"},
+		{"fetched", "BIGINT", true, "0"},
+		{"story_id", "BIGINT", true, "0"},
+	}, Unique: []string{"feed_id, guid"}, Indexes: []string{
+		"CREATE INDEX IF NOT EXISTS news_items_published ON news_items (published DESC)",
+		"CREATE INDEX IF NOT EXISTS news_items_story ON news_items (story_id)",
+		"CREATE INDEX IF NOT EXISTS news_items_fts ON news_items USING gin (to_tsvector('english', title || ' ' || summary))",
+	}},
+	{Name: "news_stories", PK: "id", Cols: []SchemaCol{
+		{"id", "BIGSERIAL", true, ""},
+		{"first_seen", "BIGINT", true, "0"},
+		{"last_seen", "BIGINT", true, "0"},
+		{"title", "TEXT", true, ""},
+		{"tokens", "TEXT", true, "''"},
+		{"sources", "INTEGER", true, "1"},
+		{"summary", "TEXT", true, "''"},
+		{"written_by", "TEXT", true, "''"},
+		{"model_at", "BIGINT", true, "0"},
+		{"tries", "INTEGER", true, "0"},
+		{"digested", "BIGINT", true, "0"},
+	}, Indexes: []string{
+		"CREATE INDEX IF NOT EXISTS news_stories_seen ON news_stories (last_seen DESC)",
+	}},
+	{Name: "news_digests", PK: "id", Cols: []SchemaCol{
+		{"id", "BIGSERIAL", true, ""},
+		{"at", "BIGINT", true, "0"},
+		{"kind", "TEXT", true, "''"},
+		{"body", "TEXT", true, "''"},
+		{"story_ids", "TEXT", true, "''"},
+	}},
+	// RATES , the market numbers fetched for the box (by the phone on Wi-Fi, else by ghost.tallyd
+	// itself; tallyd writes): the ECB's reference rates by day (one euro in each currency, back to
+	// 1999 once the history is in), each venue's quote as taken, the index made from them per
+	// symbol, the daily candles and the daily index, and the top 100 by market cap, kept a week.
+	{Name: "fx_rates", PK: "day, code", Cols: []SchemaCol{
+		{"day", "TEXT", true, ""},
+		{"code", "TEXT", true, ""},
+		{"rate", "DOUBLE PRECISION", true, ""},
+	}},
+	{Name: "crypto_quotes", PK: "ts, exchange, base, quote", Cols: []SchemaCol{
+		{"ts", "BIGINT", true, ""},
+		{"exchange", "TEXT", true, ""},
+		{"base", "TEXT", true, ""},
+		{"quote", "TEXT", true, ""},
+		{"price", "DOUBLE PRECISION", true, ""},
+		{"volume", "DOUBLE PRECISION", true, "0"},
+		{"quote_ts", "BIGINT", true, "0"},
+	}},
+	// the box's USD price of each symbol it follows, and how it was made (venues in, venues out)
+	{Name: "crypto_index", PK: "ts, symbol", Cols: []SchemaCol{
+		{"ts", "BIGINT", true, ""},
+		{"symbol", "TEXT", true, ""},
+		{"price", "DOUBLE PRECISION", true, ""},
+		{"n", "INTEGER", true, "0"},
+		{"spread", "DOUBLE PRECISION", true, "0"},
+		{"used", "TEXT", true, "''"},
+		{"dropped", "TEXT", true, "''"},
+	}, Indexes: []string{
+		"CREATE INDEX IF NOT EXISTS crypto_index_symbol ON crypto_index (symbol, ts DESC)",
+	}},
+	// the days: each venue's daily candle as it keeps it, and the box's daily USD close per symbol
+	// (the venues' closes, USDT folded with the day's USDT/USD close), built back through the years
+	{Name: "crypto_daily", PK: "day, symbol, exchange, quote", Cols: []SchemaCol{
+		{"day", "TEXT", true, ""},
+		{"symbol", "TEXT", true, ""},
+		{"exchange", "TEXT", true, ""},
+		{"quote", "TEXT", true, ""},
+		{"open", "DOUBLE PRECISION", true, "0"},
+		{"high", "DOUBLE PRECISION", true, "0"},
+		{"low", "DOUBLE PRECISION", true, "0"},
+		{"close", "DOUBLE PRECISION", true, ""},
+		{"volume", "DOUBLE PRECISION", true, "0"},
+	}},
+	{Name: "crypto_daily_index", PK: "day, symbol", Cols: []SchemaCol{
+		{"day", "TEXT", true, ""},
+		{"symbol", "TEXT", true, ""},
+		{"close", "DOUBLE PRECISION", true, ""},
+		{"n", "INTEGER", true, "0"},
+	}},
+	// one row per coin per day from the rank list (the newest snapshot of the day): the price, the
+	// market cap and the day's dollar volume across all exchanges, which is what the market index's
+	// monthly weights are averaged from
+	{Name: "coin_daily", PK: "day, symbol", Cols: []SchemaCol{
+		{"day", "TEXT", true, ""},
+		{"symbol", "TEXT", true, ""},
+		{"coin_id", "TEXT", true, "''"},
+		{"rank", "INTEGER", true, "0"},
+		{"price_usd", "DOUBLE PRECISION", true, "0"},
+		{"market_cap", "DOUBLE PRECISION", true, "0"},
+		{"volume_usd", "DOUBLE PRECISION", true, "0"},
+		{"source", "TEXT", true, "''"},
+	}},
+	// THE MARKET INDEX: the constituents and weights set at each month's start (the fifty largest by
+	// market cap, weighted by the previous month's average daily dollar volume), and the chained
+	// daily value
+	{Name: "crypto_market_weights", PK: "month, symbol", Cols: []SchemaCol{
+		{"month", "TEXT", true, ""},
+		{"symbol", "TEXT", true, ""},
+		{"rank", "INTEGER", true, "0"},
+		{"weight", "DOUBLE PRECISION", true, ""},
+		{"avg_volume_usd", "DOUBLE PRECISION", true, "0"},
+		{"base_price", "DOUBLE PRECISION", true, ""},
+	}},
+	{Name: "crypto_market_index", PK: "day", Cols: []SchemaCol{
+		{"day", "TEXT", true, ""},
+		{"value", "DOUBLE PRECISION", true, ""},
+		{"priced", "INTEGER", true, "0"},
+		{"missing", "TEXT", true, "''"},
+	}},
+	{Name: "coin_ranks", PK: "ts, rank", Cols: []SchemaCol{
+		{"ts", "BIGINT", true, ""},
+		{"rank", "INTEGER", true, ""},
+		{"coin_id", "TEXT", true, ""},
+		{"symbol", "TEXT", true, ""},
+		{"name", "TEXT", true, "''"},
+		{"price_usd", "DOUBLE PRECISION", true, "0"},
+		{"market_cap", "DOUBLE PRECISION", true, "0"},
+		{"volume_24h", "DOUBLE PRECISION", true, "0"},
+		{"change_24h", "DOUBLE PRECISION", true, "0"},
+		{"source", "TEXT", true, "''"},
+	}},
 	{Name: "frame_tags", PK: "hash, tag", Cols: []SchemaCol{
 		{"hash", "TEXT", true, ""},
 		{"tag", "TEXT", true, ""},

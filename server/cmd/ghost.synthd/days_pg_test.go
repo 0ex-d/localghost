@@ -154,7 +154,7 @@ func TestDaysPGBuildOnceTellOnThisDay(t *testing.T) {
 func TestTodayTellsAfterTheCheckin(t *testing.T) {
 	db := pgFresh(t, "lgtest_synthd_today")
 	lg := slog.New(slog.NewTextHandler(io.Discard, nil))
-	now := time.Now().UTC()
+	now := time.Now().In(hw.LocalZone(db)) // the pass's own clock (no local_tz row here: the box's)
 	today := now.Format("2006-01-02")
 	t0 := time.Date(now.Year(), now.Month(), now.Day(), 0, 30, 0, 0, time.UTC).Unix()
 	exec := func(q string, args ...any) {
@@ -176,7 +176,7 @@ func TestTodayTellsAfterTheCheckin(t *testing.T) {
 	oc := oracle.NewClient(t.TempDir(), time.Second) // no oracled: the template path
 	mount := t.TempDir()
 	// no check-in yet: today is not a candidate (unless it is already evening in UTC)
-	if now.Hour() < dayEveningUTC {
+	if now.Hour() < dayEvening {
 		lastDayPass = time.Time{}
 		_, _, _ = daySummaryPass(db, oc, mount, lg)
 		if rows, _ := db.Query(`SELECT count(*) FROM day_summaries WHERE day = $1`, today); *rows.Vals[0][0] != "0" {

@@ -838,6 +838,23 @@ func (s *Store) InsertJournal(hash string, ts int64, title, body string) error {
 
 // SetState publishes one JSON value under framed's name in daemon_state, for the status screens.
 // Overwrite, never append: the row is "what is true now", and the phone polls it.
+// Setting reads one shared settings row ("" when none).
+func (s *Store) Setting(key string) (string, error) {
+	rows, err := s.db.Query("SELECT value FROM settings WHERE key = $1", key)
+	if err != nil {
+		return "", err
+	}
+	if len(rows.Vals) == 0 || len(rows.Vals[0]) == 0 || rows.Vals[0][0] == nil {
+		return "", nil
+	}
+	return *rows.Vals[0][0], nil
+}
+
+// SetSetting writes one shared settings row.
+func (s *Store) SetSetting(key, value string) error {
+	return s.db.Exec("INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", key, value)
+}
+
 func (s *Store) SetState(key string, value []byte) error {
 	return s.db.Exec(
 		`INSERT INTO daemon_state (daemon, key, value, updated_at) VALUES ('ghost.framed', $1, $2, $3)

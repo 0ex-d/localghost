@@ -77,7 +77,7 @@ object UnlockTidbits {
         "MODELS › benchmark shows how fast this phone reads and writes with its model",
         "the phone model stays loaded once you pick it in chat, so the second answer starts at once",
         "tap a photo in MEMORIES to open it; ON THIS DAY plays its photos as a slideshow",
-        "the box never talks to the internet on its own; a web search leaves from the phone, not the box",
+        "your words never leave the box; it only pulls general things in (the news and the prices it follows), and a web search leaves from the phone",
         "the box loads its model after the unlock; if you ask chat before it is ready, chat shows the load and answers once it is",
     )
 

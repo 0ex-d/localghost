@@ -15,6 +15,9 @@ class PollWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         Notifications.ensureChannel(applicationContext)
         // voice notes made while the box was out of reach go now (a few MB each; kept until it has them)
         try { com.localghost.app.voice.VoiceNotes.uploadPending(applicationContext) } catch (_: Exception) {}
+        // the box hears what network this phone is on: on Wi-Fi the phone fetches the feeds and
+        // the tickers for it, on mobile data or in silence the box fetches for itself
+        try { BoxClient.reportNet(applicationContext) } catch (_: Exception) {}
         return try {
             Notifications.postBatch(applicationContext, BoxClient.pollPending(applicationContext))
             Result.success()

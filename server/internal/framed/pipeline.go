@@ -116,6 +116,8 @@ type Pipeline struct {
 	// router, when set, walks the streets between a day's fixes for the day route (internal/
 	// dayroute over internal/roadgraph); nil draws chords. Set by main once the road tiles exist.
 	router dayroute.Router
+	// zoneAt names the time zone at a point (SetZoneLookup); nil when the box has no tz grid
+	zoneAt func(lat, lon float64) string
 	// resolvePlace, when non-nil, reverse-geocodes GPS frames , DB-backed (geo_points, imported by
 	// `ghost-cli ghost.framed geo-import`). Nil means no geo data yet: empty place strings,
 	// reprocess backfills after an import.
@@ -131,6 +133,36 @@ type Pipeline struct {
 // SetRoadCheck gives the trail questions the road tiles (nil: never "no road").
 func (p *Pipeline) SetRoadCheck(fn func(lat, lon, withinM float64) (near, known bool)) {
 	p.nearRoad = fn
+}
+
+// SetZoneLookup gives the trail the time zone grid (internal/tzgrid): the newest point's zone
+// becomes the box's idea of the person's local time (settings local_tz), which the digests, the
+// day stories and cued's hours read. nil: the box keeps its own clock's zone.
+func (p *Pipeline) SetZoneLookup(fn func(lat, lon float64) string) { p.zoneAt = fn }
+
+// noteZone writes the newest point's zone to settings when it changed. Pure over the store.
+func (p *Pipeline) noteZone(pts []SpooledPoint) {
+	if p.zoneAt == nil || len(pts) == 0 {
+		return
+	}
+	newest := pts[0]
+	for _, pt := range pts[1:] {
+		if pt.TS > newest.TS {
+			newest = pt
+		}
+	}
+	zone := p.zoneAt(newest.Lat, newest.Lon)
+	if zone == "" {
+		return
+	}
+	if prev, err := p.store.Setting("local_tz"); err == nil && prev == zone {
+		return
+	}
+	if err := p.store.SetSetting("local_tz", zone); err != nil {
+		p.log.Warn("local time zone not written", "fn", "noteZone", "err", err)
+		return
+	}
+	p.log.Info("local time zone follows the trail", "fn", "noteZone", "zone", zone)
 }
 
 // SetLandCheck gives the trail questions the land tiles (nil: never "across the sea").
@@ -561,6 +593,7 @@ func (p *Pipeline) DrainLocations() int {
 		for _, pt := range batch.Points {
 			daysTouched[time.Unix(pt.TS, 0).UTC().Format("2006-01-02")] = true
 		}
+		p.noteZone(batch.Points)
 		done++
 	}
 	if failed > 3 {

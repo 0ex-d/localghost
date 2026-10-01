@@ -141,12 +141,18 @@ fun SettingsScreen(
             HealthSection()
         }
 
-        Fold("MAPS ON THIS PHONE", "tiles kept ahead of time", openAtFirst = false) {
+        // The map fetches tiles from the box as you look; ticked, the phone keeps them ahead of
+        // time (Wi-Fi only, once a day), streets around where you have been first, and whole
+        // countries when picked.
+        var mapTick by remember { mutableIntStateOf(0) }
+        val mapsOn = remember(mapTick) { com.localghost.app.settings.AppSettings.mapDownload(ctx) }
+        val mapCountries = remember(mapTick) { com.localghost.app.local.MapPrefetch.countryProgress(ctx).map { it.name } }
+        val mapPickedN = remember(mapTick) { com.localghost.app.settings.AppSettings.mapCountries(ctx).size }
+        Fold("MAPS ON THIS PHONE",
+            (if (mapsOn) "downloading ahead of time" else "off") + " · " +
+                (if (mapPickedN > 0 && mapCountries.isEmpty()) "$mapPickedN picked" else MapCountryText.picked(mapCountries)),
+            openAtFirst = false) {
             Spacer(Modifier.height(8.dp))
-            // The map fetches tiles from the box as you look; ticked, the phone keeps them ahead of
-            // time (Wi-Fi only, once a day), streets around where you have been first.
-            var mapTick by remember { mutableIntStateOf(0) }
-            val mapsOn = remember(mapTick) { com.localghost.app.settings.AppSettings.mapDownload(ctx) }
             val mapBudget = remember(mapTick) { com.localghost.app.settings.AppSettings.mapBudgetMB(ctx) }
             // the status line follows a run as it goes (the worker notes its progress every ten tiles)
             var mapStatus by remember { mutableStateOf("") }
@@ -182,8 +188,44 @@ fun SettingsScreen(
                             }.padding(horizontal = 8.dp, vertical = 6.dp))
                     }
                 }
+                MapCountriesSection(mapTick, onChanged = { mapTick++ })
                 Text("[ download now ]", color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
                     modifier = Modifier.clickable { com.localghost.app.local.MapPrefetch.runNow(ctx); mapTick++ }.padding(vertical = 6.dp))
+            }
+        }
+
+        // THE NEWS AND THE RATES the phone fetches for the box: the box opens no connection, so the
+        // feeds and the tickers are fetched here and handed over; the box keeps, groups and
+        // summarises them. The honest cost is stated: publishers and exchanges see this phone's
+        // address, and the box gets nothing while the phone is off.
+        var fetchTick by remember { mutableIntStateOf(0) }
+        val fetchOn = remember(fetchTick) { com.localghost.app.settings.AppSettings.boxFetch(ctx) }
+        val fetchLast = remember(fetchTick) { com.localghost.app.sync.BoxFetch.last(ctx) }
+        Fold("NEWS AND RATES", if (fetchOn) "fetched by this phone for the box · " + (fetchLast?.let { NewsText.ago(it.at, System.currentTimeMillis() / 1000) } ?: "not yet") else "off", openAtFirst = false) {
+            Spacer(Modifier.height(8.dp))
+            toggleRow(
+                label = "fetch the news and the rates",
+                sub = if (fetchOn) "hourly on Wi-Fi this phone fetches the box's list of feeds and the exchange tickers for it; on mobile data, or with the phone away, the box fetches for itself"
+                      else "off , the box fetches for itself whatever network this phone is on",
+                checked = fetchOn,
+                onChange = { on ->
+                    com.localghost.app.settings.AppSettings.setBoxFetch(ctx, on)
+                    com.localghost.app.sync.BoxFetch.schedule(ctx)
+                    if (on) com.localghost.app.sync.BoxFetch.runNow(ctx)
+                    fetchTick++
+                },
+            )
+            if (fetchOn) {
+                val now = System.currentTimeMillis() / 1000
+                Text(when {
+                    fetchLast == null -> "no run yet"
+                    fetchLast.note.isNotEmpty() -> "last run ${NewsText.ago(fetchLast.at, now)}: ${fetchLast.note}"
+                    else -> "last run ${NewsText.ago(fetchLast.at, now)}: ${fetchLast.feedsOK} of ${fetchLast.feeds} feeds, ${fetchLast.ratesOK} of ${fetchLast.rates} tickers answered"
+                }, color = if (fetchLast?.note?.isNotEmpty() == true) Warning else GhostTextDim, style = MaterialTheme.typography.labelMedium)
+                Text("[ fetch now ]", color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier.clickable { com.localghost.app.sync.BoxFetch.runNow(ctx); fetchTick++ }.padding(vertical = 6.dp))
+                Text("> the box pulls general information in to use in context, never anything of yours out: the publishers and the exchanges see this phone's address when it fetches and the box's when the box does, and that is all they get. Digests at 07:00 and 19:00 in your zone. The list of feeds is the box's: ghost-cli ghost.synthd news add=…",
+                    color = TerminalDim, style = MaterialTheme.typography.labelMedium)
             }
         }
 

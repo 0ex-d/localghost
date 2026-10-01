@@ -174,6 +174,14 @@ for svc in $CHECK; do
                         printf '  map roads: none (GHOST_GEO_ROADS=all tools/fetch_geo.sh <mount>/geo fetches the continents)\n'
                     fi
                 fi
+                # The time zones: the grid the trail's newest point is looked up in, and the zone it named.
+                if [ -s "$MOUNT/geo/tz/grid.bin" ]; then
+                    printf '  time zones: grid built (%s); local_tz %s\n' "$(du -sh "$MOUNT/geo/tz/grid.bin" 2>/dev/null | cut -f1)" "$("$CLI" ghost.framed setting key=local_tz 2>/dev/null | sed -n 's/.*"value":"\([^"]*\)".*/\1/p' | head -1)"
+                elif ls "$MOUNT"/geo/tz/*.json >/dev/null 2>&1; then
+                    printf '  time zones: file present, no grid yet (ghost-cli ghost.framed tz-grid; watch its log)\n'
+                else
+                    printf '  time zones: none (tools/fetch_geo.sh <mount>/geo fetches the tz set) , days are the box clock'"'"'s days\n'
+                fi
             fi
             if [ "$svc" = "ghost.synthd" ]; then
                 # The memories made from the photos, and the taste , built without the model.
