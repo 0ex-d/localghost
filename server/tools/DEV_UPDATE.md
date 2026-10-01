@@ -4280,3 +4280,7 @@ pruning), `TestIngestRatesLogsEachSource`, `TestMonitorReport` (a box a few hour
 section's state, the lines and rows that carry the delays), `TestHistoryProgress`,
 `TestFetchListAndSpools` (the status route appears down with no database), `FeedsTextTest`. The
 real venues and feeds were not reached from here; the first hour on the box is the test.
+
+Build fix (app): `BoxClient.countryCells` is internal (it returns `MapPlan.Country`, and `MapPlan`
+is internal), and `NotificationsScreen` imports Compose's `getValue`/`setValue` for its `by remember`
+state (the fully qualified `remember` did not bring the delegate operators with it).

@@ -1266,7 +1266,7 @@ object BoxClient {
     } catch (_: Exception) { null }
 
     /** One country's tiles as index keys (/v1/geo/country?code=); null when unreachable or unknown. */
-    suspend fun countryCells(ctx: Context, code: String): com.localghost.app.local.MapPlan.Country? = try {
+    internal suspend fun countryCells(ctx: Context, code: String): com.localghost.app.local.MapPlan.Country? = try {
         val r = BoxHttp.getJson(ctx, "/v1/geo/country?code=" + java.net.URLEncoder.encode(code, "UTF-8"))
         fun ints(k: String): IntArray {
             val a = r.optJSONArray(k) ?: return IntArray(0)
