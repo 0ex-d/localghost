@@ -26,6 +26,13 @@ type Source struct {
 	URL  string `json:"url"`
 }
 
+// DigestHours are the local hours ghost.synthd posts the news digest at (Box Status says when the
+// next one is due from the same list).
+var DigestHours = []int{7, 19}
+
+// FetchEvery is how often a feed wants fetching.
+const FetchEvery = 2 * time.Hour
+
 // DefaultSources is the list a new box starts with. Reuters and AP are left out: neither has an
 // official feed any more. Twitter can be added later without other changes.
 func DefaultSources() []Source {

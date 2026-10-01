@@ -21,6 +21,7 @@ import (
 	"github.com/LocalGhostDao/localghost/server/internal/egress"
 	"github.com/LocalGhostDao/localghost/server/internal/feeds"
 	"github.com/LocalGhostDao/localghost/server/internal/hw"
+	"github.com/LocalGhostDao/localghost/server/internal/monitor"
 	"github.com/LocalGhostDao/localghost/server/internal/rates"
 	"github.com/LocalGhostDao/localghost/server/internal/tally"
 )
@@ -96,7 +97,7 @@ func (s *Server) handleFetchList(w http.ResponseWriter, r *http.Request) {
 	}
 	// the phone's part of the rates: the ECB and the rank lists (the tickers are the box's own,
 	// every minute, whatever the phone is on)
-	doc := fetchListDoc{Rates: rates.PhoneSources(), FeedsEvery: 120}
+	doc := fetchListDoc{Rates: rates.PhoneSources(), FeedsEvery: int(feeds.FetchEvery / time.Minute)}
 	if db, err := s.notif.DB(mounted); err == nil {
 		if fl, err := hw.FeedList(db); err == nil {
 			doc.Feeds = fl
@@ -373,4 +374,27 @@ func (s *Server) handleRates(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
+}
+
+// handleFeedsStatus , GET /v1/feeds/status , how the data the box pulls in is doing: the prices
+// every minute, the exchanges, the history, the market index, the ECB, the rank lists, the daily
+// candles and the news (internal/monitor). Box Status polls it while it is open.
+func (s *Server) handleFeedsStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodGet {
+		s.appearsDown(w)
+		return
+	}
+	mounted, ok := s.mountedSlot()
+	if !ok {
+		s.appearsDown(w)
+		return
+	}
+	db, err := s.notif.DB(mounted)
+	if err != nil {
+		s.appearsDown(w)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(monitor.Make(db, time.Now()))
 }

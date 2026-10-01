@@ -26,6 +26,12 @@ object BoxFetch {
 
     /** One address, as the box will see it: the status (0 when the fetch itself failed), the error, the body. */
     fun fetchAs(id: String, url: String): BoxClient.Fetched {
+        val start = System.nanoTime()
+        val f = fetchUntimed(id, url)
+        return f.copy(tookMs = (System.nanoTime() - start) / 1_000_000)
+    }
+
+    private fun fetchUntimed(id: String, url: String): BoxClient.Fetched {
         var conn: HttpURLConnection? = null
         return try {
             conn = (URL(url).openConnection() as HttpURLConnection).apply {

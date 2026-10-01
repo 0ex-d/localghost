@@ -4209,3 +4209,74 @@ folded hours without touching the rolled one, depth, pruning), `TestRatesItems` 
 change), `TestFetchListAndSpools`, `HomeBriefTextTest` (the most-told first, the prices line, the
 chip, the card pulled open). The tick itself and the card are not run here; the real venues were
 not reached.
+
+## How the feeds are doing, on Box Status (feedstat, monitor, tally, tallyd, synthd, secd, app)
+
+- The fetch log. Every address fetched for the box leaves a row in `fetch_log` (new table): the
+  source, its kind (ticker, ecb, ranks, daily, history, news, tick), who fetched it (box or phone),
+  the HTTP status, whether it came and was of use, how long it took, its size, how much it gave
+  (quotes, days, candles, coins, new entries) and why not. `IngestRates` writes one per source,
+  synthd's news ingest one per feed, the history walk one per page, and tallyd one per minute for
+  the minute as a whole. The box times its own fetches (`egress.Fetched.TookMs`); the phone times
+  its own too and sends `tookMs` with each body. Kept two days, pruned hourly.
+  `internal/feedstat` reads it back per source or per exchange: calls and successes over a window,
+  p50, p95 and the slowest, the newest fetch, the newest good one, the fetches failed since (a
+  minute's calls count once), the newest error.
+- The report. `internal/monitor` reads the database straight, so it answers while a daemon is
+  down, and judges nine sections, each with a state (ok, filling, waiting, flaky, late, failing), a
+  line, the newest piece's age and the detail rows:
+  - who fetches: the phone's network and when it was heard, which side fetches what now, who
+    fetched the ECB, the rank lists and the news last;
+  - prices: the newest price's age (late past 2.5 min, failing past 15), the minutes held in the
+    last sixty (flaky under 57 once the box has run an hour), symbols priced of those followed and
+    which have none, venues per symbol, symbols on one venue only, symbols where the venues
+    disagree by over 1%, how long each minute takes and whether one ran into the next;
+  - exchanges: per venue over the last hour the share that came, p50 and p95, the pairs in the
+    newest minute, how far behind its own clock its prices are (the venues that stamp them), how
+    often its quotes went into the index and the commonest reason when not (Gemini gives no
+    volume, a stale quote, too far from the others); failing after three failed minutes or ten
+    without a good one; the section is flaky while one venue is down and failing past half;
+  - price history: per resolution how much of the window is held, the markets still walking back,
+    the pages left and the time that is at the last ten minutes' pace, CRYPTO50's points against
+    the window's, a venue whose pages fail;
+  - CRYPTO50: the value, the day's change, constituents priced live (flaky under 80%), the weights'
+    month, the days of history, the heaviest five;
+  - ECB rates: the newest table and the working days it is behind (the table is due at 16:00
+    Frankfurt, Monday to Friday; one missed day is let pass for TARGET holidays, late at two,
+    failing at five), each of the three files' last fetch;
+  - rank lists: the newest list's source, size and age (late past two hours, failing past six),
+    CoinGecko and CoinPaprika each;
+  - daily candles: BTC's closes back to when, pairs refreshed in the last day, the years walked back
+    and what is next, a venue whose candles fail;
+  - news: feeds that answered within the fetch interval and an hour, the last fetch and by whom,
+    how long a feed takes, the last day's new entries, stories and summaries, how long after
+    publication a story reaches the box (median), the last and next digest, each feed failing
+    twice or more in a row.
+  The worst section is the report's state; the summary says which want a look, or that all is
+  well and what is still filling.
+- How far the walks have come is worked out by tallyd once a minute (it holds the markets seen;
+  working that out on every status read would scan two days of quotes) and kept in settings
+  (`tally_progress`: per resolution the markets, those still walking, pages left, coverage,
+  whether the market index was made over it; the daily backfill's markets done, oldest day, next).
+  `NextBarPages` and the progress share the one choice of markets (`barMarkets`).
+- Read: `GET /v1/feeds/status` (in the OpenAPI document), `ghost-cli ghost.tallyd feeds`, and
+  `tools/health.sh` prints the summary and one line per section under ghost.tallyd.
+  `ghost-cli ghost.tallyd rates` shows `progress` in place of the heavy series depth.
+- tallyd's health turns degraded when no minute of prices has finished for five minutes, so
+  watchd and Box Status show the minute stopping.
+- Coinbase is no longer asked every minute for a pair it does not list: a 404 for a pair keeps it
+  off the list for a week (`coinbase_absent`), and the next symbol takes its place among the ten.
+- The app. Box Status has a DATA FEEDS panel under the archive pipeline: the summary and the
+  report's state, then a line per section with its mark (● ok, ◐ filling, ○ waiting, ▲ flaky or
+  late, ✕ failing), its line and its age, ticking between polls; a tap opens the box's detail rows,
+  each coloured by its own state. Polled every 30 s while the screen is open; a report over two
+  minutes old says so. The ghost.tallyd drill-in keeps BTC and ETH as key rows and one line for
+  the rest (it had a key row per symbol, fifty of them).
+
+Tested: `TestKindsAndVenues`, `TestPriceState`, `TestVenueState`, `TestECBMissed`,
+`TestNewsStateAndDigest`, `TestWordsAndSummary`, `TestFetchLogStats` (per venue and per source,
+latencies, failures in a row with a minute's calls counted once, the window against the whole log,
+pruning), `TestIngestRatesLogsEachSource`, `TestMonitorReport` (a box a few hours in: every
+section's state, the lines and rows that carry the delays), `TestHistoryProgress`,
+`TestFetchListAndSpools` (the status route appears down with no database), `FeedsTextTest`. The
+real venues and feeds were not reached from here; the first hour on the box is the test.

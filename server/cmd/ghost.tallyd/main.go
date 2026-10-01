@@ -30,6 +30,7 @@ import (
 	"github.com/LocalGhostDao/localghost/server/internal/ghosthealth"
 	"github.com/LocalGhostDao/localghost/server/internal/harden"
 	"github.com/LocalGhostDao/localghost/server/internal/hw"
+	"github.com/LocalGhostDao/localghost/server/internal/monitor"
 	"github.com/LocalGhostDao/localghost/server/internal/poltergres"
 	"github.com/LocalGhostDao/localghost/server/internal/rates"
 	"github.com/LocalGhostDao/localghost/server/internal/rotlog"
@@ -74,6 +75,9 @@ func main() {
 	forceFetch := make(chan struct{}, 1)
 	srv := ghosthealth.NewServer(service, ghosthealth.ReporterFunc(func() ghosthealth.Health {
 		h := ing.health()
+		if bad, why := fs.stalled(time.Now()); bad && h.Code == ghosthealth.OK {
+			return ghosthealth.Health{Code: ghosthealth.Degraded, Name: service, Detail: why}
+		}
 		if line := rs.line(); line != "" && h.Code == ghosthealth.OK {
 			h.Detail += " · rates: " + line
 		}
@@ -175,7 +179,9 @@ func main() {
 			} else {
 				out["marketErr"] = merr.Error()
 			}
-			out["series"] = tally.Depth(db, tally.Symbols(db), time.Now())
+			if p, ok := tally.LoadProgress(db); ok {
+				out["progress"] = p
+			}
 			if a.Fetch {
 				select {
 				case forceFetch <- struct{}{}:
@@ -201,6 +207,18 @@ func main() {
 				}
 			}
 			data, _ := json.Marshal(out)
+			return ctlsock.Response{OK: true, Data: data}, nil
+		})
+		// feeds: how the data the box pulls in is doing, the same report Box Status shows
+		// (internal/monitor). `ghost-cli ghost.tallyd feeds`.
+		ctl.Handle("feeds", func(json.RawMessage) (ctlsock.Response, error) {
+			mount := filepath.Dir(runDir)
+			cfg, cerr := hw.LoadServicesConfig(mount)
+			if cerr != nil {
+				return ctlsock.Response{OK: false, Err: cerr.Error()}, nil
+			}
+			db := poltergres.NewReadWrite(hw.SocketForMount(mount), cfg.Postgres.Port, cfg.Postgres.RWUser, cfg.Postgres.RWPass, cfg.Postgres.Name)
+			data, _ := json.Marshal(monitor.Make(db, time.Now()))
 			return ctlsock.Response{OK: true, Data: data}, nil
 		})
 		defer ctl.Cleanup()

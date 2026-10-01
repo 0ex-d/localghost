@@ -183,6 +183,17 @@ for svc in $CHECK; do
                     printf '  time zones: none (tools/fetch_geo.sh <mount>/geo fetches the tz set) , days are the box clock'"'"'s days\n'
                 fi
             fi
+            if [ "$svc" = "ghost.tallyd" ]; then
+                # The data the box pulls in, one line per feed, as Box Status shows it
+                # (ghost-cli ghost.tallyd feeds has the detail rows).
+                f=$("$CLI" ghost.tallyd feeds 2>/dev/null)
+                fsum=$(echo "$f" | sed -n 's/.*"summary":"\([^"]*\)".*/\1/p' | head -1)
+                if [ -n "$fsum" ]; then
+                    printf '  feeds: %s\n' "$fsum"
+                    echo "$f" | grep -o '"title":"[^"]*","state":"[^"]*","line":"[^"]*"' \
+                        | sed 's/"title":"\([^"]*\)","state":"\([^"]*\)","line":"\([^"]*\)"/    \2 · \1 · \3/'
+                fi
+            fi
             if [ "$svc" = "ghost.synthd" ]; then
                 # The memories made from the photos, and the taste , built without the model.
                 o=$("$CLI" ghost.synthd outings 2>/dev/null)

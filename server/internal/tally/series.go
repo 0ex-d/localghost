@@ -232,6 +232,41 @@ func NextBarPages(db *poltergres.ReadWrite, res string, symbols []string, seen [
 	if !ok || max <= 0 {
 		return nil
 	}
+	done := barsDone(db, res)
+	floor := now.Add(-ri.Window).Truncate(ri.Step)
+	var out []BarPage
+	for _, m := range barMarkets(res, symbols, seen) {
+		if len(out) >= max {
+			return out
+		}
+		if done[barsDoneKey(res, m)] {
+			continue
+		}
+		oldest := int64(0)
+		if rows, err := db.Query("SELECT coalesce(min(ts),0) FROM crypto_bars WHERE res = $1 AND exchange = $2 AND base = $3 AND quote = $4", res, m.Exchange, m.Base, m.Quote); err == nil && len(rows.Vals) == 1 && rows.Vals[0][0] != nil {
+			oldest, _ = strconv.ParseInt(*rows.Vals[0][0], 10, 64)
+		}
+		var to time.Time
+		switch {
+		case oldest == 0:
+			to = now.Truncate(ri.Step)
+		case oldest <= floor.Unix():
+			MarkBarsDone(db, res, m)
+			continue
+		default:
+			to = time.Unix(oldest, 0).Add(-ri.Step)
+		}
+		from := to.Add(-time.Duration(m.PageBars()-1) * ri.Step)
+		if from.Before(floor) {
+			from = floor
+		}
+		out = append(out, BarPage{Res: res, Market: m, From: from, To: to, Oldest: oldest, Floor: floor.Unix()})
+	}
+	return out
+}
+
+// barsDone is the settings keys of the markets whose walk ended at a resolution.
+func barsDone(db *poltergres.ReadWrite, res string) map[string]bool {
 	done := map[string]bool{}
 	if rows, err := db.Query("SELECT key FROM settings WHERE key LIKE $1", "bars_done_"+res+"_%"); err == nil {
 		for _, v := range rows.Vals {
@@ -240,6 +275,13 @@ func NextBarPages(db *poltergres.ReadWrite, res string, symbols []string, seen [
 			}
 		}
 	}
+	return done
+}
+
+// barMarkets is the markets whose history is walked back at a resolution, in the order they are
+// walked: the USDT leg first, then each symbol in order, up to two venues among those seen
+// quoting it (barPrefs).
+func barMarkets(res string, symbols []string, seen []rates.Market) []rates.Market {
 	bySym := map[string][]rates.Market{}
 	for _, m := range seen {
 		bySym[m.Base] = append(bySym[m.Base], m)
@@ -278,42 +320,14 @@ func NextBarPages(db *poltergres.ReadWrite, res string, symbols []string, seen [
 		}
 		return cands
 	}
-	floor := now.Add(-ri.Window).Truncate(ri.Step)
-	var out []BarPage
-	order := append([]string{"USDT"}, symbols...)
+	var out []rates.Market
 	seenSym := map[string]bool{}
-	for _, sym := range order {
+	for _, sym := range append([]string{"USDT"}, symbols...) {
 		if seenSym[sym] {
 			continue
 		}
 		seenSym[sym] = true
-		for _, m := range choose(sym) {
-			if len(out) >= max {
-				return out
-			}
-			if done[barsDoneKey(res, m)] {
-				continue
-			}
-			oldest := int64(0)
-			if rows, err := db.Query("SELECT coalesce(min(ts),0) FROM crypto_bars WHERE res = $1 AND exchange = $2 AND base = $3 AND quote = $4", res, m.Exchange, m.Base, m.Quote); err == nil && len(rows.Vals) == 1 && rows.Vals[0][0] != nil {
-				oldest, _ = strconv.ParseInt(*rows.Vals[0][0], 10, 64)
-			}
-			var to time.Time
-			switch {
-			case oldest == 0:
-				to = now.Truncate(ri.Step)
-			case oldest <= floor.Unix():
-				MarkBarsDone(db, res, m)
-				continue
-			default:
-				to = time.Unix(oldest, 0).Add(-ri.Step)
-			}
-			from := to.Add(-time.Duration(m.PageBars()-1) * ri.Step)
-			if from.Before(floor) {
-				from = floor
-			}
-			out = append(out, BarPage{Res: res, Market: m, From: from, To: to, Oldest: oldest, Floor: floor.Unix()})
-		}
+		out = append(out, choose(sym)...)
 	}
 	return out
 }

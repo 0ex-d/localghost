@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/LocalGhostDao/localghost/server/internal/hw"
+	"github.com/LocalGhostDao/localghost/server/internal/monitor"
 )
 
 // OpenAPI generation, from scratch (no swaggo, no oapi-codegen , the spec for a dozen routes does
@@ -241,6 +242,8 @@ func (s *Server) routes() []route {
 			Auth: true, Response: hw.RatesSnapshot{}, Handler: s.handleRates},
 		{Method: "GET", Path: "/v1/rates/series", Summary: "A symbol's or the market index's price every minute (res=1m, the last week) or every hour (res=1h, the last thirty days): ?code=BTC|CRYPTO50&res=1m|1h&hours=N, oldest first.",
 			Auth: true, Response: looseList{}, Handler: s.handleRatesSeries},
+		{Method: "GET", Path: "/v1/feeds/status", Summary: "How the data the box pulls in is doing, for Box Status: per section (who fetches, prices, exchanges, price history, CRYPTO50, ECB, rank lists, daily candles, news) a state (ok, filling, waiting, flaky, late, failing), a line, the newest piece's age and the detail rows.",
+			Auth: true, Response: monitor.Report{}, Handler: s.handleFeedsStatus},
 		{Method: "GET", Path: "/v1/rates/history", Summary: "A symbol's daily USD closes (the box's daily index), a currency's daily ECB rate, or the market index (?code=BTC|GBP|CRYPTO50&days=365), newest first.",
 			Auth: true, Response: looseList{}, Handler: s.handleRatesHistory},
 		{Method: "GET", Path: "/v1/geo/countries", Summary: "Every country with the tiles the box holds for it (streets, main roads, coast) and their size, for the whole-country map download.",

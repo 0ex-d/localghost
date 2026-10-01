@@ -65,6 +65,7 @@ fun HarnessScreen(daemons: Loadable<List<DaemonStatus>>, onRefresh: () -> Unit =
             }
         }
         item { PipelinePanel() }
+        item { FeedsPanel() }
         when (daemons) {
             is Loadable.Loading -> item { LoadingRow("polling daemons…") }
             is Loadable.Failed -> item { ErrorLine(daemons.reason) }
@@ -158,6 +159,100 @@ private fun PipelinePanel() {
             }
         }
     }
+}
+
+/**
+ * THE DATA FEEDS , what the box pulls in from outside (the prices every minute, the exchanges,
+ * the history walked back, CRYPTO50, the ECB, the rank lists, the daily candles, the news) and how
+ * each is doing, judged on the box (/v1/feeds/status): a mark, a line, how old the newest piece
+ * is. A section opens on tap to the box's detail. Polled every 30 s while the screen is open; the
+ * ages tick between polls.
+ */
+@Composable
+private fun FeedsPanel() {
+    val ctx = LocalContext.current
+    var report by remember { mutableStateOf<FeedsText.Report?>(null) }
+    var unsupported by remember { mutableStateOf(false) }
+    var open by remember { mutableStateOf(setOf<String>()) }
+    var nowS by remember { mutableStateOf(System.currentTimeMillis() / 1000) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            val got = BoxClient.feedsStatus(ctx)
+            if (got == null && report == null) unsupported = true else if (got != null) { report = got; unsupported = false }
+            nowS = System.currentTimeMillis() / 1000
+            kotlinx.coroutines.delay(30_000)
+        }
+    }
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(5_000)
+            nowS = System.currentTimeMillis() / 1000
+        }
+    }
+    Column(Modifier.fillMaxWidth().border(1.dp, TerminalDim, RectangleShape).background(VoidLighter).padding(14.dp)) {
+        val r = report
+        Row {
+            Text("◉", color = TerminalGreen, style = MaterialTheme.typography.bodyMedium)
+            Spacer(Modifier.width(8.dp))
+            Text("data feeds", color = TerminalGreen, style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.weight(1f))
+            r?.let { Text(FeedsText.word(it.state), color = toneColour(FeedsText.tone(it.state)), style = MaterialTheme.typography.labelMedium) }
+        }
+        Spacer(Modifier.height(6.dp))
+        when {
+            r == null && unsupported -> Text("the box does not report its feeds yet , deploy the current build",
+                color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+            r == null -> Text("reading from the box…", color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+            else -> {
+                Text(r.summary, color = if (r.state == "ok") GhostText else toneColour(FeedsText.tone(r.state)), style = MaterialTheme.typography.bodyMedium)
+                val stale = FeedsText.staleness(r, nowS)
+                if (stale.isNotEmpty()) Text(stale, color = Warning, style = MaterialTheme.typography.labelMedium)
+                Spacer(Modifier.height(6.dp))
+                r.sections.forEach { s ->
+                    FeedSection(s, r.at, nowS, s.id in open) {
+                        open = if (s.id in open) open - s.id else open + s.id
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FeedSection(s: FeedsText.Section, reportAt: Long, nowS: Long, isOpen: Boolean, onToggle: () -> Unit) {
+    val colour = toneColour(FeedsText.tone(s.state))
+    Column(Modifier.fillMaxWidth().clickable { onToggle() }.padding(vertical = 5.dp)) {
+        Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+            Text(FeedsText.mark(s.state), color = colour, style = MaterialTheme.typography.labelMedium)
+            Spacer(Modifier.width(8.dp))
+            Text(s.title, color = GhostText, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+            Text(FeedsText.ageNow(s, reportAt, nowS), color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+            Text(if (isOpen) "  ▾" else "  ▸", color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+        }
+        Text(s.line, color = if (FeedsText.tone(s.state) == FeedsText.Tone.WARN || FeedsText.tone(s.state) == FeedsText.Tone.BAD) colour else GhostTextDim,
+            style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(start = 18.dp))
+        if (isOpen) {
+            Spacer(Modifier.height(4.dp))
+            if (s.every.isNotEmpty()) {
+                Text("expected " + s.every, color = GhostTextDim, style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(start = 18.dp))
+            }
+            s.rows.forEach { row ->
+                val rc = if (row.state.isEmpty() || row.state == "ok") GhostText else toneColour(FeedsText.tone(row.state))
+                Row(Modifier.fillMaxWidth().padding(start = 18.dp, top = 2.dp)) {
+                    Text(row.k, color = GhostTextDim, style = MaterialTheme.typography.labelSmall, modifier = Modifier.weight(0.38f))
+                    Spacer(Modifier.width(6.dp))
+                    Text(row.v, color = rc, style = MaterialTheme.typography.labelSmall, modifier = Modifier.weight(0.62f))
+                }
+            }
+        }
+    }
+}
+
+private fun toneColour(t: FeedsText.Tone) = when (t) {
+    FeedsText.Tone.GOOD -> TerminalGreen
+    FeedsText.Tone.QUIET -> GhostTextDim
+    FeedsText.Tone.WARN -> Warning
+    FeedsText.Tone.BAD -> AngryRed
 }
 
 private fun parked(q: BoxClient.Queue) = if (q.parked > 0) " (+${q.parked} parked)" else ""

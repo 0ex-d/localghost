@@ -69,6 +69,14 @@ func TestFetchListAndSpools(t *testing.T) {
 	if rr := call("POST", "/v1/phone/net", `{"net":"wifi"}`); rr.Code == 200 || rr.Code == 400 {
 		t.Fatalf("wifi without a database: %d", rr.Code)
 	}
+	// the feeds' status reads the database straight: none here, so it appears down rather than
+	// saying all is well
+	if rr := call("GET", "/v1/feeds/status", ""); rr.Code == 200 {
+		t.Fatalf("feeds status without a database: %d", rr.Code)
+	}
+	if rr := call("POST", "/v1/feeds/status", ""); rr.Code == 200 {
+		t.Fatalf("feeds status by POST: %d", rr.Code)
+	}
 	// without a session: appears-down
 	rr = httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr, httptest.NewRequest("GET", "/v1/fetch/list", nil))

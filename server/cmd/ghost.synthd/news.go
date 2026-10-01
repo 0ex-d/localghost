@@ -27,6 +27,7 @@ import (
 
 	"github.com/LocalGhostDao/localghost/server/internal/egress"
 	"github.com/LocalGhostDao/localghost/server/internal/feeds"
+	"github.com/LocalGhostDao/localghost/server/internal/feedstat"
 	"github.com/LocalGhostDao/localghost/server/internal/hw"
 	"github.com/LocalGhostDao/localghost/server/internal/oracle"
 	"github.com/LocalGhostDao/localghost/server/internal/poltergres"
@@ -40,7 +41,7 @@ const (
 	newsDigestTop    = 8
 )
 
-var newsDigestHours = []int{7, 19}
+var newsDigestHours = feeds.DigestHours
 
 // fetchedBatch is what the phone posts: each feed's bytes, or why there are none.
 type fetchedBatch struct {
@@ -51,6 +52,7 @@ type fetchedBatch struct {
 		Status int    `json:"status"` // HTTP status, 0 when the fetch itself failed
 		Error  string `json:"error,omitempty"`
 		Body   string `json:"body,omitempty"`
+		TookMs int    `json:"tookMs,omitempty"`
 	} `json:"feeds"`
 }
 
@@ -93,11 +95,14 @@ func ingestFetched(db *poltergres.ReadWrite, raw []byte, now time.Time) (newsRes
 	}
 	_ = db.Exec("INSERT INTO settings (key, value) VALUES ('news_last_by', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", by+"@"+strconv.FormatInt(b.FetchedAt, 10))
 	var res newsResult
+	var logged []feedstat.Entry
+	defer func() { _ = feedstat.Log(db, time.Unix(b.FetchedAt, 0), logged) }()
 	for _, f := range b.Feeds {
 		if f.ID == "" {
 			continue
 		}
 		res.Feeds++
+		e := feedstat.Entry{Source: f.ID, Kind: feedstat.KindNews, By: by, Status: f.Status, TookMs: f.TookMs, Bytes: len(f.Body)}
 		status := ""
 		switch {
 		case f.Error != "":
@@ -112,6 +117,8 @@ func ingestFetched(db *poltergres.ReadWrite, raw []byte, now time.Time) (newsRes
 				return res, err
 			}
 			res.Failed = append(res.Failed, f.ID+": "+status)
+			e.Error = status
+			logged = append(logged, e)
 			continue
 		}
 		parsed, err := feeds.Parse([]byte(f.Body))
@@ -120,6 +127,8 @@ func ingestFetched(db *poltergres.ReadWrite, raw []byte, now time.Time) (newsRes
 				return res, err
 			}
 			res.Failed = append(res.Failed, f.ID+": "+err.Error())
+			e.Error = "not a feed: " + err.Error()
+			logged = append(logged, e)
 			continue
 		}
 		added := 0
@@ -152,6 +161,8 @@ func ingestFetched(db *poltergres.ReadWrite, raw []byte, now time.Time) (newsRes
 		}
 		res.OK++
 		res.NewItems += added
+		e.OK, e.Items = true, added
+		logged = append(logged, e)
 		if err := db.Exec("UPDATE news_feeds SET last_fetch = $2, last_ok = $2, last_status = 'ok', last_items = $3, failures = 0 WHERE id = $1", f.ID, b.FetchedAt, len(parsed.Items)); err != nil {
 			return res, err
 		}
@@ -433,7 +444,7 @@ func newsFetchByBox(ctx context.Context, db *poltergres.ReadWrite, client *egres
 			continue
 		}
 		last, _ := strconv.ParseInt(str(v[2]), 10, 64)
-		if forced || egress.Due(last, 2*time.Hour, now) {
+		if forced || egress.Due(last, feeds.FetchEvery, now) {
 			due = append(due, struct{ id, url string }{*v[0], *v[1]})
 		}
 	}

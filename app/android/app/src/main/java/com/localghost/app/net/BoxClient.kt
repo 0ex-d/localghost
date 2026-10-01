@@ -1124,6 +1124,13 @@ object BoxClient {
         }
     } catch (e: Exception) { android.util.Log.w("LocalGhost", "pipeline: ${e.message}"); null }
 
+    /** GET /v1/feeds/status: how each feed the box pulls in is doing (prices, exchanges, history,
+     *  CRYPTO50, ECB, rank lists, daily candles, news), judged by the box. Null when the box is down
+     *  or older than the report. */
+    suspend fun feedsStatus(ctx: Context): com.localghost.app.ui.FeedsText.Report? = try {
+        com.localghost.app.ui.FeedsText.parse(BoxHttp.getJson(ctx, "/v1/feeds/status"))
+    } catch (e: Exception) { android.util.Log.w("LocalGhost", "feeds status: ${e.message}"); null }
+
     /** Per-daemon drill-in rows for the Box Status detail screens. */
     /** The drill-in rows; key marks the rows the box wants read first (the rest fold behind "more"). */
     suspend fun daemonSummary(ctx: Context, name: String): List<com.localghost.app.ui.DaemonRows.Row>? = try {
@@ -1178,11 +1185,12 @@ object BoxClient {
                 put("id", f.id); put("status", f.status)
                 if (f.error.isNotEmpty()) put("error", f.error)
                 if (f.body.isNotEmpty()) put("body", f.body)
+                if (f.tookMs > 0) put("tookMs", f.tookMs) // for the box's fetch log
             })
         }
         return org.json.JSONObject().apply { put("fetchedAt", fetchedAt); put(key, arr) }
     }
-    data class Fetched(val id: String, val status: Int, val error: String, val body: String)
+    data class Fetched(val id: String, val status: Int, val error: String, val body: String, val tookMs: Long = 0)
 
     suspend fun postNewsFetched(ctx: Context, fetchedAt: Long, rows: List<Fetched>): Boolean = try {
         BoxHttp.postJson(ctx, "/v1/news/fetched", fetchedJson(fetchedAt, "feeds", rows), 60_000).optBoolean("ok")

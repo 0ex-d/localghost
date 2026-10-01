@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LocalGhostDao/localghost/server/internal/feedstat"
 	"github.com/LocalGhostDao/localghost/server/internal/poltergres"
 	"github.com/LocalGhostDao/localghost/server/internal/rates"
 )
@@ -27,6 +28,7 @@ type RatesBatch struct {
 		Status int    `json:"status"`
 		Error  string `json:"error,omitempty"`
 		Body   string `json:"body,omitempty"`
+		TookMs int    `json:"tookMs,omitempty"`
 	} `json:"sources"`
 }
 
@@ -177,6 +179,7 @@ func IngestRates(db *poltergres.ReadWrite, raw []byte, now time.Time) (RatesResu
 	var quotes []rates.Quote
 	var want map[string]bool
 	coinBodies := map[string][]byte{}
+	items := map[string]int{}                   // what each answer gave, for the fetch log
 	touchedDays := map[string]map[string]bool{} // symbol -> days with new candles
 	for _, s := range b.Sources {
 		switch {
@@ -209,6 +212,7 @@ func IngestRates(db *poltergres.ReadWrite, raw []byte, now time.Time) (RatesResu
 				}
 			}
 			res.FXDays += len(days)
+			items[s.ID] = len(days)
 			if days[0].Day > res.FXDay {
 				res.FXDay = days[0].Day
 			}
@@ -235,6 +239,7 @@ func IngestRates(db *poltergres.ReadWrite, raw []byte, now time.Time) (RatesResu
 				touchedDays[m.Base][c.Day] = true
 			}
 			res.Candles += len(cs)
+			items[s.ID] = len(cs)
 		case s.ID == "coingecko" || s.ID == "coinpaprika":
 			coinBodies[s.ID] = []byte(s.Body)
 		case strings.HasSuffix(s.ID, ":all"):
@@ -259,6 +264,7 @@ func IngestRates(db *poltergres.ReadWrite, raw []byte, now time.Time) (RatesResu
 				quotes = append(quotes, q)
 				res.Quotes++
 			}
+			items[s.ID] = len(qs)
 		default:
 			m, ok := rates.ParseMarketID(s.ID)
 			if !ok {
@@ -277,6 +283,7 @@ func IngestRates(db *poltergres.ReadWrite, raw []byte, now time.Time) (RatesResu
 			}
 			quotes = append(quotes, q)
 			res.Quotes++
+			items[s.ID] = 1
 		}
 	}
 	// the index per symbol: this batch's quotes, plus the newest fresh quote of a market that did not come
@@ -364,8 +371,17 @@ func IngestRates(db *poltergres.ReadWrite, raw []byte, now time.Time) (RatesResu
 			}
 		}
 		res.Coins, res.CoinSource = len(coins), src
+		items[src] = len(coins)
 		break
 	}
+	// the fetch log: every source, good or not
+	entries := make([]feedstat.Entry, 0, len(b.Sources))
+	for _, s := range b.Sources {
+		e := feedstat.Entry{Source: s.ID, Kind: feedstat.KindOf(s.ID), By: by, Status: s.Status, TookMs: s.TookMs, Bytes: len(s.Body), Items: items[s.ID], Error: res.Failed[s.ID]}
+		e.OK = e.Error == ""
+		entries = append(entries, e)
+	}
+	_ = feedstat.Log(db, fetched, entries)
 	// what is kept
 	_ = db.Exec("DELETE FROM crypto_quotes WHERE ts < $1", now.Add(-quotesKeep).Unix())
 	_ = db.Exec("DELETE FROM crypto_index WHERE ts < $1", now.Add(-quotesKeep).Unix())

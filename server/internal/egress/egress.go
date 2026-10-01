@@ -33,6 +33,7 @@ type Fetched struct {
 	Status int    `json:"status"` // 0 when the fetch itself failed
 	Error  string `json:"error,omitempty"`
 	Body   string `json:"body,omitempty"`
+	TookMs int    `json:"tookMs,omitempty"` // from asking to the last byte, for the fetch log
 }
 
 // Client fetches with a fixed agent, no cookies, short deadlines and a body cap.
@@ -62,6 +63,13 @@ func (c *Client) Get(ctx context.Context, id, url string) (Fetched, error) {
 
 // GetCapped is Get with its own body cap (the ECB's full history is seven megabytes, once).
 func (c *Client) GetCapped(ctx context.Context, id, url string, cap int64) (Fetched, error) {
+	start := time.Now()
+	out, err := c.get(ctx, id, url, cap)
+	out.TookMs = int(time.Since(start).Milliseconds())
+	return out, err
+}
+
+func (c *Client) get(ctx context.Context, id, url string, cap int64) (Fetched, error) {
 	out := Fetched{ID: id}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {

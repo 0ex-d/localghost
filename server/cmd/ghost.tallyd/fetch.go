@@ -16,10 +16,12 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/LocalGhostDao/localghost/server/internal/egress"
+	"github.com/LocalGhostDao/localghost/server/internal/feedstat"
 	"github.com/LocalGhostDao/localghost/server/internal/hw"
 	"github.com/LocalGhostDao/localghost/server/internal/poltergres"
 	"github.com/LocalGhostDao/localghost/server/internal/rates"
@@ -38,6 +40,7 @@ const (
 // fetchState is the loop's last decision, for the `rates` command and the health line.
 type fetchState struct {
 	mu       sync.Mutex
+	started  time.Time
 	at       time.Time
 	proxy    bool
 	why      string
@@ -51,6 +54,23 @@ func (f *fetchState) note(proxy bool, why string, fetched int, backfill string, 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.at, f.proxy, f.why, f.fetched, f.backfill, f.took = time.Now(), proxy, why, fetched, backfill, took
+}
+
+// stalled says the minute has stopped: no pass finished for five minutes (after the first five).
+// The health line turns degraded, so watchd and Box Status show it.
+func (f *fetchState) stalled(now time.Time) (bool, string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.started.IsZero() || now.Sub(f.started) < 5*time.Minute {
+		return false, ""
+	}
+	if f.at.IsZero() {
+		return true, "no minute of prices finished since start"
+	}
+	if d := now.Sub(f.at); d > 5*time.Minute {
+		return true, "the minute of prices last finished " + d.Truncate(time.Minute).String() + " ago"
+	}
+	return false, ""
 }
 
 func (f *fetchState) setPending(res string, n int) {
@@ -84,6 +104,9 @@ func (f *fetchState) snapshot() map[string]any {
 func ratesFetchLoop(ctx context.Context, mount string, rs *ratesState, fs *fetchState, lg *slog.Logger, force <-chan struct{}) {
 	client := egress.New()
 	var db *poltergres.ReadWrite
+	fs.mu.Lock()
+	fs.started = time.Now()
+	fs.mu.Unlock()
 	pass := func(forced bool) {
 		if db == nil {
 			cfg, err := hw.LoadServicesConfig(mount)
@@ -108,12 +131,21 @@ func ratesFetchLoop(ctx context.Context, mount string, rs *ratesState, fs *fetch
 			time.Sleep(fetchGap)
 			return true
 		}
-		// 1. the tickers, every minute, the box's own
-		for _, src := range rates.TickerSources(syms) {
+		// 1. the tickers, every minute, the box's own (Coinbase is not asked for a pair it said
+		// it does not list, for a week)
+		absent := coinbaseAbsent(db, now)
+		cbSyms := make([]string, 0, len(syms))
+		for _, sym := range syms {
+			if !absent[sym] {
+				cbSyms = append(cbSyms, sym)
+			}
+		}
+		for _, src := range rates.TickerSources(cbSyms) {
 			if !get(src.ID, src.URL) {
 				return
 			}
 		}
+		noteCoinbaseAbsent(db, absent, rows, now)
 		// 2. the ECB and the rank lists: the phone's while it is on Wi-Fi
 		if !proxy || forced {
 			for _, src := range rates.PhoneSources() {
@@ -163,6 +195,7 @@ func ratesFetchLoop(ctx context.Context, mount string, rs *ratesState, fs *fetch
 		if err != nil {
 			lg.Warn("rates fetched by the box, ingest failed", "fn", "ratesFetchLoop", "err", err)
 			rs.note(err, tally.RatesResult{})
+			_ = feedstat.Log(db, now, []feedstat.Entry{{Source: "tallyd.minute", Kind: feedstat.KindTick, By: "box", TookMs: int(time.Since(start).Milliseconds()), Items: len(rows), Error: "ingest: " + err.Error()}})
 			db = nil
 			return
 		}
@@ -171,6 +204,7 @@ func ratesFetchLoop(ctx context.Context, mount string, rs *ratesState, fs *fetch
 			tally.MarkHistoryDone(db, *bf) // no older candle came: this venue's years end here
 			backfill = bf.ID() + " is as far back as the venue goes"
 		}
+		bfWhy := backfill
 		// 5. the minute: each symbol's index and the market's value
 		if mv, err := tally.RecordMinute(db, minute, res.Index); err != nil {
 			lg.Warn("minute series not written", "fn", "ratesFetchLoop", "err", err)
@@ -186,6 +220,7 @@ func ratesFetchLoop(ctx context.Context, mount string, rs *ratesState, fs *fetch
 			pages = append(pages, mp...)
 		}
 		walked := 0
+		var logged []feedstat.Entry
 		for _, p := range pages {
 			if time.Since(start) > tickBudget {
 				break
@@ -195,19 +230,31 @@ func ratesFetchLoop(ctx context.Context, mount string, rs *ratesState, fs *fetch
 				return
 			}
 			time.Sleep(fetchGap)
+			e := feedstat.Entry{Source: p.ID(), Kind: feedstat.KindHistory, By: "box", Status: f.Status, TookMs: f.TookMs, Bytes: len(f.Body), Error: f.Error}
 			if f.Status < 200 || f.Status > 299 || f.Body == "" {
 				tally.BarFailed(db, p.Res, p.Market)
+				if e.Error == "" {
+					e.Error = "HTTP " + itoa(f.Status)
+					if f.Status >= 200 && f.Status <= 299 {
+						e.Error = "empty answer"
+					}
+				}
+				logged = append(logged, e)
 				continue
 			}
 			n, older, ierr := tally.IngestBars(db, p, []byte(f.Body))
 			switch {
 			case ierr != nil:
 				tally.BarFailed(db, p.Res, p.Market)
+				e.Error = ierr.Error()
 			case !older:
 				tally.MarkBarsDone(db, p.Res, p.Market) // nothing older came: this venue's window ends here
 			}
+			e.OK, e.Items = ierr == nil, n
+			logged = append(logged, e)
 			walked += n
 		}
+		_ = feedstat.Log(db, now, logged)
 		if walked > 0 {
 			backfill += " · history: " + itoa(walked) + " bars this minute"
 		}
@@ -228,8 +275,15 @@ func ratesFetchLoop(ctx context.Context, mount string, rs *ratesState, fs *fetch
 		}
 		if minute.Minute() == 7 {
 			tally.Prune(db, now)
+			feedstat.Prune(db, now)
 		}
-		fs.note(proxy, why, len(rows), backfill, time.Since(start))
+		// 9. how far the walks have come, for Box Status, and the minute itself in the fetch log
+		if err := tally.SaveProgress(db, tally.MakeProgress(db, syms, seen, now, bfWhy)); err != nil {
+			lg.Debug("progress not kept", "fn", "ratesFetchLoop", "err", err)
+		}
+		took := time.Since(start)
+		_ = feedstat.Log(db, now, []feedstat.Entry{{Source: "tallyd.minute", Kind: feedstat.KindTick, By: "box", OK: true, TookMs: int(took.Milliseconds()), Items: len(rows) + len(logged)}})
+		fs.note(proxy, why, len(rows), backfill, took)
 		lg.Debug("rates minute", "fn", "ratesFetchLoop", "addresses", len(rows), "what", res.String(), "backfill", backfill, "took", time.Since(start).Round(time.Millisecond))
 	}
 	// on the minute, so the minute series' points sit on the minute
@@ -283,6 +337,57 @@ func refoldWhenWhole(db *poltergres.ReadWrite, res string, syms []string, seen [
 		_ = db.Exec("INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", key, itoa(int(now.Unix())))
 		lg.Info("market index made over the history", "fn", "refoldWhenWhole", "res", res, "points", n)
 	}
+}
+
+// coinbaseAbsent is the symbols Coinbase said it does not list (a 404 for the pair), each for a
+// week from when it said so: asking every minute for a pair that is not there only fills the log
+// with failures. A listing that comes later is picked up when the week is out.
+func coinbaseAbsent(db *poltergres.ReadWrite, now time.Time) map[string]bool {
+	out := map[string]bool{}
+	for sym, at := range readAbsent(db) {
+		if now.Unix()-at < 7*86400 {
+			out[sym] = true
+		}
+	}
+	return out
+}
+
+func readAbsent(db *poltergres.ReadWrite) map[string]int64 {
+	m := map[string]int64{}
+	rows, err := db.Query("SELECT value FROM settings WHERE key = 'coinbase_absent'")
+	if err == nil && len(rows.Vals) == 1 && rows.Vals[0][0] != nil {
+		_ = json.Unmarshal([]byte(*rows.Vals[0][0]), &m)
+	}
+	return m
+}
+
+// noteCoinbaseAbsent keeps the pairs Coinbase answered 404 for this minute.
+func noteCoinbaseAbsent(db *poltergres.ReadWrite, absent map[string]bool, rows []egress.Fetched, now time.Time) {
+	var gone []string
+	for _, f := range rows {
+		if f.Status != 404 || !strings.HasPrefix(f.ID, "coinbase:") {
+			continue
+		}
+		m, ok := rates.ParseMarketID(f.ID)
+		if !ok || m.Base == "USDT" || absent[m.Base] {
+			continue
+		}
+		gone = append(gone, m.Base)
+	}
+	if len(gone) == 0 {
+		return
+	}
+	all := readAbsent(db)
+	for sym, at := range all {
+		if now.Unix()-at >= 7*86400 {
+			delete(all, sym)
+		}
+	}
+	for _, sym := range gone {
+		all[sym] = now.Unix()
+	}
+	b, _ := json.Marshal(all)
+	_ = db.Exec("INSERT INTO settings (key, value) VALUES ('coinbase_absent', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", string(b))
 }
 
 func itoa(n int) string {

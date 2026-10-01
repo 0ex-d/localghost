@@ -450,6 +450,25 @@ var schemaRegistry = []SchemaTable{
 		{"priced", "INTEGER", true, "0"},
 		{"source", "TEXT", true, "''"},
 	}},
+	// THE FETCH LOG: one row per address fetched for the box (by the box or by the phone), and one
+	// per minute's tick. Box Status reads it back as success rates, latencies and runs of failures
+	// per source and per exchange (internal/feedstat, internal/monitor). Kept two days.
+	{Name: "fetch_log", PK: "id", Cols: []SchemaCol{
+		{"id", "BIGSERIAL", true, ""},
+		{"ts", "BIGINT", true, ""},
+		{"source", "TEXT", true, ""},
+		{"kind", "TEXT", true, ""},
+		{"by_who", "TEXT", true, "''"},
+		{"status", "INTEGER", true, "0"},
+		{"ok", "BOOLEAN", true, "FALSE"},
+		{"took_ms", "INTEGER", true, "0"},
+		{"bytes", "INTEGER", true, "0"},
+		{"items", "INTEGER", true, "0"},
+		{"error", "TEXT", true, "''"},
+	}, Indexes: []string{
+		"CREATE INDEX IF NOT EXISTS fetch_log_kind ON fetch_log (kind, ts DESC)",
+		"CREATE INDEX IF NOT EXISTS fetch_log_source ON fetch_log (source, ts DESC)",
+	}},
 	{Name: "coin_ranks", PK: "ts, rank", Cols: []SchemaCol{
 		{"ts", "BIGINT", true, ""},
 		{"rank", "INTEGER", true, ""},
