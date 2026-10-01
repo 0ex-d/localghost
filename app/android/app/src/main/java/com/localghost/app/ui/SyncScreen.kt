@@ -20,7 +20,6 @@ fun SyncScreen(
     sync: SyncUiState,
     onSync: () -> Unit,
     onRequestFullAccess: () -> Unit,
-    onTestNotification: () -> Unit,
     onTogglePause: () -> Unit = {},
 ) {
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp)) {
@@ -72,102 +71,28 @@ fun SyncScreen(
             style = MaterialTheme.typography.labelMedium,
             modifier = Modifier.clickable { openSettings() })
         run {
-            // HEALTH , Samsung Health writes into the phone's Health Connect store; this reads it
-            // there and ships steps/sleep/exercise to the box (tallyd). The data's only network
-            // hop is phone -> box, same channel as photos. Grant once in the system sheet; sync
-            // ships the last 7 days, upserted, so tapping again only refines.
+            // HEALTH , the grant is listed here with the other grants; the buttons (send last
+            // week, whole history, what can the box see) live in one place, SETTINGS › HEALTH,
+            // so there is one truth about the last run and not two screens disagreeing.
             val hctx = androidx.compose.ui.platform.LocalContext.current
-            val scope = androidx.compose.runtime.rememberCoroutineScope()
-            var healthMsg by remember { mutableStateOf("") }
-            var granted by remember { mutableStateOf(false) }
             var grantedCount by remember { mutableStateOf(0) }
+            val total = com.localghost.app.sync.HealthSync.PERMISSIONS.size
+            val available = com.localghost.app.sync.HealthSync.available(hctx)
             LaunchedEffect(Unit) {
-                if (com.localghost.app.sync.HealthSync.available(hctx)) {
-                    grantedCount = com.localghost.app.sync.HealthSync.grantedCount(hctx)
-                    granted = grantedCount == com.localghost.app.sync.HealthSync.PERMISSIONS.size
-                }
+                if (available) grantedCount = com.localghost.app.sync.HealthSync.grantedCount(hctx)
             }
             val permLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
                 androidx.health.connect.client.PermissionController.createRequestPermissionResultContract()) { g ->
                 grantedCount = com.localghost.app.sync.HealthSync.PERMISSIONS.count { it in g }
-                granted = grantedCount == com.localghost.app.sync.HealthSync.PERMISSIONS.size
-                healthMsg = when {
-                    granted -> "all health permissions granted , tap SYNC"
-                    grantedCount > 0 -> "$grantedCount granted , partial sync will ship what it can"
-                    else -> "no permissions granted , health stays off (your call)"
-                }
             }
-            val total = com.localghost.app.sync.HealthSync.PERMISSIONS.size
-            grantLine("health (steps · sleep · heart · more)",
-                when { granted -> "FULL"; grantedCount > 0 -> "$grantedCount/$total"; else -> "none" },
-                ok = granted, warn = grantedCount in 1 until total,
-                rationale = "partial is fine , sync ships what is granted and names what it skipped",
-                onFix = { permLauncher.launch(com.localghost.app.sync.HealthSync.PERMISSIONS) })
-            Spacer(Modifier.height(8.dp))
-            if (com.localghost.app.sync.HealthSync.available(hctx)) {
-                GhostButton(if (granted) "SYNC HEALTH (7 DAYS)" else "CONNECT HEALTH",
-                    onClick = {
-                        if (!granted) {
-                            healthMsg = "opening the Health Connect permission sheet…"
-                            try {
-                                permLauncher.launch(com.localghost.app.sync.HealthSync.PERMISSIONS)
-                            } catch (e: Exception) {
-                                healthMsg = "! permission sheet refused to open: ${e.message ?: "no reason given"}"
-                            }
-                        }
-                        else scope.launch {
-                            healthMsg = "reading health connect…"
-                            val res = com.localghost.app.sync.HealthSync.sync(hctx)
-                            val skip = if (res.skipped.isEmpty()) "" else
-                                " (skipped: ${res.skipped.joinToString(", ")})"
-                            healthMsg = when {
-                                res.error != null -> "! ${res.error}$skip"
-                                res.days > 0 -> "shipped ${res.days} day(s) to your box$skip"
-                                else -> "no health data found for the last 7 days$skip"
-                            }
-                        }
-                    }, modifier = Modifier.fillMaxWidth())
-                if (granted) {
-                    Spacer(Modifier.height(8.dp))
-                    GhostButton("SYNC FULL HISTORY (EVERYTHING)", onClick = {
-                        scope.launch {
-                            healthMsg = "walking your history month by month…"
-                            val res = com.localghost.app.sync.HealthSync.syncAll(hctx) { p -> healthMsg = p }
-                            val skip = if (res.skipped.isEmpty()) "" else
-                                " (skipped: ${res.skipped.joinToString(", ")})"
-                            healthMsg = when {
-                                res.error != null -> "! ${res.error}$skip"
-                                res.days > 0 -> "done , ${res.days} day(s) of history on your box$skip"
-                                else -> "no health history found$skip"
-                            }
-                        }
-                    }, modifier = Modifier.fillMaxWidth())
-                }
-                Spacer(Modifier.height(8.dp))
-                // WHAT CAN THE BOX SEE , the probe. The reader is known good, so when only two
-                // metrics arrive the honest question is whether Health Connect holds anything at
-                // all , and only Health Connect can answer. Counts, date spans, and the app that
-                // supplied each type.
-                var probeLines by remember { mutableStateOf<List<String>>(emptyList()) }
-                var probing by remember { mutableStateOf(false) }
-                Text(if (probing) "[ reading Health Connect… ]" else "[ what can the box see? ]",
-                    color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
-                    modifier = Modifier.clickable {
-                        if (!probing) {
-                            probing = true
-                            scope.launch {
-                                probeLines = com.localghost.app.sync.HealthSync.probe(hctx)
-                                probing = false
-                            }
-                        }
-                    }.padding(vertical = 6.dp))
-                probeLines.forEach { l ->
-                    Text("  $l", color = TerminalDim, style = MaterialTheme.typography.labelMedium)
-                }
-                if (healthMsg.isNotEmpty()) {
-                    Spacer(Modifier.height(6.dp))
-                    Text(healthMsg, color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
-                }
+            if (available) {
+                grantLine("health (steps · sleep · heart · more)",
+                    when { grantedCount == total -> "FULL"; grantedCount > 0 -> "$grantedCount/$total"; else -> "none" },
+                    ok = grantedCount == total, warn = grantedCount in 1 until total,
+                    rationale = "partial is fine , the box gets what is granted",
+                    onFix = { permLauncher.launch(com.localghost.app.sync.HealthSync.PERMISSIONS) })
+                Text("> health goes to the box every 6 hours by itself; send it now, or the whole history, under SETTINGS › HEALTH.",
+                    color = TerminalDim, style = MaterialTheme.typography.labelMedium)
             } else {
                 Text("> Health Connect not available on this device", color = TerminalDim,
                     style = MaterialTheme.typography.labelMedium)

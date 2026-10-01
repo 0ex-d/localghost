@@ -95,11 +95,11 @@ fun MainShell(
     lifeContext: LifeContext?,
     memories: Loadable<List<MemoryEntry>>,
     daemons: Loadable<List<DaemonStatus>>,
+    onRefreshDaemons: () -> Unit = {},
     sync: SyncUiState,
     onSync: () -> Unit,
     onTogglePause: () -> Unit = {},
     onRequestFullAccess: () -> Unit,
-    onTestNotification: () -> Unit,
     allowMobileSync: Boolean,
     onToggleMobileSync: (Boolean) -> Unit,
     thinkLevel: String = "",
@@ -206,8 +206,8 @@ fun MainShell(
                             }
                             NotificationsScreen(pending, hint)
                         }
-                        Dest.HARNESS -> HarnessScreen(daemons)
-                        Dest.SYNC -> SyncScreen(sync, onSync, onRequestFullAccess, onTestNotification, onTogglePause = onTogglePause)
+                        Dest.HARNESS -> HarnessScreen(daemons, onRefresh = onRefreshDaemons)
+                        Dest.SYNC -> SyncScreen(sync, onSync, onRequestFullAccess, onTogglePause = onTogglePause)
                         Dest.GALLERY -> GalleryScreen()
                         Dest.MAP -> MapScreen()
                         Dest.PHRASES -> PhrasesScreen()
@@ -252,16 +252,12 @@ fun MainShell(
                     }
                 }
 
+                // one confirmation, in SETTINGS (WipeButton); the second here said "global
+                // crypto-erase on the box", which nothing does: the phone forgets the box, the box
+                // keeps everything
                 if (showWipe) {
-                    ConfirmDialog(
-                        title = "WIPE EVERYTHING",
-                        body = "Global crypto-erase on the box. The master key is destroyed " +
-                            "and every persona becomes noise at once. Nobody reverses this.",
-                        requireWord = "WIPE",
-                        confirmLabel = "WIPE EVERYTHING",
-                        onConfirm = { showWipe = false; onWipe() },
-                        onDismiss = { showWipe = false },
-                    )
+                    showWipe = false
+                    onWipe()
                 }
                 if (showAddSheet) {
                     AddToChatSheet(

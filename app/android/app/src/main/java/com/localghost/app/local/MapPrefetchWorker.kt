@@ -43,11 +43,22 @@ class MapPrefetchWorker(ctx: Context, params: WorkerParameters) : CoroutineWorke
             return Result.success()
         }
 
-        val fixes = com.localghost.app.sync.LocationLog.recent(ctx, 0).map { it.lat to it.lon } +
-            listOfNotNull(com.localghost.app.sync.LocationLog.last(ctx)?.let { it.lat to it.lon })
+        // WHERE TO FETCH AROUND: the phone's own points when it can read them (the recent ring
+        // opens only while the app is unlocked; the sealed last point always), else the box's
+        // trail (the newest days' tracks), else where the map was last looking. The daily run
+        // happens with the app locked, so it used to see no fix and say "no location on this
+        // phone yet" to a person with a trail on.
+        var fixes = com.localghost.app.sync.LocationLog.recent(ctx, 0).map { it.lat to it.lon } +
+            listOfNotNull(com.localghost.app.sync.LocationLog.newest(ctx)?.let { it.lat to it.lon })
+        var from = "your trail on this phone"
+        if (fixes.isEmpty()) {
+            val tracks = runCatching { BoxClient.geoDayTracks(ctx, 5) }.getOrNull() ?: emptyList()
+            fixes = tracks.flatMap { t -> (0 until t.n).map { t.lat[it] to t.lon[it] } }
+            from = "your trail on the box"
+        }
         val centers = MapPlan.centers(fixes)
         if (centers.isEmpty()) {
-            MapPrefetch.note(ctx, "idle", "no location on this phone yet , the outlines are here, tiles follow once the phone knows where you are")
+            MapPrefetch.note(ctx, "idle", "nothing to go on yet: no fix on this phone and no trail on the box , the outlines are here, tiles follow once the box knows where you have been")
             return Result.success()
         }
         val plan = MapPlan.plan(centers, land, roads)
@@ -78,7 +89,11 @@ class MapPrefetchWorker(ctx: Context, params: WorkerParameters) : CoroutineWorke
             // SETTINGS shows this live while it runs
             if (fetched % 10 == 0) MapPrefetch.note(ctx, "running", "$fetched tiles so far this run")
         }
-        MapPrefetch.note(ctx, "done", if (used >= budget) "the size you picked is full" else "everything near you is here")
+        MapPrefetch.note(ctx, "done", when {
+            used >= budget && fetched == 0 -> "the size you picked is already full (${used / 1_000_000} MB of tiles, most from browsing) , pick a bigger size to keep more"
+            used >= budget -> "$fetched tiles this run; the size you picked is full"
+            else -> "$fetched tiles this run around $from; everything near you is here"
+        })
         return Result.success()
     }
 
@@ -116,13 +131,31 @@ object MapPrefetch {
      * line says "queued" until it starts, then counts the tiles as they land.
      */
     fun runNow(ctx: Context) {
+        // the network you are on now: [ download now ] is a person's decision, and a hotel or a
+        // phone's hotspot often counts as metered to Android, where UNMETERED never started and the
+        // line said "starts on Wi-Fi" for ever
         val req = OneTimeWorkRequestBuilder<MapPrefetchWorker>()
-            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.UNMETERED).build())
+            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
             .setBackoffCriteria(BackoffPolicy.LINEAR, 1, TimeUnit.MINUTES)
             .build()
         WorkManager.getInstance(ctx).enqueueUniqueWork(NOW, ExistingWorkPolicy.REPLACE, req)
-        note(ctx, "queued", "starts on Wi-Fi")
+        val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+        val metered = cm?.isActiveNetworkMetered == true
+        note(ctx, "queued", if (metered) "starting on this network (Android counts it as metered)" else "starting now")
     }
+
+    /** What WorkManager says the [ download now ] run is doing: "waiting for a network", "running",
+     *  or "" when nothing is queued , the status line's second opinion when the worker itself
+     *  has not written a note yet. */
+    fun runState(ctx: Context): String = try {
+        val infos = WorkManager.getInstance(ctx).getWorkInfosForUniqueWork(NOW).get()
+        when (infos.firstOrNull()?.state) {
+            androidx.work.WorkInfo.State.ENQUEUED -> "waiting for a network"
+            androidx.work.WorkInfo.State.RUNNING -> "running"
+            androidx.work.WorkInfo.State.BLOCKED -> "waiting"
+            else -> ""
+        }
+    } catch (_: Exception) { "" }
 
 
     fun cancel(ctx: Context) {
@@ -157,9 +190,10 @@ object MapPrefetch {
         val at = p.getLong("at", 0)
         val state = p.getString("state", "") ?: ""
         val why = p.getString("why", "") ?: ""
-        if (at == 0L) return "$mb MB of map on this phone · not downloaded yet (waits for Wi-Fi)"
+        if (at == 0L) return "$mb MB of map on this phone · not downloaded yet (the daily run waits for Wi-Fi; [ download now ] uses this network)"
         val ago = (System.currentTimeMillis() - at) / 60_000
         val whenS = when { ago < 1 -> "just now"; ago < 60 -> "$ago min ago"; ago < 48 * 60 -> "${ago / 60} h ago"; else -> "${ago / 1440} days ago" }
-        return "$mb MB of map on this phone · $state $whenS" + (if (why.isNotEmpty()) ": $why" else "")
+        val live = if (state == "queued" && ago >= 1) runState(ctx).let { if (it.isEmpty()) "" else " · $it" } else ""
+        return "$mb MB of map on this phone · $state $whenS" + (if (why.isNotEmpty()) ": $why" else "") + live
     }
 }

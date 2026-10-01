@@ -13,9 +13,11 @@ object TrailStatus {
         else -> "${sec / 86400} days ago"
     }
 
-    fun fixLine(fixTs: Long?, now: Long): String =
-        if (fixTs == null || fixTs <= 0) "last fix: none this phone can read yet , the next one comes within the quarter hour"
-        else "last fix: " + ago(now - fixTs)
+    fun fixLine(fixTs: Long?, now: Long, lastState: String = ""): String = when {
+        fixTs != null && fixTs > 0 -> "last fix: " + ago(now - fixTs)
+        lastState == "unreadable" -> "last fix: kept, but this phone's own key will not open it (a restore from another phone, or the Keystore refused) , the next fix re-seals it"
+        else -> "last fix: none this phone can read yet , the next one comes within the quarter hour"
+    }
 
     /** How the last hand-over went; [waiting] is what the spool still holds. */
     fun sendLine(at: Long?, what: String?, ok: Boolean?, lastOkAt: Long?, waiting: Int, now: Long): String {

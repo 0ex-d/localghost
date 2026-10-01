@@ -120,8 +120,9 @@ object BoxHttp {
             } catch (e: Exception) { android.util.Log.w("LocalGhost", "GET $path: ${e.message}"); Pair(null, null) }
         }
 
-    suspend fun getJson(ctx: Context, path: String): JSONObject = withContext(Dispatchers.IO) {
+    suspend fun getJson(ctx: Context, path: String, readTimeoutMs: Int = 0): JSONObject = withContext(Dispatchers.IO) {
         val conn = open(ctx, path, "GET")
+        if (readTimeoutMs > 0) conn.readTimeout = readTimeoutMs // a read the box builds on demand (a day's summary)
         readJson(conn)
     }
 

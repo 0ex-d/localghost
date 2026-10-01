@@ -78,13 +78,13 @@ func workRows(service, runDir string) []hw.DaemonKV {
 	}
 	return formatWork(service, m.Work, time.Now(), func(rows []hw.DaemonKV) []hw.DaemonKV {
 		if service == "ghost.framed" {
-			rows = append(rows, hw.DaemonKV{K: "waiting in the spool", V: fmt.Sprintf("%d uploads · %d location batches", m.Waiting.Uploads, m.Waiting.LocationBatches)})
+			rows = append(rows, hw.DaemonKV{K: "waiting in the spool", V: fmt.Sprintf("%d uploads · %d location batches", m.Waiting.Uploads, m.Waiting.LocationBatches), Key: true})
 		}
 		if m.ModelLanes.Resting {
-			rows = append(rows, hw.DaemonKV{K: "model work paused", V: m.ModelLanes.Why})
+			rows = append(rows, hw.DaemonKV{K: "model work paused", V: m.ModelLanes.Why, Key: true})
 		}
 		if m.CaptionLane.Resting {
-			rows = append(rows, hw.DaemonKV{K: "descriptions paused", V: m.CaptionLane.Why})
+			rows = append(rows, hw.DaemonKV{K: "descriptions paused", V: m.CaptionLane.Why, Key: true})
 		}
 		return rows
 	})
@@ -113,17 +113,17 @@ func formatWork(service string, w workcount.Snapshot, now time.Time, tail func([
 	seen := map[string]bool{}
 	for _, l := range workLabels[service] {
 		if k, ok := byKind[l[0]]; ok {
-			rows = append(rows, hw.DaemonKV{K: l[1], V: line(k)})
+			rows = append(rows, hw.DaemonKV{K: l[1], V: line(k), Key: true})
 			seen[l[0]] = true
 		}
 	}
 	for _, k := range w.Kinds {
 		if !seen[k.Kind] {
-			rows = append(rows, hw.DaemonKV{K: k.Kind, V: line(k)})
+			rows = append(rows, hw.DaemonKV{K: k.Kind, V: line(k), Key: true})
 		}
 	}
 	if len(w.Kinds) == 0 {
-		rows = append(rows, hw.DaemonKV{K: "done", V: "nothing yet since it started"})
+		rows = append(rows, hw.DaemonKV{K: "done", V: "nothing yet since it started", Key: true})
 	}
 	if tail != nil {
 		rows = tail(rows)
@@ -204,13 +204,13 @@ func formatGPUUse(model string, ready, onGPU bool, vision *bool, visionWhy strin
 			use += fmt.Sprintf(" of %.1f GB", totalMiB/1024)
 		}
 	}
-	rows = append(rows, hw.DaemonKV{K: "model", V: use})
+	rows = append(rows, hw.DaemonKV{K: "model", V: use, Key: true})
 	rows = append(rows, hw.DaemonKV{K: "used for", V: "chat, photo names and tags, tag categories, day stories, trail and web answers"})
 	if vision != nil {
 		if *vision {
 			rows = append(rows, hw.DaemonKV{K: "sees photos", V: "yes (the projector is loaded): photos are described"})
 		} else {
-			rows = append(rows, hw.DaemonKV{K: "sees photos", V: "NO , " + visionWhy})
+			rows = append(rows, hw.DaemonKV{K: "sees photos", V: "NO , " + visionWhy, Key: true})
 		}
 	}
 	rows = append(rows, hw.DaemonKV{K: "on the CPU by choice", V: "search embeddings and voice transcription (the card's memory is the chat model's)"})

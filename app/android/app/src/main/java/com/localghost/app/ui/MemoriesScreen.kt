@@ -331,6 +331,7 @@ private fun CheckinCard(history: List<BoxClient.CheckinRow>, onSaved: () -> Unit
     val scope = rememberCoroutineScope()
     val today = remember { java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date()) }
     var done by remember { mutableStateOf(com.localghost.app.settings.AppSettings.lastCheckinDay(ctx) == today) }
+    var justSaved by remember { mutableStateOf(false) } // this open saved it: write the day up now
     var open by remember { mutableStateOf(true) }
     var why by remember { mutableStateOf("") }
     var prefilled by remember { mutableStateOf(false) }
@@ -375,6 +376,12 @@ private fun CheckinCard(history: List<BoxClient.CheckinRow>, onSaved: () -> Unit
         Column(Modifier.fillMaxWidth().animateContentSize()) {
             Text("✓ checked in today", color = TerminalDim, style = MaterialTheme.typography.labelMedium)
             Spacer(Modifier.height(4.dp))
+            // YOUR DAY, written up: once the check-in is in, the box folds the photos, the
+            // trail, the health sync, the voice notes and what you said into one telling of the
+            // day (synthd days.go). Written on request right after the check-in (a minute or
+            // two: it waits for the check-in to land, then the model writes); read back after.
+            DayStoryCard(today, justSaved = justSaved)
+            Spacer(Modifier.height(8.dp))
             VoiceRecorder(hint = "say more about today , kept and transcribed on your box",
                 saveLabel = "[ save to today's journal ]", onSave = { take ->
                     VoiceNotes.enqueue(ctx, take, "journal", today)
@@ -446,6 +453,7 @@ private fun CheckinCard(history: List<BoxClient.CheckinRow>, onSaved: () -> Unit
                                 VoiceCapture.taken()
                             }
                             com.localghost.app.settings.AppSettings.setLastCheckinDay(ctx, today)
+                            justSaved = true
                             done = true
                             if (take != null) VoiceNotes.uploadPending(ctx)
                             onSaved()
@@ -456,6 +464,56 @@ private fun CheckinCard(history: List<BoxClient.CheckinRow>, onSaved: () -> Unit
                     }
                 })
             if (note.isNotEmpty()) Text(note, color = TerminalDim, style = MaterialTheme.typography.labelMedium)
+        }
+    }
+}
+
+/** The day, told by the box after the check-in. [justSaved]: ask the box to write it now (the
+ *  voice note, if any, is still being transcribed; the story is written again by the nightly pass
+ *  once it lands). Otherwise read what is there. */
+@Composable
+private fun DayStoryCard(day: String, justSaved: Boolean) {
+    val ctx = LocalContext.current
+    var story by remember { mutableStateOf<BoxClient.DayStory?>(null) }
+    var state by remember { mutableStateOf(if (justSaved) "writing" else "reading") }
+    var open by remember { mutableStateOf(true) }
+    LaunchedEffect(day, justSaved) {
+        if (justSaved) {
+            // the voice note's upload goes first, so the transcript can be in the telling
+            kotlinx.coroutines.delay(2_000)
+            val s = BoxClient.dayStory(ctx, day, build = true)
+            story = s
+            state = if (s == null) "failed" else if (s.summary.isBlank()) "empty" else "ok"
+        } else {
+            val s = BoxClient.dayStory(ctx, day)
+            story = s
+            state = if (s == null) "failed" else if (s.summary.isBlank()) "empty" else "ok"
+        }
+    }
+    Column(Modifier.fillMaxWidth().border(1.dp, GhostBorder, RectangleShape).background(Void).padding(12.dp)) {
+        Text(if (open) "[ − your day, as the box tells it ]" else "[ + your day, as the box tells it ]",
+            color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
+            modifier = Modifier.clickable { open = !open })
+        if (open) {
+            Spacer(Modifier.height(6.dp))
+            when (state) {
+                "writing" -> Text("writing up your day from the photos, the trail, the health sync, your voice note and what you just said… a minute or two",
+                    color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+                "reading" -> Text("reading…", color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+                "failed" -> Text("! the box did not answer , the day is written by the nightly pass anyway; it will be here tomorrow, and in MEMORIES",
+                    color = TerminalDim, style = MaterialTheme.typography.labelMedium)
+                "empty" -> Text("nothing to tell yet , the day is written once there are photos, a trail or a check-in on the box",
+                    color = TerminalDim, style = MaterialTheme.typography.labelMedium)
+                else -> story?.let { s ->
+                    if (s.title.isNotBlank()) Text(s.title, color = GhostText, style = MaterialTheme.typography.titleMedium)
+                    Spacer(Modifier.height(4.dp))
+                    Text(s.summary, color = GhostText, style = MaterialTheme.typography.bodyMedium)
+                    Spacer(Modifier.height(4.dp))
+                    Text(if (s.writtenBy == "model") "written by the box's model from the day's facts · it is in MEMORIES"
+                        else "the day's facts, in the box's plain words · the model writes it up in the evening pass",
+                        color = TerminalDim, style = MaterialTheme.typography.labelMedium)
+                }
+            }
         }
     }
 }

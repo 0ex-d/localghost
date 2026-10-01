@@ -23,6 +23,7 @@ import (
 	"github.com/LocalGhostDao/localghost/server/internal/ctlsock"
 	"github.com/LocalGhostDao/localghost/server/internal/gpu"
 	"github.com/LocalGhostDao/localghost/server/internal/hw"
+	"github.com/LocalGhostDao/localghost/server/internal/tally"
 	"io"
 	"net/http"
 	"os"
@@ -1189,8 +1190,16 @@ func (s *Server) handleHealthUpload(w http.ResponseWriter, r *http.Request) {
 		s.appearsDown(w)
 		return
 	}
+	// a batch, not any JSON: the reply says how many days and samples were spooled, so the phone
+	// can show "shipped 7 days" from what the box took rather than from what it sent
+	batch, ok := tally.Parse(body)
+	if !ok || (len(batch.Days) == 0 && len(batch.Samples) == 0) {
+		http.Error(w, "a health batch has days and/or samples", http.StatusBadRequest)
+		return
+	}
+	// written whole, then named into place: tallyd's drain never sees half a file
 	path := filepath.Join(inbox, fmt.Sprintf("health-%d.json", time.Now().UnixNano()))
-	if err := os.WriteFile(path, body, 0o640); err != nil {
+	if err := os.WriteFile(path+".part", body, 0o640); err != nil {
 		s.appearsDown(w)
 		return
 	}
@@ -1198,12 +1207,17 @@ func (s *Server) handleHealthUpload(w http.ResponseWriter, r *http.Request) {
 		if u, uerr := user.Lookup(s.cfg.RunUser); uerr == nil {
 			uid, _ := strconv.Atoi(u.Uid)
 			gid, _ := strconv.Atoi(u.Gid)
-			_ = os.Chown(path, uid, gid)
+			_ = os.Chown(path+".part", uid, gid)
 			_ = os.Chown(inbox, uid, gid)
 		}
 	}
+	if err := os.Rename(path+".part", path); err != nil {
+		_ = os.Remove(path + ".part")
+		s.appearsDown(w)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "days": len(batch.Days), "samples": len(batch.Samples)})
 }
 
 // handleHealthStats , GET /v1/health/stats?days=N , daily series per metric for the HEALTH screen.
@@ -1365,7 +1379,8 @@ func (s *Server) handleDaemonSummary(w http.ResponseWriter, r *http.Request) {
 		kv = kv[:0]
 		rows := gpu.Diagnose().Rows()
 		for i, row := range rows {
-			kv = append(kv, hw.DaemonKV{K: row[0], V: row[1]})
+			// the verdict first, then the model on the card: what a glance needs
+			kv = append(kv, hw.DaemonKV{K: row[0], V: row[1], Key: i == 0})
 			if i == 0 {
 				// right under the verdict: what the box uses the card for (oracled's `models`)
 				kv = append(kv, gpuUseRows(fmt.Sprintf("%s/mnt/slot%d/run", s.cfg.StateDir, mounted))...)
@@ -1420,8 +1435,8 @@ func engineRows(runDir string) []hw.DaemonKV {
 		return []hw.DaemonKV{{K: "engine", V: "oracled answered something this build does not read"}}
 	}
 	rows := []hw.DaemonKV{
-		{K: "model", V: m.Model + map[bool]string{true: " · ready", false: " · loading"}[m.Ready]},
-		{K: "runs", V: m.Verdict},
+		{K: "model", V: m.Model + map[bool]string{true: " · ready", false: " · loading"}[m.Ready], Key: true},
+		{K: "runs", V: m.Verdict, Key: true},
 	}
 	if len(m.Engine.Devices) > 1 {
 		rows = append(rows, hw.DaemonKV{K: "devices", V: strings.Join(m.Engine.Devices, "; ")})
@@ -1429,7 +1444,7 @@ func engineRows(runDir string) []hw.DaemonKV {
 	if m.Engine.CPUMiB > 0 {
 		rows = append(rows, hw.DaemonKV{K: "left on the CPU", V: fmt.Sprintf("%.0f MiB of model buffers", m.Engine.CPUMiB)})
 	}
-	rows = append(rows, hw.DaemonKV{K: "speed", V: m.Speed})
+	rows = append(rows, hw.DaemonKV{K: "speed", V: m.Speed, Key: true})
 	if m.Stats.Inferences > 0 {
 		rows = append(rows, hw.DaemonKV{K: "generation", V: fmt.Sprintf("%.1f tok/s last · %.1f tok/s over the last %d · prompt %.0f tok/s", m.Stats.TokPerSecLast, m.Stats.TokPerSecAvg, min(m.Stats.Inferences, 20), m.Stats.PromptTokPerSec)})
 		rows = append(rows, hw.DaemonKV{K: "answers since start", V: fmt.Sprintf("%d · last %s", m.Stats.Inferences, m.Stats.LastAt)})

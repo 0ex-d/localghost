@@ -795,7 +795,13 @@ func main() {
 			if a.Pass {
 				lastDayPass = time.Time{}
 				oc := oracle.NewClient(runDir, 2*time.Minute)
-				built, wrote, err := daySummaryPass(db, oc, mount, lg)
+				var built, wrote int
+				var err error
+				if a.Day != "" {
+					built, wrote, err = daySummaryPass(db, oc, mount, lg, a.Day) // that day, now, whatever the hour
+				} else {
+					built, wrote, err = daySummaryPass(db, oc, mount, lg)
+				}
 				if err != nil {
 					return ctlsock.Response{OK: false, Err: err.Error()}, nil
 				}

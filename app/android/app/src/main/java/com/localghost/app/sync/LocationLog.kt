@@ -109,6 +109,15 @@ object LocationLog {
         return parseLine(line)
     }
 
+    /** Whether the phone holds a last point and can open it: "none", "ok", or "unreadable" (a
+     *  point is kept but this phone's own hardware key will not open it: a restore from another
+     *  phone, or a Keystore that refused; the next fix re-seals it). SETTINGS says which. */
+    fun lastState(ctx: Context): String {
+        val sealed = prefs(ctx).getString("last_sealed", null)
+        if (sealed.isNullOrEmpty()) return "none"
+        return if (com.localghost.app.security.DeviceSealed.open(sealed) != null) "ok" else "unreadable"
+    }
+
     /** Before 30 Sep 2026 the last point and the country's reference point were kept in the clear. */
     private fun migratePlainState(ctx: Context) {
         val p = prefs(ctx)

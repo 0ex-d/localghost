@@ -211,6 +211,69 @@ func (s *Server) handleDays(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"days": rowsOut})
 }
 
+// handleDay , GET /v1/day?d=YYYY-MM-DD[&build=1] , one day's summary: what synthd wrote from the
+// photos, the trail, the health sync, the voice notes and the check-in (days.go). With build=1
+// the box writes it NOW: the check-in just landed and the person is waiting to read their day.
+// That waits for noted to take the check-in from its inbox (a 30 s tick), then asks synthd for
+// the day, which takes the model a minute or two; the phone's read timeout covers it.
+func (s *Server) handleDay(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodGet {
+		s.appearsDown(w)
+		return
+	}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		s.appearsDown(w)
+		return
+	}
+	day := r.URL.Query().Get("d")
+	if _, err := time.Parse("2006-01-02", day); err != nil {
+		http.Error(w, "d=YYYY-MM-DD", http.StatusBadRequest)
+		return
+	}
+	built := false
+	if r.URL.Query().Get("build") == "1" {
+		// the check-in first: it goes through noted's inbox, and the day told without it is
+		// not the day the person just described
+		checked := false
+		for i := 0; i < 15; i++ {
+			if ok, _ := s.notif.CheckedIn(mounted, day); ok {
+				checked = true
+				break
+			}
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(3 * time.Second):
+			}
+		}
+		runDir := fmt.Sprintf("%s/mnt/slot%d/run", s.cfg.StateDir, mounted)
+		c := ctlsock.NewClientTimeout("ghost.synthd", runDir, 4*time.Minute)
+		if resp, err := c.Call("days", map[string]any{"day": day, "pass": true}); err != nil || !resp.OK {
+			why := ""
+			if err != nil {
+				why = err.Error()
+			} else {
+				why = resp.Err
+			}
+			secdLog.Warn("day build failed", "fn", "handleDay", "day", day, "checkedIn", checked, "err", why)
+		} else {
+			built = true
+		}
+	}
+	row, err := s.notif.DayOne(mounted, day)
+	if err != nil {
+		secdLog.Warn("day read failed", "fn", "handleDay", "day", day, "err", err)
+		s.appearsDown(w)
+		return
+	}
+	checked, _ := s.notif.CheckedIn(mounted, day)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"day": row, "checkedIn": checked, "built": built})
+}
+
 // handleMemoryDelete , POST /v1/memories/delete {"id":N} , tombstone, never resurrectable.
 func (s *Server) handleMemoryDelete(w http.ResponseWriter, r *http.Request) {
 	if !s.session.Valid(bearer(r)) || r.Method != http.MethodPost {

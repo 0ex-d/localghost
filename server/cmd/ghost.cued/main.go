@@ -182,6 +182,7 @@ func main() {
 	// quiet mornings, not filler). Once per day, morning hours only, and answering is optional ,
 	// a reflection is an offering, not homework.
 	go reflectionLoop(ctx, filepath.Dir(runDir), store, cfg.Slot, lg)
+	go nearbyLoop(ctx, filepath.Dir(runDir), store, cfg.Slot, lg)
 
 	ctl.Handle("nominate", func(args json.RawMessage) (ctlsock.Response, error) {
 		var a struct {
@@ -287,14 +288,17 @@ func reflectionLoop(ctx context.Context, mount string, store *hw.NotifStore, slo
 			}
 			return *rows.Vals[0][0], *rows.Vals[0][1], true
 		}
+		// synthd writes a day as kind 'day' with source_ref 'day:<date>' (days.go); the 'episode'
+		// kind this read until 1 Oct 2026 was retired with the old episode pass, so every morning
+		// found nothing, marked the day done, and the box never reflected on anything.
 		yearAgo := time.Now().AddDate(-1, 0, 0).Format("2006-01-02")
 		title, body, ok := pick(
-			"SELECT title, body FROM memories WHERE kind = 'episode' AND NOT tombstoned AND source_ref = $1",
-			"episode:"+yearAgo)
+			"SELECT title, body FROM memories WHERE kind IN ('day','episode') AND NOT tombstoned AND source_ref IN ($1, $2)",
+			"day:"+yearAgo, "episode:"+yearAgo)
 		head := "one year ago today"
 		if !ok {
 			title, body, ok = pick(
-				"SELECT title, body FROM memories WHERE kind = 'episode' AND NOT tombstoned AND created_at < $1 ORDER BY random() LIMIT 1",
+				"SELECT title, body FROM memories WHERE kind IN ('day','episode') AND NOT tombstoned AND created_at < $1 ORDER BY random() LIMIT 1",
 				time.Now().AddDate(0, 0, -30).UnixMilli())
 			head = "a day worth revisiting"
 		}
@@ -334,4 +338,62 @@ func findMount(start string) string {
 		d = nd
 	}
 	return ""
+}
+
+// nearbyLoop is "something fun close by that you have not been to". Every half hour it reads the
+// phone's newest trail point; when that is fresh (the phone is somewhere now, not last week) and
+// away from home, it ranks the spots around it against the taste synthd drew from the photos
+// (internal/outings, the same ranking the MEMORIES near-you card uses), keeps the ones with no
+// photo of yours within a kilometre and no trail point of yours within a couple of hundred
+// metres, and offers the best one not offered before. At most one a day, and never before
+// 09:00 or after 20:00 box time: a suggestion at midnight is noise.
+func nearbyLoop(ctx context.Context, mount string, store *hw.NotifStore, slot int, lg *slog.Logger) {
+	t := time.NewTicker(30 * time.Minute)
+	defer t.Stop()
+	var db *poltergres.ReadWrite
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		h := time.Now().Hour()
+		if h < 9 || h > 20 {
+			continue
+		}
+		today := time.Now().Format("2006-01-02")
+		if v, err := store.GetSetting(slot, "cued_nearby_day"); err == nil && v == today {
+			continue
+		}
+		if db == nil {
+			m := findMount(mount)
+			if m == "" {
+				continue
+			}
+			sc, err := hw.LoadServicesConfig(m)
+			if err != nil {
+				continue
+			}
+			db = poltergres.NewReadWrite(hw.SocketForMount(m), sc.Postgres.Port, sc.Postgres.RWUser, sc.Postgres.RWPass, sc.Postgres.Name)
+		}
+		sent, _ := store.GetSetting(slot, "cued_nearby_sent")
+		n, why, err := cued.OfferNearby(db, sent, time.Now())
+		if err != nil {
+			lg.Warn("nearby: could not look", "fn", "nearbyLoop", "err", err)
+			db = nil
+			continue
+		}
+		if n == nil {
+			lg.Debug("nearby: nothing to offer", "fn", "nearbyLoop", "why", why)
+			continue
+		}
+		if err := store.Produce(slot, *n); err != nil {
+			lg.Warn("nearby produce failed", "fn", "nearbyLoop", "err", err)
+			db = nil
+			continue
+		}
+		lg.Info("nearby offered", "fn", "nearbyLoop", "title", n.Title)
+		_ = store.SetSetting(slot, "cued_nearby_day", today)
+		_ = store.SetSetting(slot, "cued_nearby_sent", cued.RememberSent(sent, why))
+	}
 }

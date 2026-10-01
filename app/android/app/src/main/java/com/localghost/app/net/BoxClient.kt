@@ -20,7 +20,7 @@ import java.io.InputStream
 import org.json.JSONObject
 
 data class PendingNotification(val daemonId: String, val title: String, val body: String,
-    val id: Long = 0, val kind: String = "message")
+    val id: Long = 0, val kind: String = "message", val seen: Boolean = false, val created: Long = 0)
 
 /** A saved conversation. Lives on the box (synthd); the phone lists + loads, holds the active
  *  one in memory only. */
@@ -36,7 +36,6 @@ data class DeviceInfo(
 )
 
 /** Settings, owned by the box (persona-scoped), reflected on the phone. */
-data class BoxSettings(val allowMobileSync: Boolean, val notificationsMuted: Boolean)
 
 /** A capability the chat turn may use. reachBeyondBox is the only one that leaves the box. */
 data class ChatCapabilities(
@@ -679,6 +678,28 @@ object BoxClient {
         } catch (_: Exception) { emptyList() }
     }
 
+    /** The notification HISTORY (GET /v1/notifications/list): everything the box's daemons said,
+     *  newest first, seen or not. Reading it consumes nothing; the push cursor (pollPending) is
+     *  separate. This is what the NOTIFICATIONS screen shows; it used to show the push cursor,
+     *  which the phone's own pollers had already used up, so the screen was always empty. */
+    suspend fun notificationHistory(ctx: Context): List<PendingNotification>? = try {
+        val r = BoxHttp.getJson(ctx, "/v1/notifications/list")
+        val a = r.optJSONArray("notifications") ?: org.json.JSONArray()
+        (0 until a.length()).mapNotNull { i ->
+            val o = a.optJSONObject(i) ?: return@mapNotNull null
+            PendingNotification(o.optString("service", "ghost.secd"), o.optString("title"), o.optString("body"),
+                o.optLong("id"), o.optString("kind", "message"), o.optBoolean("seen", false), o.optLong("created", 0L))
+        }
+    } catch (_: Exception) { null }
+
+    suspend fun notificationSeen(ctx: Context, id: Long): Boolean = try {
+        BoxHttp.postJson(ctx, "/v1/notifications/seen", org.json.JSONObject().put("id", id)).optBoolean("ok", false)
+    } catch (_: Exception) { false }
+
+    suspend fun notificationDelete(ctx: Context, id: Long): Boolean = try {
+        BoxHttp.postJson(ctx, "/v1/notifications/delete", org.json.JSONObject().put("id", id)).optBoolean("ok", false)
+    } catch (_: Exception) { false }
+
     // --- sync ---
     /** Rewind THIS device's sync cursors on the box , the next run re-offers everything from the
      *  beginning and hash dedup archives only the gap. */
@@ -926,6 +947,18 @@ object BoxClient {
             r.optInt("steps"), r.optInt("sleep_minutes"), r.optInt("exercise_minutes"), arr("suggested"))
     } catch (_: Exception) { null }
 
+    /** One day as the box tells it (GET /v1/day): the summary synthd wrote from the photos, the
+     *  trail, the health sync, the voice notes and the check-in. [build] asks the box to write it
+     *  NOW (the check-in just landed): the box waits for the check-in to land in the journal and
+     *  the model writes the day, a minute or two, so the read timeout is long. */
+    data class DayStory(val day: String, val title: String, val summary: String, val writtenBy: String, val builtAt: Long, val checkedIn: Boolean)
+
+    suspend fun dayStory(ctx: Context, day: String, build: Boolean = false): DayStory? = try {
+        val r = BoxHttp.getJson(ctx, "/v1/day?d=$day" + (if (build) "&build=1" else ""), readTimeoutMs = if (build) 300_000 else 20_000)
+        val d = r.optJSONObject("day") ?: org.json.JSONObject()
+        DayStory(d.optString("day", day), d.optString("title"), d.optString("summary"), d.optString("writtenBy"), d.optLong("builtAt"), r.optBoolean("checkedIn", false))
+    } catch (_: Exception) { null }
+
     data class OtdYear(val year: Int, val yearsAgo: Int, val narrative: String,
         val places: List<String>, val photos: List<String>, val notes: List<String>,
         val title: String = "", val line: String = "")
@@ -1092,12 +1125,13 @@ object BoxClient {
     } catch (e: Exception) { android.util.Log.w("LocalGhost", "pipeline: ${e.message}"); null }
 
     /** Per-daemon drill-in rows for the Box Status detail screens. */
-    suspend fun daemonSummary(ctx: Context, name: String): List<Pair<String, String>>? = try {
+    /** The drill-in rows; key marks the rows the box wants read first (the rest fold behind "more"). */
+    suspend fun daemonSummary(ctx: Context, name: String): List<com.localghost.app.ui.DaemonRows.Row>? = try {
         val r = BoxHttp.getJson(ctx, "/v1/daemon/summary?name=$name")
         val a = r.optJSONArray("rows") ?: org.json.JSONArray()
         (0 until a.length()).mapNotNull { i ->
             val o = a.optJSONObject(i) ?: return@mapNotNull null
-            Pair(o.optString("k"), o.optString("v"))
+            com.localghost.app.ui.DaemonRows.Row(o.optString("k"), o.optString("v"), o.optBoolean("key", false))
         }
     } catch (_: Exception) { null }
 
@@ -1696,14 +1730,6 @@ object BoxClient {
 
     // --- settings (box-owned, persona-scoped; phone caches for offline) ---
 
-    suspend fun settings(@Suppress("UNUSED_PARAMETER") ctx: Context): BoxSettings {
-        delay(120); return BoxSettings(allowMobileSync = false, notificationsMuted = false)
-    }
-
-    suspend fun setSettings(
-        @Suppress("UNUSED_PARAMETER") ctx: Context,
-        @Suppress("UNUSED_PARAMETER") s: BoxSettings,
-    ): Boolean { delay(200); return true }
 
     // --- on-phone models (served by the box) ---
 
@@ -1781,30 +1807,11 @@ object BoxClient {
      * Pull the full index/memories from the box as JSON. STUB returns a representative
      * dump. Real: authenticated GET against the box; the daemons serialise their index.
      */
-    suspend fun exportJson(@Suppress("UNUSED_PARAMETER") ctx: Context): String {
-        delay(500)
-        return """
-{
-  "export_version": 1,
-  "source": "localghost.box",
-  "generated": "${'$'}{System.currentTimeMillis()}",
-  "life_context": { "memories": 1284, "photos": 8421, "videos": 142, "voice_notes": 63 },
-  "memories": [
-    { "id": "m1", "daemon": "ghost.framed", "when": "today", "title": "Morning dive, Isabela" },
-    { "id": "m2", "daemon": "ghost.voiced", "when": "2 days ago", "title": "Voice note - boat idea" }
-  ],
-  "note": "stub export - ghost.secd will return the full signed index"
-}
-""".trimIndent()
-    }
 
     /**
      * Destroy the persona's wrapping key on the box (crypto-erase) and clear local state.
      * STUB: returns true. Real: authenticated wipe command; the box destroys the key slot.
      */
-    suspend fun wipeEverything(@Suppress("UNUSED_PARAMETER") ctx: Context): Boolean {
-        delay(800); return true
-    }
 
     /**
      * Change the PIN. On the box this re-derives the persona key under a new PIN, which

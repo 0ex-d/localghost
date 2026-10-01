@@ -20,6 +20,10 @@ func TestStreamChatCarriesHistory(t *testing.T) {
 			Content any    `json:"content"`
 		} `json:"messages"`
 		Stream bool `json:"stream"`
+		Kwargs struct {
+			EnableThinking *bool `json:"enable_thinking"`
+		} `json:"chat_template_kwargs"`
+		MaxTokens int `json:"max_tokens"`
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -58,7 +62,35 @@ func TestStreamChatCarriesHistory(t *testing.T) {
 		t.Fatalf("turn 1 = %+v", got.Messages[1])
 	}
 	last, _ := got.Messages[2].Content.(string)
-	if got.Messages[2].Role != "user" || !strings.HasSuffix(last, "which is longest?") || !strings.Contains(last, "<think>") {
-		t.Fatalf("current turn must carry the think wrapper and the prompt: %+v", got.Messages[2])
+	if got.Messages[2].Role != "user" || !strings.HasSuffix(last, "which is longest?") || !strings.Contains(last, "Think briefly") {
+		t.Fatalf("current turn must carry the think instruction and the prompt: %+v", got.Messages[2])
+	}
+	if got.Kwargs.EnableThinking == nil || !*got.Kwargs.EnableThinking || got.MaxTokens != 2048 {
+		t.Fatalf("brief: thinking %v budget %d", got.Kwargs.EnableThinking, got.MaxTokens)
+	}
+	// off: the native reasoning channel is closed and the prompt goes as it is
+	got.MaxTokens = 0
+	out, _, err = b.StreamChat(context.Background(), nil, "which is longest?", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = out.Close()
+	if got.Kwargs.EnableThinking == nil || *got.Kwargs.EnableThinking || got.MaxTokens != 0 {
+		t.Fatalf("off: thinking %v budget %d", got.Kwargs.EnableThinking, got.MaxTokens)
+	}
+	if c, _ := got.Messages[0].Content.(string); c != "which is longest?" {
+		t.Fatalf("off: prompt %q", c)
+	}
+	// deep: the channel open, the long instruction, the big budget
+	out, _, err = b.StreamChat(context.Background(), nil, "which is longest?", "deep", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = out.Close()
+	if got.Kwargs.EnableThinking == nil || !*got.Kwargs.EnableThinking || got.MaxTokens != 8192 {
+		t.Fatalf("deep: thinking %v budget %d", got.Kwargs.EnableThinking, got.MaxTokens)
+	}
+	if c, _ := got.Messages[0].Content.(string); !strings.Contains(c, "at length") {
+		t.Fatalf("deep: prompt %q", c)
 	}
 }

@@ -109,7 +109,10 @@ object HealthSync {
         val zone = ZoneId.systemDefault()
         val fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd")
         val now = toT ?: Instant.now()
-        val from = fromT ?: now.minusSeconds(7L * 86400)
+        // the window starts at a LOCAL MIDNIGHT: the daily buckets below are cut from its start,
+        // and a window that began at the time of day the sync ran cut the days at that hour,
+        // filed each under the date it began, and rewrote a day's total at every sync
+        val from = fromT ?: now.atZone(zone).toLocalDate().minusDays(7).atStartOfDay(zone).toInstant()
         val range = TimeRangeFilter.between(from, now)
         val days = HashMap<String, HashMap<String, Double>>()
         fun bucket(t: Instant): HashMap<String, Double> {
@@ -143,7 +146,7 @@ object HealthSync {
         // may inflate there, which the skipped-list names honestly.
         var aggregated = false
         try {
-            val zStart = from.atZone(zone).toLocalDateTime()
+            val zStart = from.atZone(zone).toLocalDate().atStartOfDay()
             val zEnd = now.atZone(zone).toLocalDateTime()
             val buckets = client.aggregateGroupByPeriod(
                 AggregateGroupByPeriodRequest(
@@ -211,22 +214,20 @@ object HealthSync {
         // Heart rate: DAILY avg/min/max into metrics, plus the raw series THINNED to 5-minute
         // buckets as samples , a watch-day is ~1440 readings, thinning keeps a week's upload at a
         // few thousand points while preserving the shape of the day.
-        val hrSamples = ArrayList<Triple<String, Long, Double>>()
+        // one reading per five-minute bucket, whichever source wrote it (a watch and a phone both
+        // writing gave the same bucket twice, and the box refused the whole batch)
+        val hrBuckets = java.util.TreeMap<Long, Double>()
         val hrByDay = HashMap<String, MutableList<Double>>()
-        var lastBucket = 0L
         tryRead("heart rate", HeartRateRecord::class) { recs ->
           recs.forEach { r ->
             r.samples.forEach { smp ->
                 val d = smp.time.atZone(zone).toLocalDate().format(fmt)
                 hrByDay.getOrPut(d) { ArrayList() }.add(smp.beatsPerMinute.toDouble())
-                val bucket = smp.time.epochSecond / 300 * 300
-                if (bucket != lastBucket) {
-                    lastBucket = bucket
-                    hrSamples.add(Triple("heart_rate", bucket, smp.beatsPerMinute.toDouble()))
-                }
+                hrBuckets.putIfAbsent(smp.time.epochSecond / 300 * 300, smp.beatsPerMinute.toDouble())
             }
           }
         }
+        val hrSamples = hrBuckets.map { (b, v) -> Triple("heart_rate", b, v) }
         hrByDay.forEach { (d, vals) ->
             if (vals.isNotEmpty()) {
                 val m = days.getOrPut(d) { HashMap() }
@@ -266,13 +267,44 @@ object HealthSync {
         days.entries.removeAll { (_, m) -> m.keys.all { it == "calories" } }
         when {
             days.isEmpty() && hrSamples.isEmpty() ->
-                SyncResult(0, skipped, if (skipped.size >= 8) "every record type failed , re-check permissions" else null)
-            BoxClient.healthUpload(ctx, days, hrSamples) -> SyncResult(days.size, skipped, calOnlyDays = calOnly)
-            else -> SyncResult(0, skipped, "box unreachable , is it unlocked?")
+                SyncResult(0, skipped, if (skipped.size >= 8) "every record type failed , re-check permissions" else null).also { noteRun(ctx, it, days) }
+            BoxClient.healthUpload(ctx, days, hrSamples) -> SyncResult(days.size, skipped, calOnlyDays = calOnly).also { noteRun(ctx, it, days) }
+            else -> SyncResult(0, skipped, "box unreachable , is it unlocked?").also { noteRun(ctx, it, days) }
         }
     } catch (e: Exception) {
         android.util.Log.w("LocalGhost", "health sync: ${e.message}")
         SyncResult(0, emptyList(), e.message ?: "health sync failed")
+    }
+
+    // --- the record of the last run, and the daily run ---
+
+    private const val PREFS = "lg_health"
+
+    /** How the last sync went: when, how many days, the newest day, and what went wrong. */
+    data class LastRun(val at: Long, val days: Int, val newestDay: String, val error: String, val skipped: String)
+
+    private fun noteRun(ctx: Context, r: SyncResult, days: Map<String, *>) {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putLong("at", System.currentTimeMillis() / 1000).putInt("days", r.days)
+            .putString("newest", days.keys.maxOrNull() ?: "").putString("error", r.error ?: "")
+            .putString("skipped", r.skipped.joinToString(", ")).apply()
+    }
+
+    fun lastRun(ctx: Context): LastRun? {
+        val p = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val at = p.getLong("at", 0L)
+        if (at <= 0) return null
+        return LastRun(at, p.getInt("days", 0), p.getString("newest", "") ?: "", p.getString("error", "") ?: "", p.getString("skipped", "") ?: "")
+    }
+
+    /** Ships the last week every six hours, in the background, while the permissions are there
+     *  and a box is enrolled. It used to ship only when a button was pressed, so a watch's days
+     *  reached the box only on the days the person remembered. */
+    fun schedule(ctx: Context) {
+        val req = androidx.work.PeriodicWorkRequestBuilder<HealthWorker>(6, java.util.concurrent.TimeUnit.HOURS)
+            .setConstraints(androidx.work.Constraints.Builder().setRequiresBatteryNotLow(true).build())
+            .build()
+        androidx.work.WorkManager.getInstance(ctx).enqueueUniquePeriodicWork("localghost.health", androidx.work.ExistingPeriodicWorkPolicy.KEEP, req)
     }
 
     /**
@@ -331,5 +363,16 @@ object HealthSync {
         one("calories", TotalCaloriesBurnedRecord::class) { it.startTime }
         one("distance", DistanceRecord::class) { it.startTime }
         return out
+    }
+}
+
+/** The background health sync: the last seven days, when Health Connect is here and allowed. */
+class HealthWorker(ctx: Context, params: androidx.work.WorkerParameters) : androidx.work.CoroutineWorker(ctx, params) {
+    override suspend fun doWork(): Result {
+        val ctx = applicationContext
+        if (!HealthSync.available(ctx) || !com.localghost.app.security.BoxConfig.isConfigured(ctx)) return Result.success()
+        if (HealthSync.grantedCount(ctx) == 0) return Result.success()
+        HealthSync.sync(ctx)
+        return Result.success()
     }
 }

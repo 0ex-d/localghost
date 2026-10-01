@@ -3836,3 +3836,120 @@ Tested: `TestTrailReportSaysTheLastPointAndTheGaps`, `TestTrailReportSaysHowTheP
 `TestValidVia`, `TestLocationBatchOpened` (via through a sealed batch), `TestViaStoredAndSummarised`
 against Postgres (stored, read back, the drill-in's lines), `TrailLineTest`, `TrailStatusTest`
 (the today and holds lines).
+
+## Thinking was never switched on; the phone's notifications read the wrong list; cued said nothing (oracled, secd, hw, cued, app)
+
+Vlad: "it looks like my setting for thinking from settings does not work ... notifications queue
+does not seem to be there when i look at notifications, i expect cued to tell me when it's
+something fun close by that i have not been to yet".
+
+- Thinking. The app sent `think` ("", "brief", "deep") all the way to oracled and oracled set a
+  token budget from it and nothing else. gemma's reasoning channel is opened by
+  `chat_template_kwargs.enable_thinking`, which was never sent, so the model reasoned or did not
+  by its own default whatever the setting said. `applyThink` now returns the flag as well: off
+  closes the channel (and the budget stays at the caller's), brief opens it with 2048, deep with
+  8192. One-shot `Infer` does the same; the multimodal path ignores the flag (the projector has no
+  reasoning channel). `TestStreamChatCarriesHistory` asserts the flag and budget for all three.
+- Notifications. The app's NOTIFICATIONS screen read the push cursor (`/v1/notifications/poll`),
+  which consumes what it returns, so a notification the phone had already been pushed was not
+  there when the person came to look. The screen now reads `/v1/notifications/list` (the history,
+  seen or not), marks a row seen with `/v1/notifications/seen` and deletes with
+  `/v1/notifications/delete`. On the box, `NotifStore.PushBatch` read only the Redis list, so a
+  notification a daemon wrote straight into Postgres (framed, shadowd, watchd) never reached the
+  phone; it reads the rows since the phone's cursor now, the Redis list only when Postgres fails.
+  Mute and mobile-data sync are this phone's own: a stub "box settings" read at unlock used to put
+  both back to off, so mute undid itself. Gone.
+- cued. Its reflection loop asked for `kind = 'episode'`, a kind synthd retired (the day story is
+  `kind = 'day'`), so it found nothing to reflect on. It reads both. And it now offers something
+  new nearby once a day (`internal/cued/nearby.go`, `OfferNearby`): between 09:00 and 20:00, when
+  the trail's newest point is under 45 min old, it ranks the places within 12 km by synthd's taste
+  (the same ranking as MEMORIES › near you), skips what the photos say the person has been to,
+  what the trail passed within 200 m, what is under the phone, and what it offered before (the
+  last 60, in `settings.cued_nearby_sent`), and posts one notification (kind `nearby`, tapping it
+  opens MEMORIES). No taste yet (synthd builds it from the tagged photos) means no offer, and the
+  reason is in cued's log.
+
+Tested: `TestStreamChatCarriesHistory` (brief/off/deep), `TestOfferNearbyAgainstPostgres` (been
+there, too close, offered before, passed by, the offer), `TestRememberSent`.
+
+## Health: the watch's data reaches the box, and stays (tallyd, secd, hw, app)
+
+Vlad: "i still can't get my health data properly from my watch".
+
+Several things, each enough on its own:
+- The phone only sent health when a button was tapped. `HealthWorker` now runs every 6 h
+  (`localghost.health`, scheduled at start) and sends the last week; the last run's outcome is
+  kept (`HealthSync.lastRun`) and shown.
+- The window was seven UTC days from now, so "today" was cut at the wrong hour and the day rows
+  disagreed with the watch; it is local midnight minus seven days now, the aggregate is sliced at
+  the local day start, and heart-rate buckets are deduped (a TreeMap per day) so the same minute
+  never went twice.
+- One bad sample (a name tallyd did not know, a duplicate (metric, ts) in the same batch) failed
+  the whole upload statement, and the file stayed in the spool to fail again every pass: a poison
+  pill. `internal/tally` (`Parse`, `Ingest`) validates the names, dedupes per (metric, ts) within
+  a batch, inserts 500 rows a statement, and the journal line upserts. secd validates a batch
+  before it lands (`tally.Parse`), writes `.part` and renames, and answers `{"ok","days","samples"}`
+  so the phone can say what arrived. tallyd drains at start and every 30 s, keeps the last
+  failure (`ghost-cli ghost.tallyd health` says Degraded with the file and the error when one keeps
+  failing, instead of the stub "ok"), and prunes `done` to 200 files.
+- `DayContext` (the day story's health line) took the day from the window's start in UTC, so a
+  day that starts at 23:00 UTC the evening before read the wrong day's steps. It uses the
+  window's midpoint. The notes it fed the model were polluted with framed's and tallyd's own
+  journal lines and the check-in text; filtered.
+- SETTINGS › HEALTH: the grant, the last run, send last week, send the whole history, and "what
+  can the box see" (the probe), in one place; SYNC keeps the grant line and points there.
+
+Checking on the box:
+
+    sudo ./tools/ns.sh ./bin/ghost-cli ghost.tallyd health
+
+Tested: `TestTallyIngestAgainstPostgres` (dedupe, upsert, bad names refused, the status),
+`TestDayContextDayAndNotes`, `HealthStatusTest`.
+
+## The day, told after the check-in (synthd, secd, hw, app)
+
+Vlad: "a nice summary of the day after my check in would be good, take the audio, take the
+pictures, take the locations, take the check in and put it all together".
+
+synthd's `daySummaryPass` already wrote the day story from the photos, the trail, the voice
+notes and the health line, but only for days that were over, dropped the check-in's "why", and
+nothing on the phone showed it. Now today is a candidate the moment the check-in lands
+(`checkedIn(db, today)`), the facts carry the feelings and the why ("You said you felt tired:
+“long day at the office”"), and the phone asks for it: `GET /v1/day?d=YYYY-MM-DD&build=1` waits
+for the check-in's journal entry (up to 45 s), asks synthd for the pass (`days {day, pass:true}`,
+4 min) and returns `{day, checkedIn, built}`. `DayStoryCard` under the check-in's done state
+shows it (writing / reading / failed / the story), and MEMORIES shows the day's story when there
+is one.
+
+Building it by hand on the box:
+
+    sudo ./tools/ns.sh ./bin/ghost-cli ghost.synthd days day=2026-10-01 pass=true
+
+Tested: `TestTodayTellsAfterTheCheckin`, `TestDayContextDayAndNotes`.
+
+## Settings, and the buttons that did nothing (app, secd, hw)
+
+Vlad: "the download map does not work in settings, can you organize things a bit better in
+settings ... spend time and find all the other buttons / settings that don't work ... the popup
+on status is too much text to read and does not have a scroll, i just need the important things".
+
+- Map download. The worker centred on the phone's recent fixes and needed an unmetered network;
+  with no readable fix (the trail off, or a fresh install) it had nothing to centre on and said
+  nothing. It centres on the trail's newest point, then the box's last five days of trail, runs
+  on any connection when asked by hand (metered is noted), and shows WorkManager's real state.
+- SETTINGS is folded sections now (`Fold`): each closed line says the setting's state, open at
+  first only where something needs attention. HEALTH is new (above). EXPORT is gone until the
+  box can do it (the button used to share a made-up file). WIPE is "forget the box on this
+  phone": that is what it did (the box was never erased) and it says so, one confirmation.
+- Chats: the CHATS screen drew the box's conversations twice (the drawer's list, which is the
+  same `/v1/chats`, above an "ON THE BOX" list of the same rows). One list, the open chat in
+  green, and a rename or delete reloads it.
+- SYNC's "test notification" was wired to nothing the screen showed; removed with its stub.
+- Box Status: the rows loaded once at unlock and stood still all session; they poll every 10 s
+  while the screen is open (a failed poll keeps the last rows). The daemon popup scrolls, and
+  shows the rows the box marks as key first (`DaemonKV.Key`: what the daemon did in the last
+  hour, what is waiting, what is paused, what is behind, the GPU verdict, the model and its
+  speed) with "[ + N more ]" for the rest; a box that marks nothing shows its first five.
+
+Tested: `TestKeyRows`, `DaemonRowsTest`, `TrailStatusTest`, `HealthStatusTest`; the screens are
+structure-checked only.

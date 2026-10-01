@@ -63,6 +63,8 @@ type dayFacts struct {
 	SleepMin    float64 `json:"sleepMin,omitempty"`
 	ExerciseMin float64 `json:"exerciseMin,omitempty"`
 	Feeling     string  `json:"feeling,omitempty"`
+	Why         string  `json:"why,omitempty"`       // the check-in's own words on why
+	CheckedIn   bool    `json:"checkedIn,omitempty"` // the evening check-in is in: the day is told from the person's side
 	// words of the person's own
 	Notes  []string `json:"notes,omitempty"`  // journal titles that day (not the check-in, not a voice note)
 	Spoken []string `json:"spoken,omitempty"` // what the person said in the day's voice notes (ghost.voiced's transcripts)
@@ -106,26 +108,36 @@ func (f *dayFacts) signature() string {
 	return hex.EncodeToString(h[:8]) + fmt.Sprintf(":%d", daySummaryVersion)
 }
 
-// daySummaryPass returns how many rows it built and how many the model wrote.
-func daySummaryPass(db *poltergres.ReadWrite, oc *oracle.Client, mount string, lg *slog.Logger) (built, written int, err error) {
-	if time.Since(lastDayPass) < 10*time.Minute {
-		return 0, 0, nil
+// daySummaryPass returns how many rows it built and how many the model wrote. only, when set,
+// is the one day to build (the check-in just landed: today, now), and the pass's pacing does
+// not apply.
+func daySummaryPass(db *poltergres.ReadWrite, oc *oracle.Client, mount string, lg *slog.Logger, only ...string) (built, written int, err error) {
+	if len(only) == 0 {
+		if time.Since(lastDayPass) < 10*time.Minute {
+			return 0, 0, nil
+		}
+		lastDayPass = time.Now()
 	}
-	lastDayPass = time.Now()
 	now := time.Now().UTC()
 	today := now.Format("2006-01-02")
 	onGPU, gerr := oc.OnGPU()
 	modelOK := gerr == nil && onGPU
 
-	// the candidates: today in the evening, the last two weeks, and a slice of the past
+	// the candidates: today in the evening (or once the check-in is in, whatever the hour: the
+	// day is over from the person's side and they are waiting to read it), the last two weeks,
+	// and a slice of the past
 	var days []string
-	if now.Hour() >= dayEveningUTC {
-		days = append(days, today)
+	if len(only) > 0 {
+		days = only
+	} else {
+		if now.Hour() >= dayEveningUTC || checkedIn(db, today) {
+			days = append(days, today)
+		}
+		for i := 1; i <= dayRecentDays; i++ {
+			days = append(days, now.AddDate(0, 0, -i).Format("2006-01-02"))
+		}
+		days = append(days, dayBackfillSlice(db, now, dayRecentDays+1, dayBackfillPerPass)...)
 	}
-	for i := 1; i <= dayRecentDays; i++ {
-		days = append(days, now.AddDate(0, 0, -i).Format("2006-01-02"))
-	}
-	days = append(days, dayBackfillSlice(db, now, dayRecentDays+1, dayBackfillPerPass)...)
 
 	modelCalls := 0
 	for _, day := range days {
@@ -162,8 +174,11 @@ func daySummaryPass(db *poltergres.ReadWrite, oc *oracle.Client, mount string, l
 		// the model writes: a day with signal, over, on the GPU, a few per pass, and either no
 		// model text yet or the sheet changed and the last text is old enough (captions land one
 		// by one; not a rewrite per caption)
-		wantModel := modelOK && day != today && f.hasSignal() && modelCalls < dayModelPerPass && tries < dayModelMaxTries &&
-			(have.writtenBy != "model" || have.summary == "" || (have.signature != sig && time.Since(time.UnixMilli(have.modelAt)) > dayModelRewriteGap))
+		// today is written once the check-in is in (the day, told from the person's side); a
+		// day asked for by name is written now
+		over := day != today || f.CheckedIn || len(only) > 0
+		wantModel := modelOK && over && f.hasSignal() && modelCalls < dayModelPerPass && tries < dayModelMaxTries &&
+			(have.writtenBy != "model" || have.summary == "" || (have.signature != sig && time.Since(time.UnixMilli(have.modelAt)) > dayModelRewriteGap) || len(only) > 0)
 		if have.ok && have.signature == sig && have.summary != "" && !wantModel {
 			continue // nothing new to say, and nothing better to say it with
 		}
@@ -198,7 +213,7 @@ func daySummaryPass(db *poltergres.ReadWrite, oc *oracle.Client, mount string, l
 		built++
 		// the memories feed gets the days with signal that no outing already tells (an outing's
 		// days are its own memory; a day inside one would say the same thing twice)
-		if day != today && f.hasSignal() && f.Outing == "" {
+		if (day != today || f.CheckedIn) && f.hasSignal() && f.Outing == "" {
 			if err := projectDayMemory(db, day, title, summary, by, f); err != nil {
 				lg.Warn("day memory not projected", "fn", "daySummaryPass", "day", day, "err", err)
 			}
@@ -347,10 +362,20 @@ func gatherDayFacts(db *poltergres.ReadWrite, mount, day string) *dayFacts {
 			}
 			title := strings.TrimSpace(*v[1])
 			if strings.HasPrefix(title, "Daily check-in ") {
+				f.CheckedIn = true
 				if v[2] != nil {
 					for _, line := range strings.Split(*v[2], "\n") {
-						if strings.HasPrefix(strings.TrimSpace(line), "Feeling: ") {
-							f.Feeling = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "Feeling: "))
+						line = strings.TrimSpace(line)
+						switch {
+						case strings.HasPrefix(line, "Feeling: "):
+							if fe := strings.TrimSpace(strings.TrimPrefix(line, "Feeling: ")); fe != "" && fe != "(unspecified)" {
+								f.Feeling = fe
+							}
+						case strings.HasPrefix(line, "Why: "):
+							// the person's own words on why: the part the summary was dropping
+							if w := strings.TrimSpace(strings.TrimPrefix(line, "Why: ")); w != "" && w != "(unspecified)" {
+								f.Why = clip(w, 600)
+							}
 						}
 					}
 				}
@@ -368,6 +393,14 @@ func gatherDayFacts(db *poltergres.ReadWrite, mount, day string) *dayFacts {
 						f.Spoken = append(f.Spoken, clip(body, 1500))
 					}
 				}
+				continue
+			}
+			// the person's own notes: not framed's line per photo, tallyd's health line or a
+			// chat's title (the box talking to itself; "You wrote: photo at Lakka" was the result)
+			if v[0] != nil && (*v[0] == "ghost.framed" || *v[0] == "ghost.tallyd") {
+				continue
+			}
+			if strings.HasPrefix(title, "conversation:") {
 				continue
 			}
 			if title != "" && len(f.Notes) < 6 {
@@ -514,7 +547,13 @@ func dayTemplate(f *dayFacts) string {
 		parts = append(parts, strings.ToUpper(health[0][:1])+strings.Join(health, ", ")[1:]+".")
 	}
 	if f.Feeling != "" {
-		parts = append(parts, "You said you felt "+strings.TrimRight(f.Feeling, ".")+".")
+		line := "You said you felt " + strings.TrimRight(f.Feeling, ".")
+		if f.Why != "" {
+			line += ": \u201c" + clip(f.Why, 200) + "\u201d"
+		}
+		parts = append(parts, line+".")
+	} else if f.Why != "" {
+		parts = append(parts, "At the check-in you wrote: \u201c"+clip(f.Why, 200)+"\u201d")
 	}
 	if len(f.Notes) > 0 {
 		parts = append(parts, "You wrote: "+joinAnd(quoteAll(f.Notes))+".")
@@ -597,6 +636,9 @@ func (f *dayFacts) sheet() []string {
 	}
 	if f.Feeling != "" {
 		s = append(s, "In the evening check-in you said you felt: "+f.Feeling)
+	}
+	if f.Why != "" {
+		s = append(s, "In the evening check-in you wrote why, in your own words: "+f.Why)
 	}
 	for _, n := range f.Notes {
 		s = append(s, "You wrote a note titled: "+n)
@@ -681,4 +723,10 @@ func thousands(n int) string {
 		b.WriteString(s[i : i+3])
 	}
 	return b.String()
+}
+
+// checkedIn: the day's check-in is in the journal (the phone's local day is in its title).
+func checkedIn(db *poltergres.ReadWrite, day string) bool {
+	rows, err := db.Query("SELECT 1 FROM journal_entries WHERE source = 'ghost.noted' AND title = $1 LIMIT 1", "Daily check-in "+day)
+	return err == nil && len(rows.Vals) > 0
 }

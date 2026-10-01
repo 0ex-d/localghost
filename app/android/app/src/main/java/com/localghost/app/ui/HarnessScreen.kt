@@ -9,6 +9,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -20,10 +22,18 @@ import com.localghost.app.net.DaemonStatus
 import com.localghost.app.ui.theme.*
 
 @Composable
-fun HarnessScreen(daemons: Loadable<List<DaemonStatus>>) {
+fun HarnessScreen(daemons: Loadable<List<DaemonStatus>>, onRefresh: () -> Unit = {}) {
     // Tap a row , see its history. The stats names are the sampler's names; UI rows that present a
     // host vital under a friendlier id map here.
     var statsFor by remember { mutableStateOf<String?>(null) }
+    // The rows used to load once at unlock and then stand still for the whole session, so a daemon
+    // that fell over stayed green until the next unlock. Polled every 10 s while this screen is open.
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(10_000)
+            onRefresh()
+        }
+    }
     statsFor?.let { name -> ServiceStatsDialog(name = name, onDismiss = { statsFor = null }) }
 
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 20.dp),
@@ -233,56 +243,77 @@ private fun ServiceStatsDialog(name: String, onDismiss: () -> Unit) {
     val ctx = LocalContext.current
     // The DRILL-IN , each daemon's domain from its own tables (/v1/daemon/summary), stacked above
     // the sparklines. Box Status is the menu; this dialog is the per-daemon screen.
-    var detail by remember(name) { mutableStateOf<List<Pair<String, String>>?>(null) }
-    LaunchedEffect(name) { detail = com.localghost.app.net.BoxClient.daemonSummary(ctx, name) }
+    var detail by remember(name) { mutableStateOf<List<DaemonRows.Row>?>(null) }
+    LaunchedEffect(name) { detail = BoxClient.daemonSummary(ctx, name) }
     var stats by remember { mutableStateOf<BoxClient.ServiceStats?>(null) }
     var failed by remember { mutableStateOf(false) }
     LaunchedEffect(name) {
         stats = BoxClient.serviceStats(ctx, name)
         if (stats == null) failed = true
     }
+    // THE IMPORTANT THINGS FIRST. The box marks the rows worth a glance; the rest sit behind
+    // "[ + N more ]" (DaemonRows). The body scrolls and CLOSE stays put under it, so a long
+    // drill-in (framed has thirty rows) never pushes the way out off the screen.
+    var showAll by remember(name) { mutableStateOf(false) }
     androidx.compose.ui.window.Dialog(onDismissRequest = onDismiss) {
-        Column(Modifier.background(Void).border(1.dp, TerminalDim).padding(16.dp)) {
+        Column(Modifier.fillMaxHeight(0.85f).background(Void).border(1.dp, TerminalDim).padding(16.dp)) {
             Text(name, color = TerminalGreen, style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(8.dp))
-            detail?.let { rows ->
-                rows.forEach { (k, v) ->
-                    if (v.length > 24) {
-                        // Long values get the full width as a paragraph , squeezed into the row's
-                        // leftover space they wrapped one letter per line, which read like the
-                        // dialog was having a stroke.
-                        Column(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
-                            Text(k, color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
-                            Text(v, color = GhostText, style = MaterialTheme.typography.labelMedium)
+            Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
+                val rows = detail
+                when {
+                    rows == null -> Text("reading from the box…", color = GhostTextDim,
+                        style = MaterialTheme.typography.labelMedium)
+                    rows.isEmpty() -> Text("nothing to say about this one yet", color = GhostTextDim,
+                        style = MaterialTheme.typography.labelMedium)
+                    else -> {
+                        val pick = DaemonRows.pick(rows, showAll)
+                        pick.shown.forEach { r -> DetailRow(r.k, r.v) }
+                        if (pick.hidden > 0 || showAll) {
+                            Text(if (showAll) "[ - fewer ]" else "[ + ${pick.hidden} more ]",
+                                color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
+                                modifier = Modifier.clickable { showAll = !showAll }.padding(vertical = 6.dp))
                         }
-                    } else {
-                        Row(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
-                            Text("$k  ", color = GhostTextDim, style = MaterialTheme.typography.labelMedium,
-                                modifier = Modifier.weight(1f))
-                            Text(v, color = GhostText, style = MaterialTheme.typography.labelMedium)
-                        }
+                        Spacer(Modifier.height(10.dp))
                     }
                 }
-                if (rows.isNotEmpty()) Spacer(Modifier.height(10.dp))
-            }
-            val st = stats
-            when {
-                failed -> Text("stats unavailable , the sampler needs a deploy + a few minutes of uptime",
-                    color = Warning, style = MaterialTheme.typography.bodySmall)
-                st == null -> Text("reading from the box…", color = GhostTextDim,
-                    style = MaterialTheme.typography.bodySmall)
-                else -> {
-                    Text(st.day, color = GhostText, style = MaterialTheme.typography.bodySmall)
-                    Spacer(Modifier.height(12.dp))
-                    Text("LAST ~100 MIN · 10s", color = TerminalDim, style = MaterialTheme.typography.labelSmall)
-                    Sparkline(st.s10)
-                    Spacer(Modifier.height(10.dp))
-                    Text("LAST 24H · 1m", color = TerminalDim, style = MaterialTheme.typography.labelSmall)
-                    Sparkline(st.s1m)
+                val st = stats
+                when {
+                    failed -> Text("stats unavailable , the sampler needs a deploy + a few minutes of uptime",
+                        color = Warning, style = MaterialTheme.typography.bodySmall)
+                    st == null -> Text("reading the history…", color = GhostTextDim,
+                        style = MaterialTheme.typography.bodySmall)
+                    else -> {
+                        Text(st.day, color = GhostText, style = MaterialTheme.typography.bodySmall)
+                        Spacer(Modifier.height(12.dp))
+                        Text("LAST ~100 MIN · 10s", color = TerminalDim, style = MaterialTheme.typography.labelSmall)
+                        Sparkline(st.s10)
+                        Spacer(Modifier.height(10.dp))
+                        Text("LAST 24H · 1m", color = TerminalDim, style = MaterialTheme.typography.labelSmall)
+                        Sparkline(st.s1m)
+                    }
                 }
             }
             Spacer(Modifier.height(12.dp))
             GhostButton("CLOSE", onClick = onDismiss, modifier = Modifier.fillMaxWidth())
+        }
+    }
+}
+
+@Composable
+private fun DetailRow(k: String, v: String) {
+    if (v.length > 24) {
+        // Long values get the full width as a paragraph , squeezed into the row's leftover space
+        // they wrapped one letter per line, which read like the dialog was having a stroke.
+        Column(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+            Text(k, color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+            Text(v, color = GhostText, style = MaterialTheme.typography.labelMedium)
+        }
+    } else {
+        Row(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+            Text("$k  ", color = GhostTextDim, style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.weight(1f))
+            Text(v, color = GhostText, style = MaterialTheme.typography.labelMedium)
         }
     }
 }

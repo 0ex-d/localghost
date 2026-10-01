@@ -62,7 +62,7 @@ object Notifications {
     private fun tapPI(ctx: Context, kind: String, reqCode: Int): PendingIntent {
         val i = android.content.Intent(ctx, com.localghost.app.MainActivity::class.java).apply {
             action = "com.localghost.app.OPEN_NOTIFICATION"
-            putExtra("nav", if (kind == "checkin") "memories" else "notifications")
+            putExtra("nav", if (kind == "checkin" || kind == "nearby") "memories" else "notifications")
             flags = android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
         return PendingIntent.getActivity(ctx, reqCode, i,

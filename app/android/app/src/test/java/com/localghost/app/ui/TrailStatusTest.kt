@@ -1,6 +1,7 @@
 package com.localghost.app.ui
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TrailStatusTest {
@@ -9,6 +10,7 @@ class TrailStatusTest {
     @Test fun theFix() {
         assertEquals("last fix: 12 min ago", TrailStatus.fixLine(now - 720, now))
         assertEquals("last fix: none this phone can read yet , the next one comes within the quarter hour", TrailStatus.fixLine(null, now))
+        assertTrue(TrailStatus.fixLine(null, now, "unreadable").contains("will not open it"))
     }
 
     @Test fun theSend() {

@@ -295,6 +295,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/voice/delete", s.handleVoiceDelete)          // audio, row and journal entry gone
 	mux.HandleFunc("/v1/onthisday", s.handleOnThisDay)               // synthd's retrospective, from the prebuilt days
 	mux.HandleFunc("/v1/days", s.handleDays)                         // the prebuilt day summaries, newest first (?before&limit)
+	mux.HandleFunc("/v1/day", s.handleDay)                           // one day's summary (?d=YYYY-MM-DD&build=1 writes it now, after the check-in)
 	mux.HandleFunc("/v1/devices/name", s.handleDeviceName)           // a device names itself
 	mux.HandleFunc("/v1/devices", s.handleDevices)                   // enrolled phones, honest stats
 	mux.HandleFunc("/v1/sync/reset", s.handleSyncReset)              // rewind this device's cursors

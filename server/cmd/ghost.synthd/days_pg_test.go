@@ -147,3 +147,66 @@ func TestDaysPGBuildOnceTellOnThisDay(t *testing.T) {
 		t.Fatalf("on this day did not tell the prebuilt day:\n%s", out)
 	}
 }
+
+// TODAY is told the moment the check-in is in: the day's summary carries the feeling and the
+// person's own why, the notes leave out the box's own lines (a photo's, health's, a chat's), and
+// the memories feed gets the day, all before the evening hour the pass otherwise waits for.
+func TestTodayTellsAfterTheCheckin(t *testing.T) {
+	db := pgFresh(t, "lgtest_synthd_today")
+	lg := slog.New(slog.NewTextHandler(io.Discard, nil))
+	now := time.Now().UTC()
+	today := now.Format("2006-01-02")
+	t0 := time.Date(now.Year(), now.Month(), now.Day(), 0, 30, 0, 0, time.UTC).Unix()
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if err := db.Exec(q, args...); err != nil {
+			t.Fatalf("%v\n  %s", err, q)
+		}
+	}
+	for i := 0; i < 6; i++ {
+		h := strings.Repeat(strconv.Itoa(i+1), 32)
+		exec(`INSERT INTO frames (hash, taken_at, archive_path, kind, place, description, received_at) VALUES ($1,$2,$3,'photo',$4,'A beach.',$5)`,
+			h, t0+int64(i)*600, "/a/"+h, geo.Place{Country: "Greece", Locality: "Lakka"}.String(), t0)
+		exec(`INSERT INTO journal_entries (source, ref, ts, title, body, created_at) VALUES ('ghost.framed',$1,$2,'photo at Lakka','',$2)`, "p"+h, t0+int64(i)*600)
+	}
+	exec(`INSERT INTO journal_entries (source, ref, ts, title, body, created_at) VALUES ('ghost.tallyd','h',$1,'health , `+today+`','8000 steps.',$1)`, t0+100)
+	exec(`INSERT INTO journal_entries (source, ref, ts, title, body, created_at) VALUES ('ghost.noted','c',$1,'conversation: ferries','',$1)`, t0+200)
+	exec(`INSERT INTO journal_entries (source, ref, ts, title, body, created_at) VALUES ('ghost.noted','n',$1,'A note of my own','',$1)`, t0+300)
+
+	oc := oracle.NewClient(t.TempDir(), time.Second) // no oracled: the template path
+	mount := t.TempDir()
+	// no check-in yet: today is not a candidate (unless it is already evening in UTC)
+	if now.Hour() < dayEveningUTC {
+		lastDayPass = time.Time{}
+		_, _, _ = daySummaryPass(db, oc, mount, lg)
+		if rows, _ := db.Query(`SELECT count(*) FROM day_summaries WHERE day = $1`, today); *rows.Vals[0][0] != "0" {
+			t.Fatal("today built before the check-in and before the evening")
+		}
+	}
+	exec(`INSERT INTO journal_entries (source, ref, ts, title, body, created_at) VALUES ('ghost.noted','ci',$1,'Daily check-in `+today+`','Feeling: tired, happy'||chr(10)||'Preselected: tired'||chr(10)||'Why: long swim, then too much food',$1)`, t0+400)
+	built, _, err := daySummaryPass(db, oc, mount, lg, today)
+	if err != nil || built != 1 {
+		t.Fatalf("built %d err %v", built, err)
+	}
+	rows, err := db.Query(`SELECT summary, facts::text FROM day_summaries WHERE day = $1`, today)
+	if err != nil || len(rows.Vals) != 1 {
+		t.Fatalf("row %v %v", rows, err)
+	}
+	var f dayFacts
+	if err := json.Unmarshal([]byte(*rows.Vals[0][1]), &f); err != nil {
+		t.Fatal(err)
+	}
+	if !f.CheckedIn || f.Feeling != "tired, happy" || f.Why != "long swim, then too much food" || len(f.Notes) != 1 || f.Notes[0] != "A note of my own" {
+		t.Fatalf("facts %+v", f)
+	}
+	sum := *rows.Vals[0][0]
+	if !strings.Contains(sum, "You said you felt tired, happy: “long swim, then too much food”") || strings.Contains(sum, "photo at Lakka") || strings.Contains(sum, "health ,") {
+		t.Fatalf("summary %q", sum)
+	}
+	if rows, _ := db.Query(`SELECT count(*) FROM memories WHERE kind = 'day' AND source_ref = $1`, "day:"+today); *rows.Vals[0][0] != "1" {
+		t.Fatal("today is not in the memories feed after the check-in")
+	}
+	if !checkedIn(db, today) || checkedIn(db, "2001-01-01") {
+		t.Fatal("checkedIn")
+	}
+}

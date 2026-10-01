@@ -713,11 +713,17 @@ func (s *NotifStore) Produce(slot int, n Notification) error {
 // set (muted included) so muted ones are never pushed later. muted(service) decides per-service; a nil
 // muted func means nothing is muted.
 func (s *NotifStore) PushBatch(slot int, device string, muted func(service string) bool) ([]Notification, error) {
-	recent, err := s.readRecent(slot)
-	if err != nil {
-		return nil, err
-	}
 	cursor, _ := s.getCursor(slot, device) // 0 if unset
+	// The rows come from Postgres, not the Redis list: framed's weekly highlight, shadowd's
+	// observations and watchd's service alerts INSERT straight into the table and never touched
+	// the list, so the phone never saw them. The list stays as Produce's cache; the table is the
+	// truth and holds everything.
+	recent, err := s.sinceID(slot, cursor, recentCap)
+	if err != nil {
+		if recent, err = s.readRecent(slot); err != nil {
+			return nil, err
+		}
+	}
 
 	// (2) not-yet-pushed = id > cursor. Track the max id across ALL of them for the cursor advance.
 	var maxID int64 = cursor
@@ -865,6 +871,39 @@ func (s *NotifStore) Delete(slot int, id int64) error {
 }
 
 // --- helpers ---
+
+// sinceID is the notifications with id > after, oldest first, at most limit, from Postgres.
+func (s *NotifStore) sinceID(slot int, after int64, limit int) ([]Notification, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := c.Query("SELECT id, service, kind, title, body, coalesce(options,''), extract(epoch from created)::bigint "+
+		"FROM notifications WHERE id > $1 ORDER BY id LIMIT $2", after, limit)
+	if err != nil {
+		return nil, err
+	}
+	res := make([]Notification, 0, len(rows.Vals))
+	for _, r := range rows.Vals {
+		if len(r) < 7 || r[0] == nil {
+			continue
+		}
+		cell := func(i int) string {
+			if r[i] == nil {
+				return ""
+			}
+			return *r[i]
+		}
+		id, _ := strconv.ParseInt(cell(0), 10, 64)
+		created, _ := strconv.ParseInt(cell(6), 10, 64)
+		n := Notification{ID: id, Service: cell(1), Kind: cell(2), Title: cell(3), Body: cell(4), Created: created}
+		if o := cell(5); o != "" {
+			_ = json.Unmarshal([]byte(o), &n.Options)
+		}
+		res = append(res, n)
+	}
+	return res, nil
+}
 
 func (s *NotifStore) readRecent(slot int) ([]Notification, error) {
 	c, err := s.rds(slot)
@@ -1157,6 +1196,51 @@ type DayRow struct {
 	Facts     json.RawMessage `json:"facts,omitempty"` // the sheet: photos, covers, places, tags, the route, health, notes
 }
 
+// DayOne is one day's summary row, or an empty row (Day set, Summary "") when none is built yet.
+func (s *NotifStore) DayOne(slot int, day string) (DayRow, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return DayRow{}, err
+	}
+	rows, err := c.Query("SELECT day, title, summary, written_by, built_at, facts::text FROM day_summaries WHERE day = $1", day)
+	if err != nil {
+		return DayRow{}, err
+	}
+	out := DayRow{Day: day}
+	if len(rows.Vals) == 1 && len(rows.Vals[0]) >= 6 {
+		v := rows.Vals[0]
+		if v[1] != nil {
+			out.Title = *v[1]
+		}
+		if v[2] != nil {
+			out.Summary = *v[2]
+		}
+		if v[3] != nil {
+			out.WrittenBy = *v[3]
+		}
+		if v[4] != nil {
+			out.BuiltAt, _ = strconv.ParseInt(*v[4], 10, 64)
+		}
+		if v[5] != nil && json.Valid([]byte(*v[5])) {
+			out.Facts = json.RawMessage(*v[5])
+		}
+	}
+	return out, nil
+}
+
+// CheckedIn: the day's check-in is in the journal (noted has taken it from its inbox).
+func (s *NotifStore) CheckedIn(slot int, day string) (bool, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return false, err
+	}
+	rows, err := c.Query("SELECT 1 FROM journal_entries WHERE source = 'ghost.noted' AND title = $1 LIMIT 1", "Daily check-in "+day)
+	if err != nil {
+		return false, err
+	}
+	return len(rows.Vals) > 0, nil
+}
+
 // DaysList returns day summaries newest first, before a day (exclusive; "" = the newest), up to limit.
 func (s *NotifStore) DaysList(slot int, before string, limit int) ([]DayRow, error) {
 	c, err := s.pg(slot)
@@ -1442,11 +1526,17 @@ type DaySummary struct {
 // DayContext summarizes one day from frames + journal. start/end are unix seconds bounding the day
 // in the CALLER's timezone , the box does not guess where the person woke up.
 func (s *NotifStore) DayContext(slot int, start, end int64) (DaySummary, error) {
-	var out DaySummary
 	c, err := s.pg(slot)
 	if err != nil {
-		return out, err
+		return DaySummary{}, err
 	}
+	return DayContextFrom(c, start, end)
+}
+
+// DayContextFrom is DayContext over any connection (the Postgres-backed tests use it).
+func DayContextFrom(c *poltergres.ReadWrite, start, end int64) (DaySummary, error) {
+	var out DaySummary
+	var err error
 	rows, err := c.Query(
 		"SELECT kind, COALESCE(place,''), taken_at FROM frames WHERE taken_at >= $1 AND taken_at < $2 ORDER BY taken_at ASC LIMIT 2000",
 		start, end)
@@ -1483,8 +1573,11 @@ func (s *NotifStore) DayContext(slot int, start, end int64) (DaySummary, error) 
 			}
 		}
 	}
+	// the person's own notes: not framed's per-photo lines, tallyd's health line or a chat's
+	// title, which are the box talking to itself and were filling the check-in's "why" box
 	if jrows, jerr := c.Query(
-		"SELECT title FROM journal_entries WHERE ts >= $1 AND ts < $2 AND title <> '' ORDER BY ts ASC LIMIT 8",
+		"SELECT title FROM journal_entries WHERE ts >= $1 AND ts < $2 AND title <> '' "+
+			"AND source NOT IN ('ghost.framed','ghost.tallyd') AND title NOT LIKE 'conversation:%' AND title NOT LIKE 'Daily check-in%' ORDER BY ts ASC LIMIT 8",
 		start, end); jerr == nil {
 		for _, v := range jrows.Vals {
 			if len(v) >= 1 && v[0] != nil {
@@ -1492,8 +1585,12 @@ func (s *NotifStore) DayContext(slot int, start, end int64) (DaySummary, error) 
 			}
 		}
 	}
-	// Health for the day (the PHONE's YYYY-MM-DD derived from the day start it sent).
-	dayStr := time.Unix(start, 0).UTC().Format("2006-01-02")
+	// Health for the day. The phone sends its LOCAL midnight as start; the health rows carry the
+	// phone's local day. Formatting the start in UTC named yesterday anywhere east of Greenwich
+	// (Greece, London in summer), so the check-in showed the wrong day's steps. The day is the
+	// one the start falls in at the phone's offset, which the middle of the window gives without
+	// knowing the zone: local midnight plus twelve hours is that day at noon in UTC ± 14 h.
+	dayStr := time.Unix(start+(end-start)/2, 0).UTC().Format("2006-01-02")
 	if hrows, herr := c.Query("SELECT metric, value FROM health_metrics WHERE day = $1", dayStr); herr == nil {
 		for _, v := range hrows.Vals {
 			if len(v) < 2 || v[0] == nil || v[1] == nil {
@@ -1793,10 +1890,30 @@ func (s *NotifStore) NewestGeoFrame(slot int) (GeoCluster, error) {
 	return g, nil
 }
 
-// DaemonKV is one row of a daemon's drill-in summary.
+// DaemonKV is one row of a daemon's drill-in summary. Key marks the rows a person wants first
+// (what the daemon is doing, what is waiting, what is wrong); the phone shows those and folds the
+// rest behind "more".
 type DaemonKV struct {
-	K string `json:"k"`
-	V string `json:"v"`
+	K   string `json:"k"`
+	V   string `json:"v"`
+	Key bool   `json:"key,omitempty"`
+}
+
+// KeyRows is the rows marked Key, in their order; when none is marked, the first n rows.
+func KeyRows(kv []DaemonKV, n int) []DaemonKV {
+	out := make([]DaemonKV, 0, n)
+	for _, r := range kv {
+		if r.Key {
+			out = append(out, r)
+		}
+	}
+	if len(out) == 0 && len(kv) > 0 {
+		if n > len(kv) {
+			n = len(kv)
+		}
+		out = append(out, kv[:n]...)
+	}
+	return out
 }
 
 // DaemonSummary , the per-daemon screens' feed. Each daemon's domain summarized from ITS OWN
@@ -1819,10 +1936,11 @@ func DaemonSummaryFrom(c *poltergres.ReadWrite, name string) []DaemonKV {
 		return *rows.Vals[0][0]
 	}
 	kv := []DaemonKV{}
-	add := func(k, v string) { kv = append(kv, DaemonKV{k, v}) }
+	add := func(k, v string) { kv = append(kv, DaemonKV{K: k, V: v}) }
+	key := func(k, v string) { kv = append(kv, DaemonKV{K: k, V: v, Key: true}) }
 	switch name {
 	case "ghost.framed":
-		add("frames archived", one("SELECT count(*) FROM frames"))
+		key("frames archived", one("SELECT count(*) FROM frames"))
 		add("photos", one("SELECT count(*) FROM frames WHERE kind = 'photo'"))
 		add("videos", one("SELECT count(*) FROM frames WHERE kind = 'video'"))
 		add("geotagged", one("SELECT count(*) FROM frames WHERE has_gps"))
@@ -1857,13 +1975,13 @@ func DaemonSummaryFrom(c *poltergres.ReadWrite, name string) []DaemonKV {
 		// by the newest pipeline, previewed, described, titled and tagged. The pipeline version
 		// is read from the rows (the max any row carries), so this line cannot claim a version
 		// nothing has reached.
-		add("pipeline", "v"+one("SELECT coalesce(max(pipe_ver),0) FROM frames")+
+		key("pipeline", "v"+one("SELECT coalesce(max(pipe_ver),0) FROM frames")+
 			" · at latest stage "+one(`SELECT count(*) FROM frames f WHERE kind IN ('photo','video')
 			  AND pipe_ver >= (SELECT coalesce(max(pipe_ver),0) FROM frames)
 			  AND preview_path <> '' AND thumb_path <> '' AND description <> '' AND display_name <> ''
 			  AND EXISTS (SELECT 1 FROM frame_tags t WHERE t.hash = f.hash AND t.source <> 'user_removed')`)+
 			" of "+one("SELECT count(*) FROM frames WHERE kind IN ('photo','video')"))
-		add("behind", "no preview "+one("SELECT count(*) FROM frames WHERE kind IN ('photo','video') AND (preview_path = '' OR thumb_path = '')")+
+		key("behind", "no preview "+one("SELECT count(*) FROM frames WHERE kind IN ('photo','video') AND (preview_path = '' OR thumb_path = '')")+
 			" · undescribed "+one("SELECT count(*) FROM frames WHERE kind IN ('photo','video') AND description = ''")+
 			" · untitled "+one("SELECT count(*) FROM frames WHERE kind IN ('photo','video') AND display_name = ''")+
 			" · untagged "+one(`SELECT count(*) FROM frames f WHERE kind IN ('photo','video')
@@ -1871,7 +1989,7 @@ func DaemonSummaryFrom(c *poltergres.ReadWrite, name string) []DaemonKV {
 		add("videos described", one("SELECT count(*) FROM frames WHERE kind = 'video' AND description <> ''")+
 			" of "+one("SELECT count(*) FROM frames WHERE kind = 'video'"))
 		add("tagged", one("SELECT count(DISTINCT hash) FROM frame_tags WHERE source <> 'user_removed'"))
-		add("caption queue", one("SELECT count(*) FROM search.jobs WHERE kind = 'caption' AND attempts < 5"))
+		key("caption queue", one("SELECT count(*) FROM search.jobs WHERE kind = 'caption' AND attempts < 5"))
 		add("captions exhausted", one("SELECT count(*) FROM search.jobs WHERE kind = 'caption' AND attempts >= 5"))
 		add("track points", one("SELECT count(*) FROM location_points"))
 		// the last day's points by how the phone took them (via: the quarter-hour fix, another
@@ -1897,12 +2015,12 @@ func DaemonSummaryFrom(c *poltergres.ReadWrite, name string) []DaemonKV {
 		}
 		if ago := one("SELECT coalesce(extract(epoch from now())::bigint - max(ts), -1) FROM location_points"); ago != "-1" && ago != "0" {
 			if n, err := strconv.ParseInt(ago, 10, 64); err == nil && n >= 0 {
-				add("newest track point", fmt.Sprintf("%d min ago", n/60))
+				key("newest track point", fmt.Sprintf("%d min ago", n/60))
 			}
 		}
 		add("geo places loaded", one("SELECT count(*) FROM geo_points"))
 		if ts := one("SELECT to_char(to_timestamp(max(taken_at)), 'YYYY-MM-DD HH24:MI') FROM frames"); ts != "0" && ts != "" {
-			add("newest capture", ts)
+			key("newest capture", ts)
 		}
 		if ents, derr := os.ReadDir("/var/lib/ghost/backup"); derr == nil {
 			seals, latest := 0, ""
@@ -1924,45 +2042,45 @@ func DaemonSummaryFrom(c *poltergres.ReadWrite, name string) []DaemonKV {
 			add("backups", "idle , no key (ghost.restore keygen)")
 		}
 	case "ghost.noted":
-		add("journal entries", one("SELECT count(*) FROM journal_entries"))
+		key("journal entries", one("SELECT count(*) FROM journal_entries"))
 		add("from noted", one("SELECT count(*) FROM journal_entries WHERE source = 'ghost.noted'"))
 		add("from framed", one("SELECT count(*) FROM journal_entries WHERE source = 'ghost.framed'"))
 		add("from tallyd", one("SELECT count(*) FROM journal_entries WHERE source = 'ghost.tallyd'"))
-		add("awaiting distillation", one("SELECT count(*) FROM journal_entries WHERE NOT distilled"))
+		key("awaiting distillation", one("SELECT count(*) FROM journal_entries WHERE NOT distilled"))
 	case "ghost.synthd":
-		add("memories (live)", one("SELECT count(*) FROM memories WHERE NOT tombstoned"))
+		key("memories (live)", one("SELECT count(*) FROM memories WHERE NOT tombstoned"))
 		add("yours (user-made)", one("SELECT count(*) FROM memories WHERE kind = 'user' AND NOT tombstoned"))
 		add("tombstoned", one("SELECT count(*) FROM memories WHERE tombstoned"))
-		add("distill queue", one("SELECT count(*) FROM journal_entries WHERE NOT distilled"))
+		key("distill queue", one("SELECT count(*) FROM journal_entries WHERE NOT distilled"))
 		add("day episodes", one("SELECT count(*) FROM memories WHERE kind = 'episode' AND NOT tombstoned"))
 		add("cached reports", one("SELECT count(*) FROM reports"))
 	case "ghost.searchd":
-		add("caption jobs pending", one("SELECT count(*) FROM search.jobs WHERE kind = 'caption' AND attempts < 5"))
+		key("caption jobs pending", one("SELECT count(*) FROM search.jobs WHERE kind = 'caption' AND attempts < 5"))
 		add("caption jobs exhausted", one("SELECT count(*) FROM search.jobs WHERE kind = 'caption' AND attempts >= 5"))
-		add("tag jobs pending", one("SELECT count(*) FROM search.jobs WHERE kind = 'tag' AND attempts < 5"))
-		add("embed jobs pending", one("SELECT count(*) FROM search.jobs WHERE kind = 'embed_text' AND attempts < 5"))
+		key("tag jobs pending", one("SELECT count(*) FROM search.jobs WHERE kind = 'tag' AND attempts < 5"))
+		key("embed jobs pending", one("SELECT count(*) FROM search.jobs WHERE kind = 'embed_text' AND attempts < 5"))
 		add("other jobs pending", one("SELECT count(*) FROM search.jobs WHERE kind NOT IN ('caption','tag','embed_text') AND attempts < 5"))
-		add("indexed chunks", one("SELECT count(*) FROM search.chunks"))
+		key("indexed chunks", one("SELECT count(*) FROM search.chunks"))
 		add("tags written", one("SELECT count(*) FROM frame_tags WHERE source <> 'user_removed'"))
 	case "ghost.tallyd":
-		add("health days", one("SELECT count(DISTINCT day) FROM health_metrics"))
-		add("metrics rows", one("SELECT count(*) FROM health_metrics"))
+		key("health days", one("SELECT count(DISTINCT day) FROM health_metrics"))
+		key("metrics rows", one("SELECT count(*) FROM health_metrics"))
 		add("high-res samples", one("SELECT count(*) FROM health_samples"))
 		if d := one("SELECT min(day) FROM health_metrics"); d != "0" {
 			add("earliest day", d)
 		}
 	case "ghost.shadowd":
 		add("charter", "anti-possession: watches usage patterns FOR you, never for engagement")
-		add("your messages (7d)", one("SELECT count(*) FROM chat_messages WHERE role = 'user' AND ts >= extract(epoch from now())::bigint - 7*86400"))
+		key("your messages (7d)", one("SELECT count(*) FROM chat_messages WHERE role = 'user' AND ts >= extract(epoch from now())::bigint - 7*86400"))
 		add("prior 7d", one("SELECT count(*) FROM chat_messages WHERE role = 'user' AND ts >= extract(epoch from now())::bigint - 14*86400 AND ts < extract(epoch from now())::bigint - 7*86400"))
 		add("days you talked (14d)", one("SELECT count(DISTINCT to_char(to_timestamp(ts),'YYYY-MM-DD')) FROM chat_messages WHERE role = 'user' AND ts >= extract(epoch from now())::bigint - 14*86400"))
 		add("detector", "interaction trend LIVE; next: sunk-cost, topic narrowing")
 	case "ghost.cued":
 		add("charter", "surfaces reflections from your life , offerings, not homework")
 		add("episodes to draw from", one("SELECT count(*) FROM memories WHERE kind = 'episode' AND NOT tombstoned"))
-		add("last reflection", one("SELECT coalesce(value,'never') FROM settings WHERE key = 'cued_reflected'"))
+		key("last reflection", one("SELECT coalesce(value,'never') FROM settings WHERE key = 'cued_reflected'"))
 	case "ghost.oracled":
-		add("role", "the only daemon that talks to the model; everyone else asks it")
+		key("role", "the only daemon that talks to the model; everyone else asks it")
 		add("queue + model state", "see Box Status sparklines (stats sampler)")
 	default:
 		add("note", "no drill-in for this daemon yet")

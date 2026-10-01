@@ -69,7 +69,6 @@ import com.localghost.app.ui.Loadable
 import com.localghost.app.ui.PermState
 import com.localghost.app.net.ChatCapabilities
 import com.localghost.app.net.Connector
-import com.localghost.app.net.BoxSettings
 import com.localghost.app.net.Conversation
 import com.localghost.app.net.DeviceCert
 import androidx.work.WorkInfo
@@ -315,6 +314,7 @@ class MainActivity : ComponentActivity() {
         }.start()
         PollWorker.schedule(this)
         SyncWorker.schedule(this)          // 15-min background sync, Wi-Fi only
+        com.localghost.app.sync.HealthSync.schedule(this) // the last week of Health Connect, every six hours
         CrashHandler.pending(this)?.let { screen = Screen.Crash(it) }
         // what a killed app left in its cache (a capture in flight is minutes old at most)
         Thread { com.localghost.app.security.CacheSweep.sweep(cacheDir, minAgeMs = 10 * 60_000L) }.start()
@@ -434,9 +434,9 @@ class MainActivity : ComponentActivity() {
                         onPermAction = ::onPermAction,
                         pending = pending,
                         lifeContext = lifeContext, memories = memories, daemons = daemons,
+                        onRefreshDaemons = ::refreshDaemons,
                         sync = sync, onSync = ::startSync, onTogglePause = ::toggleSyncPause,
                         onRequestFullAccess = { AppSettings.setEverAskedMedia(this, true); launchForResult(mediaLauncher, imagePerms) },
-                        onTestNotification = ::testNotification,
                         allowMobileSync = allowMobileSyncState,
                         thinkLevel = thinkLevelState,
                         onOpenBoxChat = { id -> openBoxChat(id) },
@@ -1014,6 +1014,16 @@ class MainActivity : ComponentActivity() {
      * throw. Used for the post-unlock loads so one failing endpoint shows its own error line rather
      * than aborting the rest of the screen. The label names the section in the error.
      */
+    /** Box Status's rows, again: called by the screen while it is open. A failed poll keeps the
+     *  last good rows (the screen says STALE from the sampler's side) rather than blanking them. */
+    private fun refreshDaemons() {
+        if (localOnly) return
+        lifecycleScope.launch {
+            val fresh = loadOr("daemons") { Loadable.Loaded(BoxClient.daemonStatuses(this@MainActivity)) }
+            if (fresh is Loadable.Loaded || daemons !is Loadable.Loaded) daemons = fresh
+        }
+    }
+
     private suspend fun <T> loadOr(label: String, block: suspend () -> Loadable<T>): Loadable<T> =
         try {
             block()
@@ -1149,47 +1159,22 @@ class MainActivity : ComponentActivity() {
     }
 
     // --- notifications ---
-    private fun testNotification() {
-        if (!Notifications.hasPermission(this)) { notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS); return }
-        Notifications.postBatch(this, listOf(
-            PendingNotification("ghost.watchd", "Dog check", "Paul please don't get another dog, 10 is enough."),
-            PendingNotification("ghost.cued", "Reflection waiting", "A question is ready when you have a moment."),
-            PendingNotification("ghost.shadowd", "Pattern flagged", "Reviewed a message and noticed something."),
-        ))
-    }
-
     private fun setMute(muted: Boolean) {
         NotifyState.setMuted(this, muted)             // local cache
         if (!muted) NotifyState.setLastPostedAt(this, 0L) else Notifications.cancelAll(this)
         sync = sync.copy(notificationsMuted = muted)
-        lifecycleScope.launch {
-            BoxClient.setSettings(this@MainActivity,
-                BoxSettings(AppSettings.allowMobileSync(this@MainActivity), muted))
-        }
     }
 
     private fun exportJson() {
-        exportState = "exporting from the box…"
-        lifecycleScope.launch {
-            val json = BoxClient.exportJson(this@MainActivity)
-            val file = java.io.File(cacheDir, "localghost-export.json").apply { writeText(json) }
-            val uri = androidx.core.content.FileProvider.getUriForFile(
-                this@MainActivity, "$packageName.fileprovider", file)
-            exportState = "exported · ${json.length} bytes"
-            val share = Intent(Intent.ACTION_SEND).apply {
-                type = "application/json"
-                putExtra(Intent.EXTRA_STREAM, uri)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-            startActivity(Intent.createChooser(share, "Export LocalGhost data"))
-        }
+        // not built on the box yet; the button is gone from SETTINGS and this says so if anything
+        // still calls it (it used to share a made-up file)
+        exportState = "export is not built yet"
     }
 
     private fun wipeEverything() {
         lifecycleScope.launch {
-            // Tell the box to crypto-erase its side (best effort; may be unreachable, which is fine ,
-            // the point of clearing the phone is that it stops being a usable key regardless).
-            BoxClient.wipeEverything(this@MainActivity)
+            // Nothing is asked of the box: a crypto-erase of the box is done at the box (secd's
+            // resetup), never from a phone, and a stub here used to pretend otherwise.
 
             // The REAL local clear. This is the revocability the security model depends on: before a
             // risky crossing the phone must stop being a working credential, not merely forget its UI
@@ -1213,8 +1198,6 @@ class MainActivity : ComponentActivity() {
         AppSettings.setAllowMobileSync(this, allow)   // local cache
         lifecycleScope.launch(Dispatchers.IO) {       // off the main thread — no UI hang
             SyncWorker.schedule(this@MainActivity)    // reschedule with new constraint
-            BoxClient.setSettings(this@MainActivity,
-                BoxSettings(allow, NotifyState.isMuted(this@MainActivity)))
         }
     }
 
@@ -1514,10 +1497,11 @@ class MainActivity : ComponentActivity() {
                     allowMobileSyncState = AppSettings.allowMobileSync(this@MainActivity)
                     refreshModels()
                     offeredModels.forEach { m -> reattachIfDownloading(m.id) }
-                    val bs = BoxClient.settings(this@MainActivity)
-                    AppSettings.setAllowMobileSync(this@MainActivity, bs.allowMobileSync)
-                    NotifyState.setMuted(this@MainActivity, bs.notificationsMuted)
-                    sync = sync.copy(notificationsMuted = bs.notificationsMuted)
+                    // the two switches are this phone's own (mute, mobile data): nothing on the
+                    // box holds them. A stub "box settings" read here used to put both back to
+                    // off at every unlock, so mute undid itself and mobile sync went off while
+                    // the switch still showed on.
+                    sync = sync.copy(notificationsMuted = NotifyState.isMuted(this@MainActivity))
                 }
             } else if (error == null) error = "Could not reach your box"
         }

@@ -1,8 +1,8 @@
-// ghost.tallyd , STUB. Binds its loopback health port and reports OK so ghost.watchd can
-// manage it (poll, restart, stop-before-unmount) before the real logic exists. The daemon's actual
-// job is described in this directory's README; this binary is the honest placeholder , it does
-// nothing but stay alive and answer health, so the supervisor and the app's Ghost Status screen work
-// end to end today. Replace the body with real logic behind the same ghosthealth.Reporter contract.
+// ghost.tallyd takes the phone's Health Connect readout (steps, sleep, heart rate and the rest,
+// a day-batch at a time, spooled by secd into <mount>/tallyd/inbox) into health_metrics and
+// health_samples, with a journal line per day for the distiller (internal/tally). Its health line
+// says whether that is working: a batch that keeps failing, or an inbox nobody drains, shows on
+// Box Status instead of "stub ok".
 //
 // Runs only while the account is UNLOCKED (data lives on the encrypted volume). Exits cleanly on
 // SIGTERM so the supervisor's stop-and-confirm-dead teardown never leaves it holding the mount.
@@ -11,6 +11,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -18,8 +19,10 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -30,6 +33,7 @@ import (
 	"github.com/LocalGhostDao/localghost/server/internal/poltergres"
 	"github.com/LocalGhostDao/localghost/server/internal/rotlog"
 	"github.com/LocalGhostDao/localghost/server/internal/svcconf"
+	"github.com/LocalGhostDao/localghost/server/internal/tally"
 )
 
 const service = "ghost.tallyd"
@@ -63,7 +67,10 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	srv := ghosthealth.NewServer(service, ghosthealth.OKReporter{Service: service})
+	ing := &ingestState{}
+	srv := ghosthealth.NewServer(service, ghosthealth.ReporterFunc(func() ghosthealth.Health {
+		return ing.health()
+	}))
 	go func() {
 		if err := srv.Serve(*port); err != nil {
 			lg.Error("health server stopped", "fn", "main", "err", err)
@@ -86,6 +93,22 @@ func main() {
 			svcconf.FillBaseDefaults(&base)
 			return base, nil, nil
 		})
+		// health: what the box holds (days, samples, each metric's newest day and value), what
+		// waits in the inbox, and how the last ingest went. `ghost-cli ghost.tallyd health`.
+		ctl.Handle("health", func(json.RawMessage) (ctlsock.Response, error) {
+			mount := filepath.Dir(runDir)
+			out := map[string]any{"ingest": ing.snapshot(), "inbox": inboxDepth(filepath.Join(mount, "tallyd", "inbox"))}
+			if cfg, cerr := hw.LoadServicesConfig(mount); cerr == nil {
+				db := poltergres.NewReadWrite(hw.SocketForMount(mount), cfg.Postgres.Port, cfg.Postgres.RWUser, cfg.Postgres.RWPass, cfg.Postgres.Name)
+				if st, qerr := tally.Query(db); qerr == nil {
+					out["stored"] = st
+				} else {
+					out["storedErr"] = qerr.Error()
+				}
+			}
+			data, _ := json.Marshal(out)
+			return ctlsock.Response{OK: true, Data: data}, nil
+		})
 		defer ctl.Cleanup()
 		go func() {
 			if err := ctl.Serve(ctx); err != nil {
@@ -100,8 +123,10 @@ func main() {
 	// movement reach synthd's distillation and the check-in's suggestions. Structured data in,
 	// time-series + diary out , exactly the charter.
 	if runDir != "" {
-		go healthLoop(ctx, filepath.Dir(runDir), lg)
+		go healthLoop(ctx, filepath.Dir(runDir), ing, lg)
 		lg.Info("health ingestion up", "fn", "main")
+	} else {
+		ing.note("", errors.New("no run dir: ingestion is off (started by hand without GHOST_RUN_DIR)"), tally.Result{})
 	}
 
 	<-ctx.Done()
@@ -117,17 +142,137 @@ func envPort(key string) int {
 	return 0
 }
 
-// healthLoop polls tallyd's inbox for health day-batches , the same lazy-pg inbox pattern as noted.
-func healthLoop(ctx context.Context, mount string, lg *slog.Logger) {
+// ingestState is what the last ingests did, for the health line and the `health` command.
+type ingestState struct {
+	mu        sync.Mutex
+	lastAt    time.Time
+	lastFile  string
+	lastRes   tally.Result
+	lastErr   string
+	lastErrAt time.Time
+	failing   string // the file that keeps failing, "" when none
+	ingested  int    // batches taken since start
+}
+
+func (s *ingestState) note(file string, err error, res tally.Result) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err != nil {
+		s.lastErr, s.lastErrAt, s.failing = err.Error(), time.Now(), file
+		return
+	}
+	s.lastAt, s.lastFile, s.lastRes, s.failing = time.Now(), file, res, ""
+	s.ingested++
+}
+
+func (s *ingestState) snapshot() map[string]any {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := map[string]any{"batchesSinceStart": s.ingested}
+	if !s.lastAt.IsZero() {
+		out["lastAt"] = s.lastAt.Unix()
+		out["lastFile"] = s.lastFile
+		out["last"] = s.lastRes
+	}
+	if s.lastErr != "" {
+		out["lastError"] = s.lastErr
+		out["lastErrorAt"] = s.lastErrAt.Unix()
+	}
+	if s.failing != "" {
+		out["failing"] = s.failing
+	}
+	return out
+}
+
+// health: degraded while a batch keeps failing (the phone's uploads are landing and going
+// nowhere), OK otherwise, with the last ingest in the detail.
+func (s *ingestState) health() ghosthealth.Health {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failing != "" {
+		return ghosthealth.Health{Code: ghosthealth.Degraded, Name: service, Detail: "a health batch keeps failing (" + s.failing + "): " + s.lastErr}
+	}
+	if s.lastErr != "" && s.lastAt.IsZero() {
+		return ghosthealth.Health{Code: ghosthealth.Degraded, Name: service, Detail: s.lastErr}
+	}
+	d := "no health batch taken since start"
+	if !s.lastAt.IsZero() {
+		d = fmt.Sprintf("last batch %s ago: %d day(s), %d sample(s), newest %s", time.Since(s.lastAt).Round(time.Minute), s.lastRes.Days, s.lastRes.Samples, s.lastRes.NewestDay)
+	}
+	return ghosthealth.Health{Code: ghosthealth.OK, Name: service, Detail: d}
+}
+
+func inboxDepth(dir string) int {
+	es, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, e := range es {
+		if !e.IsDir() && !strings.HasSuffix(e.Name(), ".part") {
+			n++
+		}
+	}
+	return n
+}
+
+// healthLoop drains tallyd's inbox: once at start (a batch that landed while tallyd was down
+// used to wait for the first tick), then every 30 s. A batch that fails stays and is tried
+// again; the health line says so. A file that is not a batch at all is moved aside, once.
+func healthLoop(ctx context.Context, mount string, ing *ingestState, lg *slog.Logger) {
 	inbox := filepath.Join(mount, "tallyd", "inbox")
 	done := filepath.Join(mount, "tallyd", "done")
 	for _, d := range []string{inbox, done} {
 		if err := os.MkdirAll(d, 0o750); err != nil {
 			lg.Error("inbox dirs", "fn", "healthLoop", "err", err)
+			ing.note("", fmt.Errorf("cannot make %s: %v", d, err), tally.Result{})
 			return
 		}
 	}
 	var db *poltergres.ReadWrite
+	drain := func() {
+		entries, err := os.ReadDir(inbox)
+		if err != nil {
+			return
+		}
+		for _, e := range entries {
+			if e.IsDir() || strings.HasSuffix(e.Name(), ".part") {
+				continue
+			}
+			if db == nil {
+				cfg, cerr := hw.LoadServicesConfig(mount)
+				if cerr != nil {
+					ing.note(e.Name(), fmt.Errorf("services.conf: %v", cerr), tally.Result{})
+					break
+				}
+				db = poltergres.NewReadWrite(hw.SocketForMount(mount), cfg.Postgres.Port,
+					cfg.Postgres.RWUser, cfg.Postgres.RWPass, cfg.Postgres.Name)
+			}
+			path := filepath.Join(inbox, e.Name())
+			raw, rerr := os.ReadFile(path)
+			if rerr != nil {
+				ing.note(e.Name(), rerr, tally.Result{})
+				continue
+			}
+			res, ierr := tally.Ingest(db, raw)
+			if ierr != nil {
+				lg.Warn("health ingest failed, will retry next tick", "fn", "healthLoop", "file", e.Name(), "err", ierr)
+				ing.note(e.Name(), ierr, tally.Result{})
+				db = nil
+				continue
+			}
+			if res.Unparsable {
+				lg.Warn("health batch unparseable, moved aside", "fn", "healthLoop", "file", e.Name())
+			} else {
+				lg.Info("health batch taken", "fn", "healthLoop", "file", e.Name(), "days", res.Days, "metrics", res.Metrics, "samples", res.Samples, "dropped", res.Dropped, "newest", res.NewestDay)
+			}
+			ing.note(e.Name(), nil, res)
+			_ = os.Rename(path, filepath.Join(done, e.Name()))
+		}
+		// the raw batches are not kept for ever: the tables hold them now
+		pruneDone(done, 200)
+	}
+	drain()
 	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()
 	for {
@@ -135,150 +280,25 @@ func healthLoop(ctx context.Context, mount string, lg *slog.Logger) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-		}
-		entries, err := os.ReadDir(inbox)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if e.IsDir() {
-				continue
-			}
-			if db == nil {
-				cfg, cerr := hw.LoadServicesConfig(mount)
-				if cerr != nil {
-					break
-				}
-				db = poltergres.NewReadWrite(hw.SocketForMount(mount), cfg.Postgres.Port,
-					cfg.Postgres.RWUser, cfg.Postgres.RWPass, cfg.Postgres.Name)
-			}
-			path := filepath.Join(inbox, e.Name())
-			if err := ingestHealth(db, path, lg); err != nil {
-				lg.Warn("health ingest failed, will retry next tick", "fn", "healthLoop", "file", e.Name(), "err", err)
-				db = nil
-				continue
-			}
-			_ = os.Rename(path, filepath.Join(done, e.Name()))
+			drain()
 		}
 	}
 }
 
-type healthDay struct {
-	Day     string             `json:"day"`
-	Metrics map[string]float64 `json:"metrics"`
-}
-
-type healthSample struct {
-	Metric string  `json:"metric"`
-	TS     int64   `json:"ts"`
-	Value  float64 `json:"value"`
-}
-
-func ingestHealth(db *poltergres.ReadWrite, path string, lg *slog.Logger) error {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return err
+// pruneDone keeps the newest keep files under dir.
+func pruneDone(dir string, keep int) {
+	es, err := os.ReadDir(dir)
+	if err != nil || len(es) <= keep {
+		return
 	}
-	var batch struct {
-		Days    []healthDay    `json:"days"`
-		Samples []healthSample `json:"samples"`
-	}
-	if err := json.Unmarshal(raw, &batch); err != nil {
-		// Malformed is a rename-to-done with a log, not a retry loop.
-		lg.Warn("health batch unparseable, skipped", "fn", "ingestHealth", "err", err)
-		return nil
-	}
-	// Samples batch 500 to a statement , a full-history import ships hundreds of thousands of
-	// heart-rate points, and one round trip per point is how a background job becomes a career.
-	{
-		pend := make([]healthSample, 0, 500)
-		flush := func() error {
-			if len(pend) == 0 {
-				return nil
-			}
-			var sb strings.Builder
-			sb.WriteString("INSERT INTO health_samples (metric, ts, value) VALUES ")
-			args := make([]any, 0, len(pend)*3)
-			for i, sm := range pend {
-				if i > 0 {
-					sb.WriteString(",")
-				}
-				fmt.Fprintf(&sb, "($%d,$%d,$%d)", i*3+1, i*3+2, i*3+3)
-				args = append(args, sm.Metric, sm.TS, sm.Value)
-			}
-			sb.WriteString(" ON CONFLICT (metric, ts) DO UPDATE SET value = EXCLUDED.value")
-			if err := db.Exec(sb.String(), args...); err != nil {
-				return err
-			}
-			pend = pend[:0]
-			return nil
-		}
-		for _, sm := range batch.Samples {
-			if sm.TS <= 0 || len(sm.Metric) > 40 {
-				continue
-			}
-			pend = append(pend, sm)
-			if len(pend) >= 500 {
-				if err := flush(); err != nil {
-					return err
-				}
-			}
-		}
-		if err := flush(); err != nil {
-			return err
+	names := make([]string, 0, len(es))
+	for _, e := range es {
+		if !e.IsDir() {
+			names = append(names, e.Name())
 		}
 	}
-	for _, d := range batch.Days {
-		if _, perr := time.Parse("2006-01-02", d.Day); perr != nil {
-			continue
-		}
-		for metric, val := range d.Metrics {
-			if len(metric) > 40 {
-				continue
-			}
-			if err := db.Exec(
-				"INSERT INTO health_metrics (day, metric, value) VALUES ($1,$2,$3) ON CONFLICT (day, metric) DO UPDATE SET value = EXCLUDED.value",
-				d.Day, metric, val); err != nil {
-				return err
-			}
-		}
-		// One journal line per day , idempotent, so sleep and movement reach the distiller. The
-		// entry states what was measured; interpretation is the distiller's and the check-in's job.
-		parts := ""
-		if v, ok := d.Metrics["sleep_minutes"]; ok && v > 0 {
-			parts += fmt.Sprintf("Slept %dh%02dm. ", int(v)/60, int(v)%60)
-		}
-		if v, ok := d.Metrics["steps"]; ok && v > 0 {
-			parts += fmt.Sprintf("%d steps. ", int(v))
-		}
-		if v, ok := d.Metrics["exercise_minutes"]; ok && v > 0 {
-			parts += fmt.Sprintf("%d min of exercise. ", int(v))
-		}
-		if v, ok := d.Metrics["distance_km"]; ok && v > 0.1 {
-			parts += fmt.Sprintf("%.1f km. ", v)
-		}
-		if v, ok := d.Metrics["calories"]; ok && v > 0 {
-			parts += fmt.Sprintf("%d kcal. ", int(v))
-		}
-		if v, ok := d.Metrics["hr_avg"]; ok && v > 0 {
-			hi := ""
-			if m, ok2 := d.Metrics["hr_max"]; ok2 && m > 0 {
-				hi = fmt.Sprintf(" (peak %d)", int(m))
-			}
-			parts += fmt.Sprintf("Avg heart rate %d%s. ", int(v), hi)
-		}
-		if parts == "" {
-			continue
-		}
-		ts := int64(0)
-		if t, terr := time.Parse("2006-01-02", d.Day); terr == nil {
-			ts = t.Unix() + 43200 // midday anchor
-		}
-		if err := db.Exec(
-			"INSERT INTO journal_entries (source, ref, ts, title, body, created_at) VALUES ('ghost.tallyd', $1, $2, $3, $4, $5) ON CONFLICT (source, ref) DO NOTHING",
-			"health:"+d.Day, ts, "health , "+d.Day, parts, time.Now().UnixMilli()); err != nil {
-			return err
-		}
+	sort.Strings(names)
+	for _, n := range names[:len(names)-keep] {
+		_ = os.Remove(filepath.Join(dir, n))
 	}
-	return nil
 }

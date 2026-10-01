@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+
+	"github.com/LocalGhostDao/localghost/server/internal/hw"
 )
 
 // OpenAPI generation, from scratch (no swaggo, no oapi-codegen , the spec for a dozen routes does
@@ -136,6 +138,12 @@ type trailAnsweredDoc struct {
 	Deleted int  `json:"deleted"`
 }
 
+type dayDoc struct {
+	Day       hw.DayRow `json:"day"`
+	CheckedIn bool      `json:"checkedIn"`
+	Built     bool      `json:"built"`
+}
+
 type trailForgetDoc struct {
 	TS      int64   `json:"ts"`
 	RadiusM float64 `json:"radiusM,omitempty"`
@@ -219,6 +227,8 @@ func (s *Server) routes() []route {
 			Auth: true, Response: modelState{}, Handler: s.handleModel},
 		{Method: "POST", Path: "/v1/geo/trail/answer", Summary: "Were you there? keep=true remembers the stretch; keep=false deletes its points for good.",
 			Auth: true, Request: trailAnswerDoc{}, Response: trailAnsweredDoc{}, Handler: s.handleTrailAnswer},
+		{Method: "GET", Path: "/v1/day", Summary: "One day's summary from photos, trail, health, voice notes and the check-in (?d=YYYY-MM-DD; &build=1 writes it now).",
+			Auth: true, Response: dayDoc{}, Handler: s.handleDay},
 		{Method: "POST", Path: "/v1/geo/trail/forget", Summary: "Delete one fix and its neighbours at the same spot (dry=true only says which).",
 			Auth: true, Request: trailForgetDoc{}, Response: trailForgottenDoc{}, Handler: s.handleTrailForget},
 		{Method: "GET", Path: "/v1/trail/key", Summary: "This device's trail key, to read its own sealed trail while unlocked ({have:false} when none).",

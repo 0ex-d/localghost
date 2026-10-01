@@ -336,7 +336,7 @@ func (b *llamaBackend) Infer(ctx context.Context, req oracle.Request) (oracle.Re
 	if len(req.Images) > 0 {
 		return b.inferMultimodal(ctx, req)
 	}
-	prompt, budget := applyThink(req.Think, req.Input, req.MaxTokens)
+	prompt, budget, think := applyThink(req.Think, req.Input, req.MaxTokens)
 	// CHAT COMPLETIONS, not raw /completion , even for plain text. The raw endpoint sends the bare
 	// prompt with NO chat template, and an instruction-tuned model without its turn structure leaks
 	// template tokens into the output and rambles to the token cap (observed on device: garbage
@@ -346,8 +346,8 @@ func (b *llamaBackend) Infer(ctx context.Context, req oracle.Request) (oracle.Re
 		// Same disease, second organ: the TEXT one-shot path (tags, distillation) was still
 		// letting this natively-thinking gemma burn its whole budget on reasoning and return
 		// empty content , the caption fix only covered the multimodal path. One-shot tasks do
-		// not want a monologue; chat (StreamChat) keeps its deliberate <think> handling.
-		"chat_template_kwargs": map[string]any{"enable_thinking": false},
+		// not want a monologue unless the caller asked for a think level.
+		"chat_template_kwargs": map[string]any{"enable_thinking": think},
 	}
 	if budget > 0 {
 		payload["max_tokens"] = budget
@@ -400,7 +400,7 @@ func (b *llamaBackend) Infer(ctx context.Context, req oracle.Request) (oracle.Re
 
 // inferMultimodal builds an OpenAI-style chat completion with image content parts.
 func (b *llamaBackend) inferMultimodal(ctx context.Context, req oracle.Request) (_ oracle.Response, err error) {
-	promptText, mmBudget := applyThink(req.Think, req.Input, req.MaxTokens)
+	promptText, mmBudget, _ := applyThink(req.Think, req.Input, req.MaxTokens)
 	req.MaxTokens = mmBudget
 	content := []map[string]any{{"type": "text", "text": promptText}}
 	var keys []string
@@ -561,31 +561,33 @@ func stateString(st *os.ProcessState) string {
 	return st.String()
 }
 
-// applyThink turns the Think level into an instruction prefix and a token budget. Prompted
-// deliberation, honestly: "brief" asks for short working then the answer, "deep" for thorough
-// reasoning first. Budgets only apply when the caller left MaxTokens at the backend default , an
-// explicit caller budget always wins.
-func applyThink(level, input string, maxTokens int) (string, int) {
+// applyThink turns the Think level into what the request needs: an instruction on how much to
+// reason, a token budget, and whether the chat template's native thinking is on at all.
+//
+// This gemma thinks natively: with enable_thinking the template opens a reasoning channel and
+// llama-server hands it back as reasoning_content, separate from the answer. So "off" turns that
+// channel OFF (the answer comes straight, fastest), and "brief" and "deep" turn it on with a word
+// on how long to go and a budget that leaves room for the answer after the reasoning. Before 1 Oct
+// 2026 the streamed chat never set the kwarg, so the model reasoned at every level, "off"
+// included, and the levels asked for <think> tags on top of the native channel; the switch in
+// SETTINGS changed nothing a person could see. Budgets only apply when the caller left MaxTokens at
+// the backend default , an explicit caller budget always wins.
+func applyThink(level, input string, maxTokens int) (prompt string, budget int, think bool) {
 	switch level {
 	case "brief":
 		if maxTokens == 0 {
-			maxTokens = 2048 // reasoning is billed against max_tokens , CPU-era 768 starved answers
+			maxTokens = 2048 // reasoning is billed against max_tokens
 		}
-		// The <think>...</think> wrapper is load-bearing: ghost.synthd splits tokens inside it into
-		// reasoning events for the app's thinking panel, and keeps only what follows as the answer.
-		// Without the explicit delimiter this model reasons in-band and the reasoning leaks into the
-		// visible answer (and the panel stays empty).
-		return "Put your reasoning between <think> and </think>, then give a clear answer after </think>. Reason briefly , a few lines.\n\n" + input, maxTokens
+		return "Think briefly first, a few lines at most, then answer clearly.\n\n" + input, maxTokens, true
 	case "deep":
 		if maxTokens == 0 {
 			// Reasoning tokens count INSIDE this cap: at 2048 a thorough think consumed the whole
-			// budget and the visible answer was EMPTY , the "no answer to my question" bug. The
-			// 4070 makes 8192 cheap; better a long think than a silent one.
+			// budget and the visible answer was EMPTY. The 4070 makes 8192 cheap.
 			maxTokens = 8192
 		}
-		return "Put your reasoning between <think> and </think>, then give your best answer after </think>. Reason carefully and at length: work step by step, consider what could be wrong.\n\n" + input, maxTokens
+		return "Think carefully and at length first: work step by step and consider what could be wrong, then give your best answer.\n\n" + input, maxTokens, true
 	default:
-		return input, maxTokens
+		return input, maxTokens, false
 	}
 }
 
@@ -608,7 +610,7 @@ type Turn struct {
 func (b *llamaBackend) StreamChat(ctx context.Context, history []Turn, prompt, think, imageB64 string) (io.ReadCloser, string, error) {
 	// No separate ready gate: if llama-server is down or still loading, the POST below fails fast
 	// (refused connection / non-200) and the caller reports it , one truth source, no stale flag.
-	p, budget := applyThink(think, prompt, 0)
+	p, budget, thinking := applyThink(think, prompt, 0)
 	// Text-only stays a plain string; with an image the content becomes OpenAI-style parts , the
 	// SAME shape inferMultimodal uses for captions, so the projector path is already proven.
 	var content any = p
@@ -629,6 +631,8 @@ func (b *llamaBackend) StreamChat(ctx context.Context, history []Turn, prompt, t
 	payload := map[string]any{
 		"messages": messages,
 		"stream":   true,
+		// the native reasoning channel, on only when the person's think level asks for it
+		"chat_template_kwargs": map[string]any{"enable_thinking": thinking},
 	}
 	if budget > 0 {
 		payload["max_tokens"] = budget

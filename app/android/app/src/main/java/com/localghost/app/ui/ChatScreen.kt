@@ -111,15 +111,17 @@ fun ChatScreen(
             }
         }
 
+        // DEBUG MODE's tok/s meter, under the replies. It sat inside the pending-attachments loop
+        // below, so it showed only while an attachment waited to be sent: never, in practice.
+        if (genStats.isNotEmpty()) {
+            Text(genStats, color = TerminalDim, style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.padding(horizontal = 16.dp))
+        }
         // pending attachments (to be sent + ingested with the next message)
         if (pendingAttachments.isNotEmpty()) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
                 pendingAttachments.forEach { a ->
-                    if (genStats.isNotEmpty()) {
-            Text(genStats, color = TerminalDim, style = MaterialTheme.typography.labelMedium,
-                modifier = Modifier.padding(horizontal = 16.dp))
-        }
-        Row(Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                    Row(Modifier.fillMaxWidth().padding(vertical = 2.dp),
                         verticalAlignment = Alignment.CenterVertically) {
                         Text(if (a.kind == Attachment.Kind.IMAGE) "▣" else "◍",
                             color = TerminalGreen, style = MaterialTheme.typography.bodyMedium)

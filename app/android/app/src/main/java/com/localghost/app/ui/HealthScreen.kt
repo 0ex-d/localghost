@@ -52,8 +52,17 @@ fun HealthScreen() {
             Spacer(Modifier.height(12.dp))
             SectionLabel("HEALTH")
             Spacer(Modifier.height(4.dp))
-            Text("30 days · your box's copy · synced from Health Connect on the SYNC screen",
+            Text("30 days · your box's copy · from Health Connect, every six hours in the background and on request in SETTINGS › HEALTH",
                 color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+            // WHERE THE DATA STANDS: the newest day the box holds, and how the phone's last
+            // hand-over went. "I can't get my health data from my watch" is answered here, not
+            // guessed at: the box's newest day says whether anything arrives, the phone's last
+            // run says whether anything was found to send.
+            val newest = series?.mapNotNull { it.days.lastOrNull() }?.maxOrNull()
+            val run = remember { com.localghost.app.sync.HealthSync.lastRun(ctx) }
+            Spacer(Modifier.height(6.dp))
+            Text(HealthStatus.line(newest, run?.at ?: 0L, run?.days ?: 0, run?.newestDay ?: "", run?.error ?: "", run?.skipped ?: "", System.currentTimeMillis() / 1000),
+                color = if (run != null && run.error.isNotEmpty()) Warning else GhostTextDim, style = MaterialTheme.typography.labelMedium)
         }
         when {
             series == null -> item {
@@ -61,7 +70,7 @@ fun HealthScreen() {
                     style = MaterialTheme.typography.bodyMedium)
             }
             series!!.isEmpty() -> item {
-                Text("! no health data yet , CONNECT HEALTH on the SYNC screen and sync a week",
+                Text("! no health data on the box yet , allow Health Connect in SETTINGS › HEALTH and it ships the last week",
                     color = TerminalDim, style = MaterialTheme.typography.bodyMedium)
             }
             else -> {
