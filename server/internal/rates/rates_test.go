@@ -1,6 +1,7 @@
 package rates
 
 import (
+	"fmt"
 	"math"
 	"strconv"
 	"strings"
@@ -71,11 +72,11 @@ func TestMarketsAndURLs(t *testing.T) {
 	if u := (Market{"coinbase", "BTC", "USD"}).CandlesURL(from, from.AddDate(0, 0, 10)); !strings.Contains(u, "granularity=86400&start=2026-01-01T00:00:00Z") {
 		t.Fatal(u)
 	}
-	// twelve symbols: the phone's four, then six batch venues once each and Coinbase for the ten
-	// largest and USDT, every minute
+	// twelve symbols: the phone's three (the ECB twice and Coinbase's rank list), then six batch
+	// venues once each and Coinbase for the ten largest and USDT, every minute
 	syms := []string{"BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "ADA", "TRX", "AVAX", "LINK", "TON", "DOT"}
 	ph := PhoneSources()
-	if len(ph) != 4 || ph[0].ID != "ecb" || ph[3].ID != "coinpaprika" {
+	if len(ph) != 3 || ph[0].ID != "ecb" || ph[2].ID != CoinbaseRanks || !strings.HasPrefix(ph[2].URL, "https://www.coinbase.com/") {
 		t.Fatalf("phone sources: %v", ph)
 	}
 	tk := TickerSources(syms)
@@ -91,7 +92,7 @@ func TestMarketsAndURLs(t *testing.T) {
 			t.Fatalf("a ticker every %d min", s.Every)
 		}
 	}
-	if cb != CoinbaseTop+1 || len(tk) != 6+CoinbaseTop+1 || len(Sources(syms, from)) != 4+len(tk) {
+	if cb != CoinbaseTop+1 || len(tk) != 6+CoinbaseTop+1 || len(Sources(syms, from)) != 3+len(tk) {
 		t.Fatalf("coinbase %d, tickers %d", cb, len(tk))
 	}
 	if u := (Market{"binance", "BTC", "USDT"}).HourlyURL(from, from.Add(time.Hour)); !strings.Contains(u, "interval=1h") {
@@ -241,6 +242,34 @@ func TestParseCoinsBothSources(t *testing.T) {
 	}
 	if _, err := ParseCoins("coingecko", []byte(`{"status":{"error_code":429}}`)); err == nil {
 		t.Fatal("an error body passed")
+	}
+}
+
+// Coinbase's list as coinbase.com's price pages read it: numbers as strings, the day's change as a
+// fraction of one, a coin it no longer lists left out.
+func TestParseCoinbaseRanks(t *testing.T) {
+	var rows []string
+	for i := 1; i <= 12; i++ {
+		rows = append(rows, fmt.Sprintf(`{"id":"u%d","symbol":"c%d","name":"Coin %d","slug":"coin-%d","listed":%v,"rank":%d,"market_cap":"%d000.5","latest":"%d.25","volume_24h":"77.5","percent_change":-0.0123}`,
+			i, i, i, i, i != 3, i, 100-i, i))
+	}
+	body := `{"pagination":{"limit":100},"data":[` + strings.Join(rows, ",") + `]}`
+	coins, err := ParseCoins(CoinbaseRanks, []byte(body))
+	if err != nil || len(coins) != 11 {
+		t.Fatalf("coinbase: %d %v", len(coins), err)
+	}
+	c := coins[0]
+	if c.Symbol != "C1" || c.ID != "coin-1" || c.Rank != 1 || c.PriceUSD != 1.25 || c.MarketCap != 99000.5 || c.Volume24 != 77.5 || math.Abs(c.Change24+1.23) > 1e-9 {
+		t.Fatalf("first: %+v", c)
+	}
+	if coins[2].Symbol != "C4" {
+		t.Fatalf("the unlisted coin stayed: %+v", coins[2])
+	}
+	if _, err := ParseCoins(CoinbaseRanks, []byte(`{"errors":[{"id":"not_found"}]}`)); err == nil {
+		t.Fatal("an error body passed")
+	}
+	if !IsRankSource(CoinbaseRanks) || !IsRankSource("coingecko") || IsRankSource("coinbase:BTC-USD") {
+		t.Fatal("rank sources")
 	}
 }
 

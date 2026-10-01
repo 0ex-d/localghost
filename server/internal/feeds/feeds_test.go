@@ -96,7 +96,7 @@ func TestDefaultSourcesAreWellFormed(t *testing.T) {
 		}
 		seen[s.ID] = true
 	}
-	if len(seen) != 12 {
+	if len(seen) != 11 { // the FT is read in its own app
 		t.Fatalf("%d sources", len(seen))
 	}
 }

@@ -35,7 +35,7 @@ func TestNewsIngestStoriesAndDigest(t *testing.T) {
 	batch := map[string]any{"fetchedAt": now.Unix(), "feeds": []map[string]any{
 		{"id": "bbc", "status": 200, "body": rss("Minister resigns over leaked memo", "https://bbc/a", "The minister resigned on Tuesday after a memo leaked.")},
 		{"id": "guardian", "status": 200, "body": rss("Leaked memo: the minister's resignation", "https://guardian/b", "A leaked memo ended the minister's week.")},
-		{"id": "ft", "status": 200, "body": "<html><body>please accept cookies</body></html>"},
+		{"id": "telegraph", "status": 200, "body": "<html><body>please accept cookies</body></html>"},
 		{"id": "npr", "status": 0, "error": "timeout"},
 	}}
 	raw, _ := json.Marshal(batch)
@@ -62,7 +62,7 @@ func TestNewsIngestStoriesAndDigest(t *testing.T) {
 	for _, f := range st.Feeds {
 		byID[f.ID] = f
 	}
-	if byID["bbc"].Status != "ok" || byID["bbc"].Items != 1 || !strings.HasPrefix(byID["ft"].Status, "not a feed") || byID["ft"].Failures != 2 || byID["npr"].Status != "fetch failed: timeout" {
+	if byID["bbc"].Status != "ok" || byID["bbc"].Items != 1 || !strings.HasPrefix(byID["telegraph"].Status, "not a feed") || byID["telegraph"].Failures != 2 || byID["npr"].Status != "fetch failed: timeout" {
 		t.Fatalf("feeds: %+v", byID)
 	}
 	rows, _ := db.Query("SELECT sources, title FROM news_stories")
@@ -147,5 +147,101 @@ func TestNewsFetchedByTheBoxWhenThePhoneIsAway(t *testing.T) {
 	// forced: fetched again whatever the marks say
 	if what, _ := newsFetchByBox(context.Background(), db, client, now.Add(time.Minute), true, lg); !strings.HasPrefix(what, "fetched 2 feeds") {
 		t.Fatalf("%q", what)
+	}
+}
+
+// A story's articles are read for its summary: a free page whole, a page that says it is not free
+// only as far as it serves anyone, marked paywalled.
+func TestArticlesRead(t *testing.T) {
+	db := pgFresh(t, "lgtest_synthd_articles")
+	lg := slog.New(slog.NewTextHandler(io.Discard, nil))
+	now := time.Date(2026, 10, 1, 8, 30, 0, 0, time.UTC)
+	para := func(i int) string {
+		return "<p>The minister resigned on Tuesday (part " + strconv.Itoa(i) + ") after a vote of 312 to 290 in the chamber, ending a week of talks.</p>"
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/free" {
+			var b strings.Builder
+			for i := 0; i < 8; i++ {
+				b.WriteString(para(i))
+			}
+			w.Write([]byte("<html><article>" + b.String() + "</article></html>"))
+			return
+		}
+		w.Write([]byte(`<html><script type="application/ld+json">{"isAccessibleForFree": false}</script><article>` + para(0) + `</article></html>`))
+	}))
+	defer srv.Close()
+	_ = db.Exec("INSERT INTO news_feeds (id, name, url, added_at) VALUES ('a','A','x',1), ('b','B','y',1)")
+	_ = db.Exec("INSERT INTO news_stories (id, first_seen, last_seen, title, sources) VALUES (7, $1, $1, 'Minister resigns', 2)", now.Add(-time.Hour).Unix())
+	for _, it := range []struct{ feed, guid, path string }{{"a", "g1", "/free"}, {"b", "g2", "/paid"}} {
+		if err := db.Exec("INSERT INTO news_items (feed_id, guid, link, title, published, fetched, story_id) VALUES ($1,$2,$3,'Minister resigns',$4,$4,7)",
+			it.feed, it.guid, srv.URL+it.path, now.Add(-time.Hour).Unix()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n, err := articlePass(context.Background(), db, egress.New(), now, lg); err != nil || n != 2 {
+		t.Fatalf("read: %d %v", n, err)
+	}
+	status := func(guid string) (string, int) {
+		rows, _ := db.Query("SELECT body_status, length(body) FROM news_items WHERE guid = $1", guid)
+		n, _ := strconv.Atoi(*rows.Vals[0][1])
+		return *rows.Vals[0][0], n
+	}
+	if st, n := status("g1"); st != "ok" || n < 600 {
+		t.Fatalf("free: %s %d", st, n)
+	}
+	if st, n := status("g2"); st != "paywalled" || n < 50 {
+		t.Fatalf("not free: %s %d", st, n)
+	}
+	if a := storyArticle(db, 7); !strings.Contains(a, "(part 7)") {
+		t.Fatalf("the story's article is the free whole one: %.80q", a)
+	}
+	// a day on, unsummarised: the article is let go, what was learnt of it stays
+	if _, err := articlePass(context.Background(), db, egress.New(), now.Add(25*time.Hour), lg); err != nil {
+		t.Fatal(err)
+	}
+	if a := storyArticle(db, 7); a != "" {
+		t.Fatalf("an article outlived its day: %.40q", a)
+	}
+	if st, n := status("g1"); st != "ok" || n != 0 {
+		t.Fatalf("after a day: %s %d", st, n)
+	}
+}
+
+// The FT an earlier list seeded is taken off once (its entries and its count in the stories with
+// it); a feed that has never once given a feed is switched off after six tries, and only then.
+func TestFeedsRetiredAndGivenUp(t *testing.T) {
+	db := pgFresh(t, "lgtest_synthd_feedsretired")
+	now := time.Date(2026, 10, 1, 8, 30, 0, 0, time.UTC)
+	// a box seeded by the earlier list: the FT among its feeds, an entry of it in a story
+	_ = db.Exec("INSERT INTO settings (key, value) VALUES ('news_seeded','1')")
+	_ = db.Exec("INSERT INTO news_feeds (id, name, url, added_at) VALUES ('ft','Financial Times','https://www.ft.com/rss/home',1), ('bbc','BBC','https://feeds.bbci.co.uk/news/rss.xml',1), ('dead','Dead','https://dead.example/feed',1)")
+	_ = db.Exec("INSERT INTO news_stories (id, first_seen, last_seen, title, sources) VALUES (3, $1, $1, 'Rates held', 2)", now.Unix())
+	_ = db.Exec("INSERT INTO news_items (feed_id, guid, title, published, fetched, story_id) VALUES ('ft','f1','Rates held',$1,$1,3), ('bbc','b1','Rates held',$1,$1,3)", now.Unix())
+	if err := seedFeeds(db); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedFeeds(db); err != nil { // once only
+		t.Fatal(err)
+	}
+	rows, _ := db.Query("SELECT id FROM news_feeds ORDER BY id")
+	if len(rows.Vals) != 2 || *rows.Vals[0][0] != "bbc" || *rows.Vals[1][0] != "dead" {
+		t.Fatalf("feeds: %v", rows.Vals)
+	}
+	if rows, _ := db.Query("SELECT sources FROM news_stories WHERE id = 3"); *rows.Vals[0][0] != "1" {
+		t.Fatalf("the story still counts the FT: %s", *rows.Vals[0][0])
+	}
+	enabled := func() string {
+		rows, _ := db.Query("SELECT enabled FROM news_feeds WHERE id = 'dead'")
+		return *rows.Vals[0][0]
+	}
+	batch, _ := json.Marshal(map[string]any{"fetchedAt": now.Unix(), "feeds": []map[string]any{{"id": "dead", "status": 404}}})
+	for i := 1; i <= 6; i++ {
+		if _, err := ingestFetched(db, batch, now.Add(time.Duration(i)*2*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		if want := map[bool]string{true: "f", false: "t"}[i >= 6]; enabled() != want {
+			t.Fatalf("after %d tries: enabled %s", i, enabled())
+		}
 	}
 }

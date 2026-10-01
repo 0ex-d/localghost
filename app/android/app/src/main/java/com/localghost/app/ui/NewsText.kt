@@ -39,7 +39,8 @@ object NewsText {
     fun markets(prices: List<Price>, fx: Map<String, Double>, fxDay: String, now: Long, market: String = ""): String {
         val parts = ArrayList<String>()
         if (market.isNotEmpty()) parts.add(market)
-        val ordered = prices.filter { it.usd > 0 && it.symbol != "USDT" }.sortedWith(compareBy({ it.symbol != "BTC" }, { it.symbol }))
+        // BTC and ETH only: the other forty-eight are on CRYPTO, a tap from home
+        val ordered = prices.filter { it.usd > 0 && (it.symbol == "BTC" || it.symbol == "ETH") }.sortedWith(compareBy({ it.symbol != "BTC" }, { it.symbol }))
         ordered.take(3).forEach { p -> parts.add(p.symbol + " " + money(p.usd) + " USD (" + p.n + " venues, " + ago(p.at, now) + ")") }
         prices.firstOrNull { it.symbol == "USDT" && it.usd > 0 }?.let { parts.add("USDT " + "%.4f".format(java.util.Locale.US, it.usd)) }
         fx["GBP"]?.let { parts.add("EUR/GBP " + "%.4f".format(java.util.Locale.US, it)) }

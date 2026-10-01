@@ -1,13 +1,14 @@
 package hw
 
 import (
+	"encoding/json"
 	"strconv"
 
 	"github.com/LocalGhostDao/localghost/server/internal/feeds"
 )
 
 // NewsItem is one outlet's telling of a story, as the phone lists it (the link is the phone's to
-// open; the box never fetches it).
+// open; the box reads the article behind it only for a story it summarises).
 type NewsItem struct {
 	Feed      string `json:"feed"`
 	Outlet    string `json:"outlet"`
@@ -99,4 +100,21 @@ func NewsMarks(c Querier) (lastFetch, lastDigest int64) {
 		lastDigest, _ = strconv.ParseInt(*rows.Vals[0][0], 10, 64)
 	}
 	return
+}
+
+// NewsBrief is the day's news in a few sentences, as synthd last wrote it from the summaries of
+// the most-told stories (settings news_brief); "" before the first.
+func NewsBrief(c Querier) (text string, at int64) {
+	rows, err := c.Query("SELECT value FROM settings WHERE key = 'news_brief'")
+	if err != nil || len(rows.Vals) != 1 || rows.Vals[0][0] == nil {
+		return "", 0
+	}
+	var b struct {
+		At   int64  `json:"at"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal([]byte(*rows.Vals[0][0]), &b) != nil {
+		return "", 0
+	}
+	return b.Text, b.At
 }

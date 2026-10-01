@@ -1,9 +1,8 @@
 // Package rates reads the market data the phone fetched and turns it into the box's numbers:
 // the ECB's daily reference rates (32 currencies against the euro, an offline converter), a BTC
-// price from four public exchange tickers (Coinbase, Kraken, Bitstamp, Gemini, none needing a
-// key), and the top 100 coins from CoinGecko with CoinPaprika as the fallback. The box never
-// opens a connection: the phone fetches each body and hands it over; the parsing and the method
-// live here and in ghost.tallyd.
+// price from seven exchanges' public tickers (none needing a key), and the top 100 coins Coinbase
+// lists, by market cap, from Coinbase itself. The phone fetches what it can on Wi-Fi, the box the
+// rest (internal/egress); the parsing and the method live here and in ghost.tallyd.
 package rates
 
 import (
@@ -40,15 +39,37 @@ func Sources(symbols []string, now time.Time) []Source {
 }
 
 // PhoneSources is what the phone fetches on Wi-Fi and the box otherwise: the ECB's day and its
-// last 90 days, and the two rank lists. The tickers are not here: the box reads those itself
-// every minute, whatever the phone is on, so the minute series has no gaps.
+// last 90 days, and the rank list. The tickers are not here: the box reads those itself every
+// minute, whatever the phone is on, so the minute series has no gaps.
 func PhoneSources() []Source {
 	return []Source{
 		{"ecb", "ECB reference rates", ECBDailyURL, 180},
 		{"ecb-90d", "ECB, the last 90 days", ECB90DaysURL, 1440},
-		{"coingecko", "CoinGecko", "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=100&page=1", 60},
-		{"coinpaprika", "CoinPaprika", "https://api.coinpaprika.com/v1/tickers?quotes=USD&limit=100", 60},
+		{CoinbaseRanks, "Coinbase, the coins it lists by market cap", CoinbaseRanksURL, 60},
 	}
+}
+
+// THE RANK LIST is Coinbase's: the coins it lists, largest market cap first, with each one's
+// price, market cap, circulating supply, change over the day and dollar volume across the market.
+// It is the list coinbase.com's own price pages read (not a documented API: Coinbase's documented
+// public endpoints give products and volumes, and no market cap). The old aggregators' ids stay
+// readable so a batch an older phone posts still lands.
+const (
+	CoinbaseRanks    = "coinbase-ranks"
+	CoinbaseRanksURL = "https://www.coinbase.com/api/v2/assets/search?base=USD&filter=listed&include_prices=true&resolution=day&sort=rank&order=asc&limit=100&page=1"
+)
+
+// RankSources are the rank lists' ids, the one in use first.
+var RankSources = []string{CoinbaseRanks, "coingecko", "coinpaprika"}
+
+// IsRankSource says whether an id is a rank list.
+func IsRankSource(id string) bool {
+	for _, s := range RankSources {
+		if s == id {
+			return true
+		}
+	}
+	return false
 }
 
 // TickerSources is the prices, every minute: every batch venue's all-pairs ticker (one call
@@ -253,9 +274,35 @@ type Coin struct {
 	Change24  float64 `json:"change24"` // per cent
 }
 
-// ParseCoins reads CoinGecko's /coins/markets or CoinPaprika's /tickers, by source id.
+// ParseCoins reads a rank list by source id: Coinbase's asset search, or CoinGecko's
+// /coins/markets or CoinPaprika's /tickers (kept for batches from older phones).
 func ParseCoins(source string, body []byte) ([]Coin, error) {
 	switch source {
+	case CoinbaseRanks: // {data:[{symbol, name, slug, rank, market_cap:"…", latest:"…", volume_24h:"…", percent_change: 0.0095}]}
+		var obj struct {
+			Data []struct {
+				Slug   string `json:"slug"`
+				Symbol string `json:"symbol"`
+				Name   string `json:"name"`
+				Rank   int    `json:"rank"`
+				Cap    any    `json:"market_cap"`
+				Price  any    `json:"latest"`
+				Vol    any    `json:"volume_24h"`
+				Change any    `json:"percent_change"` // a fraction of one: 0.0095 is +0.95%
+				Listed *bool  `json:"listed"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(body, &obj); err != nil {
+			return nil, err
+		}
+		out := make([]Coin, 0, len(obj.Data))
+		for _, r := range obj.Data {
+			if r.Listed != nil && !*r.Listed {
+				continue
+			}
+			out = append(out, Coin{r.Rank, r.Slug, strings.ToUpper(r.Symbol), r.Name, anyNum(r.Price), anyNum(r.Cap), anyNum(r.Vol), 100 * anyNum(r.Change)})
+		}
+		return finishCoins(out)
 	case "coingecko":
 		var rows []struct {
 			ID     string  `json:"id"`
@@ -304,6 +351,18 @@ func ParseCoins(source string, body []byte) ([]Coin, error) {
 		return finishCoins(out)
 	}
 	return nil, errors.New("unknown rank source " + source)
+}
+
+// anyNum reads a number Coinbase sends as a string or as a number.
+func anyNum(v any) float64 {
+	switch x := v.(type) {
+	case float64:
+		return x
+	case string:
+		f, _ := strconv.ParseFloat(x, 64)
+		return f
+	}
+	return 0
 }
 
 func finishCoins(in []Coin) ([]Coin, error) {

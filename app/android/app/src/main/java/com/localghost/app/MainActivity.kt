@@ -573,6 +573,15 @@ class MainActivity : ComponentActivity() {
         val plan = planAnswer?.plan
         // in auto mode the model's "this needs nothing from outside" is final; "on" searches anyway
         if (plan != null && !plan.search && mode != "on") wantWeb = false
+        // WHAT THE BOX KEEPS is never searched for, in any mode: a coin's price, the top coins,
+        // crypto as a whole, a rate between currencies, the day's headlines. The box puts its own
+        // numbers in the answer. Without the box's word (no plan in time) the phone judges alone.
+        val boxHas = plan?.boxHas?.takeIf { it.isNotBlank() }
+            ?: if (plan == null && com.localghost.app.net.BoxKnows.covers(text)) "the box's own numbers" else null
+        if (boxHas != null && wantWeb) {
+            wantWeb = false
+            status("no web search , the box has this ($boxHas)")
+        }
         // Without the box's plan, a follow-up ("how about now?") borrows the question before it,
         // so the phone does not search the three words as they stand.
         val searchText = if (plan == null) com.localghost.app.net.FollowUp.standalone(text,

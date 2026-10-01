@@ -69,7 +69,20 @@ func (c *Client) GetCapped(ctx context.Context, id, url string, cap int64) (Fetc
 	return out, err
 }
 
+// GetPage fetches a web page the way a browser asks for one (HTML first, English), for an
+// article read for its story's summary: the page as it is served to anyone.
+func (c *Client) GetPage(ctx context.Context, id, url string) (Fetched, error) {
+	start := time.Now()
+	out, err := c.fetch(ctx, id, url, maxBody, "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	out.TookMs = int(time.Since(start).Milliseconds())
+	return out, err
+}
+
 func (c *Client) get(ctx context.Context, id, url string, cap int64) (Fetched, error) {
+	return c.fetch(ctx, id, url, cap, "application/rss+xml, application/atom+xml, application/xml, application/json, text/xml;q=0.9, */*;q=0.5")
+}
+
+func (c *Client) fetch(ctx context.Context, id, url string, cap int64, accept string) (Fetched, error) {
 	out := Fetched{ID: id}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -77,7 +90,8 @@ func (c *Client) get(ctx context.Context, id, url string, cap int64) (Fetched, e
 		return out, nil
 	}
 	req.Header.Set("User-Agent", UA)
-	req.Header.Set("Accept", "application/rss+xml, application/atom+xml, application/xml, application/json, text/xml;q=0.9, */*;q=0.5")
+	req.Header.Set("Accept", accept)
+	req.Header.Set("Accept-Language", "en-GB,en;q=0.9")
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {

@@ -39,6 +39,10 @@ type newsDoc struct {
 	Stories    []hw.NewsStory `json:"stories"`
 	LastFetch  int64          `json:"lastFetch"`
 	LastDigest int64          `json:"lastDigest"`
+	// Brief is the day's news in three or four sentences, written from the most-told stories'
+	// summaries (the home screen's); "" before the first
+	Brief   string `json:"brief"`
+	BriefAt int64  `json:"briefAt"`
 }
 
 func (s *Server) mountedSlot() (int, bool) {
@@ -235,8 +239,9 @@ func (s *Server) handleNews(w http.ResponseWriter, r *http.Request) {
 		stories = []hw.NewsStory{}
 	}
 	lf, ld := hw.NewsMarks(db)
+	brief, briefAt := hw.NewsBrief(db)
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(newsDoc{Stories: stories, LastFetch: lf, LastDigest: ld})
+	_ = json.NewEncoder(w).Encode(newsDoc{Stories: stories, LastFetch: lf, LastDigest: ld, Brief: brief, BriefAt: briefAt})
 }
 
 // handleRatesHistory , GET /v1/rates/history?code=BTC&days=N , a symbol's daily USD closes (the

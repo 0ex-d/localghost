@@ -34,10 +34,12 @@ import com.localghost.app.ui.theme.*
 import kotlinx.coroutines.launch
 
 enum class Dest(val label: String, val glyph: String) {
+    HOME("HOME", "⌂"),
     CHAT("CHAT", "›_"),
     CHATS("CHATS", "≡_"),
     MEMORIES("MEMORIES", "◇"),
     NEWS("NEWS", "¶"),
+    CRYPTO("CRYPTO", "₿"),
     NOTIFICATIONS("NOTIFICATIONS", "△"),
     HARNESS("BOX STATUS", "◉"),
     SYNC("SYNC", "⇅"),
@@ -123,7 +125,8 @@ fun MainShell(
     onNewConversation: () -> Unit,
     onDeleteConversation: (String) -> Unit,
 ) {
-    var dest by rememberSaveable { mutableStateOf(Dest.CHAT) }
+    // HOME first: the prices, the day's news and a box to ask from; a question asked there opens CHAT
+    var dest by rememberSaveable { mutableStateOf(Dest.HOME) }
     // A notification tap lands here AFTER the security gate (MainShell only exists unlocked):
     // navigate to the thing the notification was about, once.
     LaunchedEffect(navRequest) {
@@ -131,6 +134,8 @@ fun MainShell(
             "notifications" -> dest = Dest.NOTIFICATIONS
             "memories" -> dest = Dest.MEMORIES
             "news" -> dest = Dest.NEWS
+            "home" -> dest = Dest.HOME
+            "chat" -> dest = Dest.CHAT
             "phrases" -> dest = Dest.PHRASES
             "settings" -> dest = Dest.SETTINGS
             "map" -> dest = Dest.MAP
@@ -148,8 +153,8 @@ fun MainShell(
     val orientation = LocalConfiguration.current.orientation
     LaunchedEffect(orientation) { drawerState.close() }
 
-    BackHandler(enabled = drawerState.isOpen || dest != Dest.CHAT) {
-        if (drawerState.isOpen) close() else dest = Dest.CHAT
+    BackHandler(enabled = drawerState.isOpen || dest != Dest.HOME) {
+        if (drawerState.isOpen) close() else dest = Dest.HOME
     }
 
     ModalNavigationDrawer(
@@ -182,6 +187,11 @@ fun MainShell(
                 Box(Modifier.weight(1f).fillMaxWidth()
                     .padding(bottom = pad.calculateBottomPadding())) {
                     when (dest) {
+                        Dest.HOME -> HomeScreen(
+                            onAsk = { q -> onNewConversation(); onSend(q); dest = Dest.CHAT },
+                            onOpenNews = { dest = Dest.NEWS },
+                            onOpenCrypto = { dest = Dest.CRYPTO })
+                        Dest.CRYPTO -> CryptoScreen()
                         Dest.CHAT -> ChatScreen(messages, streaming, localModeActive, pendingAttachments,
                             onSend, onStopChat, { showAddSheet = true }, onClearAttachment,
                             brainLabel, brainIsBox, phoneModels, onPickBox, onPickPhoneModel,
@@ -384,6 +394,7 @@ private fun DrawerPanel(
             //   YOUR ARCHIVE , the life being kept: pictures, memories, and the pipe feeding them
             //   THE BOX , the machine: status, models, notifications, pairing and verification
             //   the app-level tail (settings, glossary, about) stays below the divider as before
+            DrawerRow(Dest.HOME, Dest.HOME == current) { onSelect(Dest.HOME) }
             DrawerRow(Dest.CHAT, Dest.CHAT == current) { onSelect(Dest.CHAT) }
 
             if (conversations.isNotEmpty()) {
@@ -432,7 +443,7 @@ private fun DrawerPanel(
             SectionLabel("YOUR ARCHIVE")
             // PHRASES appears while the lock-screen card is on (from the start; off by hand in settings).
             val phrasesOn = com.localghost.app.phrases.PhraseState.enabled(androidx.compose.ui.platform.LocalContext.current)
-            listOf(Dest.GALLERY, Dest.MAP, Dest.PHRASES, Dest.HEALTH, Dest.MEMORIES, Dest.NEWS, Dest.SYNC)
+            listOf(Dest.GALLERY, Dest.MAP, Dest.PHRASES, Dest.HEALTH, Dest.MEMORIES, Dest.NEWS, Dest.CRYPTO, Dest.SYNC)
                 .filter { it != Dest.PHRASES || phrasesOn || current == Dest.PHRASES }
                 .forEach { DrawerRow(it, it == current) { onSelect(it) } }
 

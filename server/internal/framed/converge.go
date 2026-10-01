@@ -21,6 +21,7 @@ package framed
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -42,6 +43,7 @@ type ConvergeReport struct {
 	Previewed     int           `json:"previewed"`    // previews written this pass
 	Notified      int           `json:"notified"`     // ensure notifies handed to searchd
 	Unrenderable  int           `json:"unrenderable"` // videos with no frame grab: nothing for a vision model to see
+	SetAside      int           `json:"setAside"`     // damaged photos moved to frames/damaged this pass (damaged.go)
 	Took          time.Duration `json:"took"`         // nanoseconds, as Duration marshals
 }
 
@@ -50,14 +52,18 @@ func (r ConvergeReport) String() string {
 	if total == 0 {
 		return "archive empty"
 	}
+	aside := ""
+	if r.SetAside > 0 {
+		aside = fmt.Sprintf("; %d damaged photos moved to frames/damaged", r.SetAside)
+	}
 	if r.AtLatest == total {
-		return fmt.Sprintf("%d frames (%d photos, %d videos), all at the latest stage (pipeline v%d), %s",
-			total, r.Photos, r.Videos, PipelineVersion, r.Took.Round(time.Millisecond))
+		return fmt.Sprintf("%d frames (%d photos, %d videos), all at the latest stage (pipeline v%d)%s, %s",
+			total, r.Photos, r.Videos, PipelineVersion, aside, r.Took.Round(time.Millisecond))
 	}
 	return fmt.Sprintf("%d frames (%d photos, %d videos): %d at the latest stage; behind v%d: %d; no preview: %d; "+
-		"undescribed: %d; untitled: %d; untagged: %d; tags without category: %d; unrenderable videos: %d , re-derived %d, previewed %d, asked searchd for %d, %s",
+		"undescribed: %d; untitled: %d; untagged: %d; tags without category: %d; unrenderable videos: %d , re-derived %d, previewed %d, asked searchd for %d%s, %s",
 		total, r.Photos, r.Videos, r.AtLatest, PipelineVersion, r.Behind, r.NoPreview,
-		r.NoDescription, r.NoTitle, r.NoTags, r.NoCategory, r.Unrenderable, r.Rederived, r.Previewed, r.Notified, r.Took.Round(time.Millisecond))
+		r.NoDescription, r.NoTitle, r.NoTags, r.NoCategory, r.Unrenderable, r.Rederived, r.Previewed, r.Notified, aside, r.Took.Round(time.Millisecond))
 }
 
 // ConvergeState is the row framed publishes in daemon_state under "converge": the live progress
@@ -165,6 +171,29 @@ func (p *Pipeline) Converge() ConvergeReport {
 			// framed's own repairs: read the original again with today's pipeline. This also
 			// stamps pipe_ver, so the row is not re-read at the next start.
 			f, prev, derr := p.derive(a.ArchivePath, false)
+			if errors.Is(derr, errSetAside) {
+				// damaged: moved to frames/damaged and forgotten, so out of every count of this pass
+				r.SetAside++
+				r.Photos--
+				r.NoPreview--
+				if behind {
+					r.Behind--
+				}
+				if !a.Described {
+					r.NoDescription--
+				}
+				if !a.Titled {
+					r.NoTitle--
+				}
+				if !a.Tagged {
+					r.NoTags--
+				}
+				if a.Tagged && !a.Categorised {
+					r.NoCategory--
+				}
+				st.Done++
+				continue
+			}
 			if derr != nil {
 				p.log.Warn("converge: re-derive failed", "fn", "Converge", "hash", a.Hash, "err", derr)
 			} else {

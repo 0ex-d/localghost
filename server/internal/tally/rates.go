@@ -240,7 +240,7 @@ func IngestRates(db *poltergres.ReadWrite, raw []byte, now time.Time) (RatesResu
 			}
 			res.Candles += len(cs)
 			items[s.ID] = len(cs)
-		case s.ID == "coingecko" || s.ID == "coinpaprika":
+		case rates.IsRankSource(s.ID):
 			coinBodies[s.ID] = []byte(s.Body)
 		case strings.HasSuffix(s.ID, ":all"):
 			// a venue's every pair in one answer: keep the symbols followed and the USDT leg
@@ -342,8 +342,8 @@ func IngestRates(db *poltergres.ReadWrite, raw []byte, now time.Time) (RatesResu
 			}
 		}
 	}
-	// the rank list: CoinGecko first, CoinPaprika when it did not come or did not parse
-	for _, src := range []string{"coingecko", "coinpaprika"} {
+	// the rank list: Coinbase's (an older phone's aggregator lists still land)
+	for _, src := range rates.RankSources {
 		body, ok := coinBodies[src]
 		if !ok {
 			continue

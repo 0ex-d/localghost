@@ -32,10 +32,12 @@ fun AboutScreen() {
         Text("Your thoughts and words never leave your box: your photos, notes, trail, health, " +
              "chats and memories are read and written on it alone, and nothing of them is sent " +
              "anywhere. The box does pull general information from outside to use in context: " +
-             "the news feeds and the market tickers it follows, and what a plugin you connect " +
-             "asks for. When your phone is on Wi-Fi the phone fetches these for it; otherwise " +
-             "the box fetches them itself, so a publisher or an exchange may see your box's " +
-             "address, the same as a browser's. It pulls only; it tells them nothing.",
+             "the news feeds and the market tickers it follows, the articles behind the stories " +
+             "it summarises, and what a plugin you connect asks for. When your phone is on Wi-Fi " +
+             "the phone fetches the feeds for it; the prices and the articles the box fetches " +
+             "itself, so a publisher or an exchange may see your box's address, the same as a " +
+             "browser's. It pulls only; it tells them nothing. An article is read for its " +
+             "story's summary and then let go: the box keeps the summary, not the article.",
              color = GhostText, style = MaterialTheme.typography.bodyMedium)
 
         Spacer(Modifier.height(24.dp))

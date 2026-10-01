@@ -302,6 +302,14 @@ var schemaRegistry = []SchemaTable{
 		{"published", "BIGINT", true, "0"},
 		{"fetched", "BIGINT", true, "0"},
 		{"story_id", "BIGINT", true, "0"},
+		// THE ARTICLE ITSELF, read from its page for a story the box summarises: the paragraphs the
+		// page serves anyone (body, held only until the story's summary is written, a day at most),
+		// when it was read (body_at, 0 = not yet), and how it went (body_status: ok; paywalled, the
+		// page says so and only its free part was there; short, the page gave little text; or the
+		// HTTP status).
+		{"body", "TEXT", true, "''"},
+		{"body_at", "BIGINT", true, "0"},
+		{"body_status", "TEXT", true, "''"},
 	}, Unique: []string{"feed_id, guid"}, Indexes: []string{
 		"CREATE INDEX IF NOT EXISTS news_items_published ON news_items (published DESC)",
 		"CREATE INDEX IF NOT EXISTS news_items_story ON news_items (story_id)",

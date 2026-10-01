@@ -263,6 +263,15 @@ func main() {
 		// minute: the box says so at once and the phone plans by itself.
 		sp := currentSpeed(runDir)
 		box := planBox(sp)
+		// WHAT THE BOX KEEPS needs no search: a coin's price, the top coins, crypto as a whole, a
+		// rate between currencies, the day's headlines. Said before the model is asked (and on
+		// the CPU too), so the phone leaves the web alone and the chat puts the box's numbers in.
+		if why, has := boxCovers(runDir, q.Prompt); has {
+			lg.Info("web plan", "fn", "plan", "search", false, "boxHas", true) // the why names what was asked: debug only
+			lg.Debug("web plan: the box has it", "fn", "plan", "why", why)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "search": false, "boxHas": why, "need": "", "shape": "figure", "fresh": true, "queries": []string{}, "box": box})
+			return
+		}
 		if sp.Known && !sp.OnGPU {
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "box": box, "why": "the model is on the CPU"})
 			return

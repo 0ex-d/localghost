@@ -24,6 +24,12 @@ CLI="${GHOST_CLI:-./bin/ghost-cli}"
 LINES=5
 ONLY=""
 
+# ghost-cli prints a command's answer as INDENTED JSON (one field a line, '"key": value'). The
+# detail lines below read single fields with sed, so the answer is folded back onto one line
+# first ('"key":value'): read raw, every compact pattern here matched nothing and the oracled
+# model line, synthd's outings and days and tallyd's feeds were silently missing.
+cj() { "$CLI" "$@" 2>/dev/null | sed 's/^[[:space:]]*//' | tr -d '\n' | sed 's/": /":/g'; }
+
 while [ $# -gt 0 ]; do
     case "$1" in
         -n) LINES="$2"; shift 2 ;;
@@ -116,7 +122,7 @@ for svc in $CHECK; do
             esac
             if [ "$svc" = "ghost.oracled" ]; then
                 # The GPU question, from oracled itself (tools/gpu.sh has the whole picture).
-                m=$("$CLI" ghost.oracled models 2>/dev/null)
+                m=$(cj ghost.oracled models)
                 v=$(echo "$m" | sed -n 's/.*"verdict":"\([^"]*\)".*/\1/p' | head -1)
                 sp=$(echo "$m" | sed -n 's/.*"speed":"\([^"]*\)".*/\1/p' | head -1)
                 [ -n "$v" ] && printf '  model %s\n' "$v"
@@ -176,7 +182,7 @@ for svc in $CHECK; do
                 fi
                 # The time zones: the grid the trail's newest point is looked up in, and the zone it named.
                 if [ -s "$MOUNT/geo/tz/grid.bin" ]; then
-                    printf '  time zones: grid built (%s); local_tz %s\n' "$(du -sh "$MOUNT/geo/tz/grid.bin" 2>/dev/null | cut -f1)" "$("$CLI" ghost.framed setting key=local_tz 2>/dev/null | sed -n 's/.*"value":"\([^"]*\)".*/\1/p' | head -1)"
+                    printf '  time zones: grid built (%s); local_tz %s\n' "$(du -sh "$MOUNT/geo/tz/grid.bin" 2>/dev/null | cut -f1)" "$(cj ghost.framed setting key=local_tz | sed -n 's/.*"value":"\([^"]*\)".*/\1/p' | head -1)"
                 elif ls "$MOUNT"/geo/tz/*.json >/dev/null 2>&1; then
                     printf '  time zones: file present, no grid yet (ghost-cli ghost.framed tz-grid; watch its log)\n'
                 else
@@ -186,24 +192,27 @@ for svc in $CHECK; do
             if [ "$svc" = "ghost.tallyd" ]; then
                 # The data the box pulls in, one line per feed, as Box Status shows it
                 # (ghost-cli ghost.tallyd feeds has the detail rows).
-                f=$("$CLI" ghost.tallyd feeds 2>/dev/null)
+                f=$(cj ghost.tallyd feeds)
                 fsum=$(echo "$f" | sed -n 's/.*"summary":"\([^"]*\)".*/\1/p' | head -1)
                 if [ -n "$fsum" ]; then
                     printf '  feeds: %s\n' "$fsum"
                     echo "$f" | grep -o '"title":"[^"]*","state":"[^"]*","line":"[^"]*"' \
                         | sed 's/"title":"\([^"]*\)","state":"\([^"]*\)","line":"\([^"]*\)"/    \2 · \1 · \3/'
+                    # and every detail row that is not well: which exchange, which feed, and why
+                    echo "$f" | grep -o '"k":"[^"]*","v":"[^"]*","state":"\(flaky\|late\|failing\)"' \
+                        | sed 's/"k":"\([^"]*\)","v":"\([^"]*\)","state":"\([^"]*\)"/      ! \1 (\3): \2/'
                 fi
             fi
             if [ "$svc" = "ghost.synthd" ]; then
                 # The memories made from the photos, and the taste , built without the model.
-                o=$("$CLI" ghost.synthd outings 2>/dev/null)
+                o=$(cj ghost.synthd outings)
                 n=$(echo "$o" | sed -n 's/.*"outings":\([0-9]*\).*/\1/p' | head -1)
                 tr_=$(echo "$o" | sed -n 's/.*"trips":\([0-9]*\).*/\1/p' | head -1)
                 ts=$(echo "$o" | sed -n 's/.*"taste":"\([^"]*\)".*/\1/p' | head -1)
                 [ -n "$n" ] && printf '  outings %s (%s trips)\n' "$n" "${tr_:-0}"
                 [ -n "$ts" ] && printf '  taste: %s\n' "$(echo "$ts" | cut -c1-140)"
                 # The days, prebuilt: one summary a day, the model's where it passed the check.
-                d=$("$CLI" ghost.synthd days 2>/dev/null)
+                d=$(cj ghost.synthd days)
                 dn=$(echo "$d" | sed -n 's/.*"days":\([0-9]*\).*/\1/p' | head -1)
                 dm=$(echo "$d" | sed -n 's/.*"byModel":\([0-9]*\).*/\1/p' | head -1)
                 dl=$(echo "$d" | sed -n 's/.*"oldest":"\([^"]*\)".*/\1/p' | head -1)
@@ -232,7 +241,16 @@ done
 printf '\n=== ghost.secd (state dir) ===\n'
 if "$CLI" ghost.secd ping >/dev/null 2>&1; then
     printf '  %s   ' "$(green UP)"
-    "$CLI" ghost.secd status 2>/dev/null | head -1 || echo ""
+    # its status is indented JSON: the health code and line, like the daemons above
+    st="$(cj ghost.secd status)"
+    hc="$(printf '%s' "$st" | sed -n 's/.*"code":\([0-9]\).*/\1/p')"
+    hd="$(printf '%s' "$st" | sed -n 's/.*"detail":"\([^"]*\)".*/\1/p')"
+    case "$hc" in
+        0) echo "ok${hd:+ , $hd}" ;;
+        1) echo "$(yellow DEGRADED) ${hd}" ;;
+        2) echo "$(red FAILING) ${hd}" ;;
+        *) echo "(its status carries no health line)" ;;
+    esac
 else
     printf '  %s   (secd is the root daemon , if this is down the box is locked or crashed)\n' "$(red DOWN)"
 fi

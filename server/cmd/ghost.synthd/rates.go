@@ -81,11 +81,25 @@ func marketQuestion(prompt string) bool { return marketHint.MatchString(prompt) 
 func ratesSource(runDir, prompt string) []ctxItem {
 	codes, amount, ok := moneyQuestion(prompt)
 	market := marketQuestion(prompt)
-	if !ok && !market {
-		return nil
-	}
+	top := topHint.MatchString(prompt)
 	db := chatStore(filepath.Dir(runDir))
 	if db == nil {
+		return nil
+	}
+	// any coin the box follows, by symbol or name ("chainlink price", "how is AVAX doing")
+	if coins := coinsIn(prompt, knownCoins(db, time.Now())); len(coins) > 0 && (ok || priceHint.MatchString(prompt) || len(strings.Fields(prompt)) <= 3) {
+		have := map[string]bool{}
+		for _, c := range codes {
+			have[c] = true
+		}
+		for _, c := range coins {
+			if !have[c] {
+				codes = append(codes, c)
+			}
+		}
+		ok = true
+	}
+	if !ok && !market && !top {
 		return nil
 	}
 	var out []ctxItem
@@ -94,12 +108,19 @@ func ratesSource(runDir, prompt string) []ctxItem {
 			out = append(out, marketItem(st))
 		}
 	}
-	if ok {
+	if ok || top {
 		snap, err := hw.RatesNow(db)
 		if err != nil {
 			return out
 		}
-		out = append(out, ratesItems(snap, codes, amount, time.Now())...)
+		if top {
+			if it, has := topItem(snap, topCount(prompt), time.Now()); has {
+				out = append(out, it)
+			}
+		}
+		if ok {
+			out = append(out, ratesItems(snap, codes, amount, time.Now())...)
+		}
 	}
 	return out
 }

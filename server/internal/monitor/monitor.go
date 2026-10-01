@@ -1,5 +1,5 @@
 // Package monitor is Box Status's view of the data the box pulls in: the prices every minute,
-// the exchanges, the history being walked back, the market index, the ECB, the rank lists, the
+// the exchanges, the history being walked back, the market index, the ECB, the rank list, the
 // daily candles and the news. Each section says how it is doing in one word (ok, filling,
 // waiting, flaky, late, failing), one line, and how old its newest piece is; opened, it says the
 // rest. It reads the database straight (the fetch log, the tables, ghost.tallyd's progress), so it
@@ -138,15 +138,15 @@ func fetching(db *poltergres.ReadWrite, now time.Time) Section {
 	if proxy {
 		side = "the phone, on Wi-Fi"
 	}
-	s.Rows = append(s.Rows, Row{K: "news, ECB, rank lists", V: side})
+	s.Rows = append(s.Rows, Row{K: "news, ECB, rank list", V: side})
 	if who, at := lastBy(db, "kind IN ('ecb','ranks')"); who != "" {
-		s.Rows = append(s.Rows, Row{K: "ECB and rank lists last", V: "by the " + who + ", " + Ago(age(now, at)) + " ago"})
+		s.Rows = append(s.Rows, Row{K: "ECB and rank list last", V: "by the " + who + ", " + Ago(age(now, at)) + " ago"})
 	}
 	if who, at := tally.LastBy(db, "news_last_by"); who != "" {
 		s.Rows = append(s.Rows, Row{K: "news last", V: "by the " + who + ", " + Ago(age(now, at)) + " ago"})
 	}
 	if proxy {
-		s.Line = "the phone on Wi-Fi fetches news, ECB and rank lists; the box fetches prices"
+		s.Line = "the phone on Wi-Fi fetches news, ECB and the rank list; the box fetches prices"
 	} else {
 		s.Line = "the box fetches everything (" + why + ")"
 	}
@@ -726,10 +726,12 @@ func fetchRow(st feedstat.Stat, now time.Time, name string) Row {
 	return r
 }
 
-// --- the rank lists ------------------------------------------------------------------------
+var rankNames = map[string]string{"coinbase-ranks": "Coinbase", "coingecko": "CoinGecko", "coinpaprika": "CoinPaprika"}
+
+// --- the rank list -------------------------------------------------------------------------
 
 func ranks(db *poltergres.ReadWrite, now time.Time) Section {
-	s := Section{ID: "ranks", Title: "Rank lists", Every: "hourly", AgeS: -1}
+	s := Section{ID: "ranks", Title: "Rank list", Every: "hourly", AgeS: -1}
 	var at int64
 	var src string
 	coins := 0
@@ -738,7 +740,7 @@ func ranks(db *poltergres.ReadWrite, now time.Time) Section {
 	}
 	stats, _ := feedstat.Stats(db, feedstat.KindRanks, now.Add(-24*time.Hour), false)
 	for _, st := range stats {
-		s.Rows = append(s.Rows, fetchRow(st, now, map[string]string{"coingecko": "CoinGecko", "coinpaprika": "CoinPaprika (the fallback)"}[st.Key]))
+		s.Rows = append(s.Rows, fetchRow(st, now, rankNames[st.Key]))
 	}
 	if at == 0 {
 		s.State, s.Line = Waiting, "no list yet"
@@ -753,7 +755,7 @@ func ranks(db *poltergres.ReadWrite, now time.Time) Section {
 	default:
 		s.State = OK
 	}
-	name := map[string]string{"coingecko": "CoinGecko", "coinpaprika": "CoinPaprika"}[src]
+	name := rankNames[src]
 	if name == "" {
 		name = src
 	}
@@ -860,11 +862,13 @@ func news(db *poltergres.ReadWrite, now time.Time) Section {
 	enabled, okRecent, failing := 0, 0, 0
 	var lastFetch int64
 	var bad []Row
+	var off []string
 	for _, v := range rows.Vals {
 		if len(v) < 7 || v[0] == nil {
 			continue
 		}
 		if on := str(v[2]); on != "t" && on != "true" {
+			off = append(off, nonEmpty(str(v[1]), str(v[0])))
 			continue
 		}
 		enabled++
@@ -917,6 +921,18 @@ func news(db *poltergres.ReadWrite, now time.Time) Section {
 		}
 	}
 	s.Rows = append(s.Rows, Row{K: "last 24 hours", V: fmt.Sprintf("%d new entries · %d stories · %d summaries written", entries, stories, summaries)})
+	// the articles read for the summaries: free, behind a paywall (its free part only), or failed
+	if rows, err := db.Query(`SELECT count(*), count(*) FILTER (WHERE body_status = 'ok'), count(*) FILTER (WHERE body_status = 'paywalled'),
+		count(*) FILTER (WHERE body_status = 'short'), count(*) FILTER (WHERE body_status NOT IN ('ok','paywalled','short'))
+		FROM news_items WHERE body_at >= $1`, since); err == nil && len(rows.Vals) == 1 {
+		v := rows.Vals[0]
+		if n := i64(v[0]); n > 0 {
+			s.Rows = append(s.Rows, Row{K: "articles read", V: fmt.Sprintf("%d · %d whole · %d paywalled (free part only) · %d with little text · %d failed", n, i64(v[1]), i64(v[2]), i64(v[3]), i64(v[4]))})
+		}
+	}
+	if text, at := hw.NewsBrief(db); text != "" {
+		s.Rows = append(s.Rows, Row{K: "brief", V: "written " + Ago(age(now, at)) + " ago"})
+	}
 	if delay > 0 {
 		s.Rows = append(s.Rows, Row{K: "stories reach the box", V: Ago(delay) + " after they are published (median)"})
 	}
@@ -928,6 +944,9 @@ func news(db *poltergres.ReadWrite, now time.Time) Section {
 	}
 	s.Rows = append(s.Rows, Row{K: "digest", V: dg})
 	s.Rows = append(s.Rows, bad...)
+	if len(off) > 0 {
+		s.Rows = append(s.Rows, Row{K: "switched off", V: list(off, 6) + " (never gave a feed, or turned off by hand)"})
+	}
 	s.Line = fmt.Sprintf("%d of %d feeds · fetched %s · %d new today", okRecent, enabled, last, entries)
 	return s
 }

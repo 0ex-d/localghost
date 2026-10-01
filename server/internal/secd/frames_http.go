@@ -316,7 +316,8 @@ func (s *Server) handleFramesExists(w http.ResponseWriter, r *http.Request) {
 		s.appearsDown(w)
 		return
 	}
-	have, err := s.notif.FramesHave(mounted, cleanHashes(req.Hashes))
+	asked := cleanHashes(req.Hashes)
+	have, err := s.notif.FramesHave(mounted, asked)
 	if err != nil {
 		secdLog.Warn("frames/exists query failed", "fn", "handleFramesExists", "err", err)
 		s.appearsDown(w)
@@ -325,6 +326,13 @@ func (s *Server) handleFramesExists(w http.ResponseWriter, r *http.Request) {
 	out := make([]string, 0, len(have))
 	for h := range have {
 		out = append(out, h)
+	}
+	// a damaged photo framed set aside is had too: the phone does not send it again
+	damaged := hw.DamagedHashes(hw.DamagedDirOf(filepath.Join(s.cfg.StateDir, "mnt", fmt.Sprintf("slot%d", mounted))))
+	for _, h := range asked {
+		if damaged[h] && !have[h] {
+			out = append(out, h)
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string][]string{"have": out})
@@ -1475,6 +1483,7 @@ func (s *Server) handlePipeline(w http.ResponseWriter, r *http.Request) {
 		s.appearsDown(w)
 		return
 	}
+	p.Damaged = hw.DamagedCount(hw.DamagedDirOf(filepath.Join(s.cfg.StateDir, "mnt", fmt.Sprintf("slot%d", mounted))))
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(p)
 }

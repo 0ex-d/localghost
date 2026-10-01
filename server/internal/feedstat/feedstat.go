@@ -25,10 +25,11 @@ const Keep = 48 * time.Hour
 const (
 	KindTicker  = "ticker"  // a venue's prices, every minute (binance:all, coinbase:BTC-USD)
 	KindECB     = "ecb"     // the ECB's tables
-	KindRanks   = "ranks"   // the rank lists (coingecko, coinpaprika)
+	KindRanks   = "ranks"   // the rank list (coinbase-ranks; coingecko and coinpaprika before)
 	KindDaily   = "daily"   // a market's daily candles (hist:kraken:BTC-USD)
 	KindHistory = "history" // a page of hourly or minute candles (bars:1h:binance:BTC-USDT)
 	KindNews    = "news"    // a news feed
+	KindArticle = "article" // a news story's article page, read for its summary
 	KindTick    = "tick"    // ghost.tallyd's minute, as a whole
 )
 
@@ -54,7 +55,7 @@ func KindOf(id string) string {
 		return KindDaily
 	case strings.HasPrefix(id, "bars:"):
 		return KindHistory
-	case id == "coingecko" || id == "coinpaprika":
+	case id == "coinbase-ranks" || id == "coingecko" || id == "coinpaprika":
 		return KindRanks
 	}
 	return KindTicker

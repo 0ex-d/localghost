@@ -30,6 +30,9 @@ type PipelineProgress struct {
 	Videos          int `json:"videos"`
 	Other           int `json:"other"`
 	Total           int `json:"total"` // photos + videos, the rows that have stages
+	// Damaged is how many photos framed moved to frames/damaged (originals nothing on the box can
+	// read, out of the archive and the stages; deleting them is the owner's). secd counts the files.
+	Damaged int `json:"damaged"`
 
 	Derived     PipelineStage `json:"derived"`   // pipe_ver at the highest version
 	Previewed   PipelineStage `json:"previewed"` // preview + thumb on disk

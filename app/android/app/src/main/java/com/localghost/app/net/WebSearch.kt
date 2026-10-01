@@ -75,7 +75,10 @@ object WebSearch {
     /** What the box's model said the question needs from the web (/v1/chat/plan): whether to
      *  search at all, the fact in one sentence, its shape, whether it goes stale, and the searches
      *  that would find it, most specific first. */
-    class Plan(val search: Boolean, val need: String, val shape: String, val fresh: Boolean, val queries: List<String>, val box: BoxSpeed? = null) {
+    class Plan(val search: Boolean, val need: String, val shape: String, val fresh: Boolean, val queries: List<String>, val box: BoxSpeed? = null,
+               /** What the box keeps that answers this (its prices, the rank list, the ECB, the day's
+                *  news); "" when the web may help. Final in every web mode: the box's number is fresher. */
+               val boxHas: String = "") {
         /** The searches run in the first round: the first two. */
         val first: List<String> get() = queries.take(2)
         /** The rest, kept for a second round the box may ask for when the first read thin. */

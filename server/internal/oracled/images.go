@@ -112,9 +112,31 @@ func ffmpegJPEG(ctx context.Context, path, kind string) ([]byte, error) {
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	cmd.WaitDelay = 5 * time.Second
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("ffmpeg: %v %s", err, strings.TrimSpace(errb.String()))
+		return nil, fmt.Errorf("ffmpeg: %v: %s", err, firstLine(errb.String()))
 	}
 	return out.Bytes(), nil
+}
+
+// firstLine is the first thing ffmpeg said, without its "[mjpeg @ 0x55…]" prefix: the reason, not
+// the forty lines of its decoder giving up (they filled the logs, a screen per failed caption).
+func firstLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		for strings.HasPrefix(line, "[") {
+			i := strings.Index(line, "] ")
+			if i < 0 {
+				break
+			}
+			line = strings.TrimSpace(line[i+2:])
+		}
+		if line != "" {
+			if len(line) > 120 {
+				line = line[:120]
+			}
+			return line
+		}
+	}
+	return "no reason given"
 }
 
 // imageForModel is the data URI of the image at path as the model is shown it: decoded, turned
@@ -145,9 +167,13 @@ func imageForModel(ctx context.Context, path string) (string, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
+	missing := false // a converter not installed: installing it might read the image
 	for _, conv := range converters {
 		b, err := conv(ctx, path, kind)
 		if err != nil {
+			if errors.Is(err, exec.ErrNotFound) {
+				missing = true
+			}
 			tried = append(tried, err.Error())
 			continue
 		}
@@ -157,6 +183,11 @@ func imageForModel(ctx context.Context, path string) (string, error) {
 			continue
 		}
 		return dataURI(f), nil
+	}
+	if !missing && modelReads(kind) {
+		// Go's decoder and ffmpeg both read the file and both refused it: no install will help.
+		// searchd finishes the job without a caption on these words ("the file looks damaged").
+		return "", fmt.Errorf("image is %s and could not be decoded by anything on the box, the file looks damaged (%s); it is not sent whole", kind, strings.Join(tried, "; "))
 	}
 	return "", fmt.Errorf("image is %s and could not be decoded to fit the model (%s) , install the webp package (dwebp) or ffmpeg; it is not sent whole, a full-size photo crashes llama-server", kind, strings.Join(tried, "; "))
 }

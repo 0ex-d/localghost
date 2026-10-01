@@ -1098,6 +1098,8 @@ object BoxClient {
         val caption: Queue, val tag: Queue, val embed: Queue,
         val describedLastHour: Int, val describedLastDay: Int, val lastDescribedAt: Long,
         val etaSeconds: Long, val converge: Converge?, val convergeUpdatedAt: Long, val now: Long,
+        /** Damaged photos framed moved out of the archive into frames/damaged, for the owner to delete. */
+        val damaged: Int = 0,
     )
 
     /** GET /v1/pipeline: the stage-by-stage progress the Box Status screen draws. Null when the
@@ -1120,12 +1122,13 @@ object BoxClient {
                 queue("caption"), queue("tag"), queue("embed"),
                 r.optInt("describedLastHour"), r.optInt("describedLastDay"), r.optLong("lastDescribedAt"),
                 r.optLong("etaSeconds", -1), cv, r.optLong("convergeUpdatedAt"), r.optLong("now"),
+                r.optInt("damaged"),
             )
         }
     } catch (e: Exception) { android.util.Log.w("LocalGhost", "pipeline: ${e.message}"); null }
 
     /** GET /v1/feeds/status: how each feed the box pulls in is doing (prices, exchanges, history,
-     *  CRYPTO50, ECB, rank lists, daily candles, news), judged by the box. Null when the box is down
+     *  CRYPTO50, ECB, rank list, daily candles, news), judged by the box. Null when the box is down
      *  or older than the report. */
     suspend fun feedsStatus(ctx: Context): com.localghost.app.ui.FeedsText.Report? = try {
         com.localghost.app.ui.FeedsText.parse(BoxHttp.getJson(ctx, "/v1/feeds/status"))
@@ -1202,7 +1205,9 @@ object BoxClient {
 
     data class NewsItem(val feed: String, val outlet: String, val title: String, val link: String, val summary: String, val published: Long)
     data class NewsStory(val id: Long, val title: String, val summary: String, val sources: Int, val firstSeen: Long, val lastSeen: Long, val items: List<NewsItem>)
-    data class News(val stories: List<NewsStory>, val lastFetch: Long, val lastDigest: Long)
+    /** [brief]: the day's news in three or four sentences, written on the box from the most-told
+     *  stories' summaries ("" before the first). */
+    data class News(val stories: List<NewsStory>, val lastFetch: Long, val lastDigest: Long, val brief: String = "", val briefAt: Long = 0)
 
     /** The stories since a time (/v1/news); null when unreachable. */
     suspend fun news(ctx: Context, since: Long = 0): News? = try {
@@ -1217,7 +1222,7 @@ object BoxClient {
                     val it = ia.optJSONObject(j) ?: return@mapNotNull null
                     NewsItem(it.optString("feed"), it.optString("outlet"), it.optString("title"), it.optString("link"), it.optString("summary"), it.optLong("published"))
                 })
-        }, r.optLong("lastFetch"), r.optLong("lastDigest"))
+        }, r.optLong("lastFetch"), r.optLong("lastDigest"), r.optString("brief"), r.optLong("briefAt"))
     } catch (_: Exception) { null }
 
     data class CoinRow(val rank: Int, val symbol: String, val name: String, val priceUsd: Double, val marketCap: Double, val change24: Double)
@@ -1352,7 +1357,8 @@ object BoxClient {
                 if (!r.optBoolean("ok", false)) PlanAnswer(null, box)
                 else {
                     val qs = r.optJSONArray("queries")?.let { a -> (0 until a.length()).map { a.optString(it) }.filter { it.isNotBlank() } } ?: emptyList()
-                    PlanAnswer(WebSearch.Plan(r.optBoolean("search", true), r.optString("need", ""), r.optString("shape", "prose"), r.optBoolean("fresh", false), qs, box), box)
+                    PlanAnswer(WebSearch.Plan(r.optBoolean("search", true), r.optString("need", ""), r.optString("shape", "prose"), r.optBoolean("fresh", false), qs, box,
+                        r.optString("boxHas", "")), box)
                 }
             } catch (e: Exception) {
                 android.util.Log.w("LocalGhost", "chat plan: ${e.message}"); PlanAnswer(null, null)

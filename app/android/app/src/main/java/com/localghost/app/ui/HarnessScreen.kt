@@ -146,6 +146,12 @@ private fun PipelinePanel() {
                 Spacer(Modifier.height(4.dp))
                 Text("queue · captions ${pl.caption.pending}${parked(pl.caption)} · tags ${pl.tag.pending}${parked(pl.tag)} · embeds ${pl.embed.pending}",
                     color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+                if (pl.damaged > 0) {
+                    Spacer(Modifier.height(4.dp))
+                    // damaged originals nothing on the box can read: moved out of the way, the deleting is yours
+                    Text("${pl.damaged} damaged " + (if (pl.damaged == 1) "photo" else "photos") + " moved to frames/damaged on the box, out of the archive; delete them when you like",
+                        color = Warning, style = MaterialTheme.typography.labelMedium)
+                }
                 pl.converge?.let { c ->
                     Spacer(Modifier.height(4.dp))
                     val line = when {
@@ -163,7 +169,7 @@ private fun PipelinePanel() {
 
 /**
  * THE DATA FEEDS , what the box pulls in from outside (the prices every minute, the exchanges,
- * the history walked back, CRYPTO50, the ECB, the rank lists, the daily candles, the news) and how
+ * the history walked back, CRYPTO50, the ECB, the rank list, the daily candles, the news) and how
  * each is doing, judged on the box (/v1/feeds/status): a mark, a line, how old the newest piece
  * is. A section opens on tap to the box's detail. Polled every 30 s while the screen is open; the
  * ages tick between polls.

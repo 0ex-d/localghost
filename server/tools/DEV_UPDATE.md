@@ -4284,3 +4284,110 @@ real venues and feeds were not reached from here; the first hour on the box is t
 Build fix (app): `BoxClient.countryCells` is internal (it returns `MapPlan.Country`, and `MapPlan`
 is internal), and `NotificationsScreen` imports Compose's `getValue`/`setValue` for its `by remember`
 state (the fully qualified `remember` did not bring the delegate operators with it).
+
+## Photos the box cannot read, Coinbase's rank list, home, the box's numbers in chat, the articles and the brief (framed, oracled, searchd, rates, synthd, secd, monitor, app)
+
+- Photos nothing can read. Some originals are damaged beyond both decoders (Go's: "missing 0xff00
+  sequence", "bad Huffman code"; ffmpeg's: "Picture size 29476x44915 is invalid", "dqt: invalid
+  precision"). They had no preview, went to oracled for a caption from the original, failed, and
+  came back at every stock-take (three caption jobs failing every few minutes, a screen of ffmpeg
+  in the log each time). Now framed marks such a photo (`frames.unreadable`, the reason) when both
+  decoders refuse it, and clears the mark if a later read succeeds. Converge counts them apart
+  (`unreadable photos: N`), neither re-reads them nor asks searchd for a caption (a pipeline bump or
+  `ghost-cli ghost.framed unreadable retry=true` reads them again). `/v1/pipeline` leaves them out
+  of the stage totals and says `unreadable`. oracled tells "nothing on the box can read it, the
+  file looks damaged" apart from "a converter is missing", with ffmpeg's first line only; searchd
+  finishes such a caption job without a caption instead of failing it five times.
+  `ghost-cli ghost.framed unreadable` lists them with what each file says: whether its bytes still
+  hash to its name (the archive is named by the hash of what arrived, so intact means it arrived
+  like this), how it starts, its longest run of zero bytes and the zeros at its end (a copy cut
+  short or a cloud placeholder half fetched). `GET /v1/frames/unreadable`; Box Status' pipeline
+  panel shows "N photos the box cannot read" and lists them by capture time on a tap.
+- Coinbase's rank list in place of CoinGecko and CoinPaprika (`coinbase-ranks`): the coins Coinbase
+  lists, by market cap, with price, cap, circulating supply, the day's change and dollar volume,
+  from the list coinbase.com's own price pages read (`www.coinbase.com/api/v2/assets/search`,
+  `filter=listed`, `sort=rank`). Not a documented API: Coinbase's documented public endpoints give
+  products and volumes but an empty market cap. The followed symbols and CRYPTO50's constituents
+  are now the largest coins Coinbase lists (BNB, TRX, HYPE and the like drop out unless added by
+  hand). A batch from an older phone with the old ids still lands.
+- The box's numbers are not searched for. synthd's `/plan` says `search:false, boxHas:<why>` before
+  asking the model (and on the CPU too) when the question is a price of a coin the box follows (by
+  symbol in capitals, the common ones in any case, or by name: "chainlink price"), the top N coins,
+  crypto as a whole, a rate between currencies, or the day's headlines. The phone leaves the web
+  alone for these in every mode and says so in the status line; without the box's plan it judges
+  the common cases itself (`BoxKnows`). The chat's rates source puts in any followed coin by name
+  and, for "top N", the rank list's first N at the box's own prices.
+- The articles. For each story about to be summarised synthd reads up to two of its articles'
+  pages (twelve a pass), keeps the paragraphs the page serves anyone (`news_items.body`), and marks
+  how it went (`body_status`: ok; paywalled, the page's own schema.org isAccessibleForFree false,
+  only its free part kept; short; or the HTTP status). A paywall is never got round: no crawler's
+  name, no borrowed cookies. The story's summary is written from the reports and the article (two
+  or three sentences, numbers held to both). Logged as fetch_log kind `article`; the news section
+  of Box Status says how many were read whole, behind a paywall, short or failed.
+- The brief: from the summaries of the day's six most-told stories, the day's news in three or four
+  sentences (numbers held to the summaries), rewritten when those stories change or after two
+  hours (`settings news_brief`, `/v1/news` brief and briefAt).
+- Home. The app opens on HOME: BTC and ETH always, at the box's own price with the day's change,
+  CRYPTO50 under them; the brief; the five most-told stories; and a box to ask from, which starts a
+  new chat. CRYPTO (from home's prices, or the menu) lists the fifty largest, each at the box's own
+  price where it follows it. NEWS's market line shows BTC and ETH only. Back goes home.
+- `tools/health.sh`: ghost-cli prints indented JSON, so every compact pattern in the script matched
+  nothing (oracled's model line, synthd's outings and days, tallyd's feeds, secd's status line
+  showed "{"). Answers are folded onto one line first (`cj`). Under ghost.tallyd it prints the
+  feeds' summary, a line per section and every detail row that is not well.
+
+Tested: `TestDamagedJPEGIsUnreadable`, `TestUnreadablePhotoSetApart` (marked at the first pass,
+not re-read or captioned at the second, out of the stage totals, the file check),
+`TestImageForModelConvertsWhatTheModelCannotRead`, `TestParseCoinbaseRanks`, `TestBoxHas`,
+`TestTopItem`, `TestArticleText`, `TestGroundedBrief`, `BoxKnowsTest`, `HomeTextTest`,
+`UnreadableTextTest`, and the rest as before. Coinbase's list, the articles and the brief were not
+reached from here.
+
+## Your papers: articles read as you (hw, egress, synthd, secd, monitor, app)
+
+- A paper you subscribe to can be signed in to once, from the phone: Settings › NEWS AND RATES ›
+  YOUR PAPERS › sign in, on the paper's own page inside the app (a WebView). Done hands the box
+  the sign-in (the paper's cookies and the WebView's user agent) and the app forgets it; the box
+  keeps it on the volume (`news_logins`), never serves it back, never logs it.
+- synthd's article reads send that paper's sign-in and agent for its articles (`hw.KeyFor`: the
+  host's domain or a parent of it); Go drops a Cookie on a redirect to another domain. The
+  paper's articles of the last two days that stopped at the paywall are read again when a sign-in
+  is added. A signed-in read that still stops at the paywall marks the sign-in expired: Box
+  Status' news section and the Settings row say to sign in again.
+- `GET/POST /v1/news/logins` (in the OpenAPI document). A cookie with a line break is refused.
+- Nothing pretends to be anyone else (no crawler's name): a paper not signed in to is read only as
+  far as it serves anyone.
+
+Tested: `TestArticlesReadAndSignedIn` (paywalled, then whole with the sign-in and its agent, the
+sign-in's record, never served back, a header-injecting cookie refused, forgotten),
+`TestLoginDomainAndKey`, `PaperTextTest`. The WebView sheet itself is not run here.
+
+## Damaged photos moved aside; no paper sign-ins; the FT retired; feeds that never answer switched off; articles let go
+
+- Damaged photos are moved, not marked. When neither Go's decoder nor ffmpeg can read a photo
+  (on arrival, or when the stock-take reads one again), framed moves the original out of the
+  archive into `<mount>/frames/damaged`, named by when it was taken
+  (`2026-09-30_1432_<hash>.jpg`), adds a line to `damaged/list.txt` with the reason, and forgets
+  it: the frame, its tags, its journal line, searchd's original and its queued caption and tag
+  jobs (`Store.ForgetFrame`). The stock-take then has nothing left to retry. Deleting them is
+  yours: `sudo ./tools/ns.sh ls /var/lib/ghost/mnt/slot0/frames/damaged`. `/v1/pipeline` says how
+  many sit there (`damaged`) and Box Status shows the count; `/v1/frames/exists` answers "have"
+  for a damaged photo's hash, so the phone does not send it again. The `frames.unreadable`
+  column, `/v1/frames/unreadable`, `ghost-cli ghost.framed unreadable` and the app's list are gone
+  (a box that got the column keeps an unused one).
+- The paper sign-ins are gone (`news_logins`, `/v1/news/logins`, YOUR PAPERS, `egress.GetWith`; a
+  box that got the table keeps an empty one).
+- The FT is off the default feeds and taken off a box seeded with it, once (`feeds.Retired`,
+  `news_retired_v1`): its feed, its entries and its count in the stories it told.
+- A feed that has never once given a feed is switched off after six fetches in a row
+  (`feeds.GiveUpAfter`, twelve hours): judged from the box's own fetches from home, so only a
+  feed that is really not there goes. Box Status' news section lists what is switched off;
+  `ghost-cli ghost.synthd news enable=<id>` asks again.
+- Articles: asked for the way a browser asks for a page (HTML first, English), read for the
+  story's summary and let go once it is written (and after a day whatever was not summarised);
+  the box keeps the summary, not the article. A summary written with the article is up to three
+  short paragraphs; from the feeds alone, one or two sentences.
+
+Tested: `TestDamagedPhotoSetAside`, `TestFeedsRetiredAndGivenUp`, `TestArticlesRead` (a free page
+whole, a paywalled one's free part, both let go after a day), `TestDefaultSourcesAreWellFormed`,
+`TestFetchListAndSpools`, and the rest as before.

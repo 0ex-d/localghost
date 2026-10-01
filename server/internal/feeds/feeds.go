@@ -30,16 +30,25 @@ type Source struct {
 // next one is due from the same list).
 var DigestHours = []int{7, 19}
 
+// Retired are the papers an earlier list seeded and this one does not, taken off a box that still
+// has them at the address that list gave (one an operator re-pointed is left alone).
+var Retired = []Source{
+	{"ft", "Financial Times", "https://www.ft.com/rss/home"},
+}
+
+// GiveUpAfter is how many fetches in a row a feed that has never once given a feed gets before it
+// is switched off (twelve hours at one fetch every two).
+const GiveUpAfter = 6
+
 // FetchEvery is how often a feed wants fetching.
 const FetchEvery = 2 * time.Hour
 
-// DefaultSources is the list a new box starts with. Reuters and AP are left out: neither has an
-// official feed any more. Twitter can be added later without other changes.
+// DefaultSources is the list a new box starts with. Reuters and AP are left out (neither has an
+// official feed any more), and so is the FT (Retired: read in its own app).
 func DefaultSources() []Source {
 	return []Source{
 		{"bbc", "BBC", "https://feeds.bbci.co.uk/news/rss.xml"},
 		{"guardian", "The Guardian", "https://www.theguardian.com/world/rss"},
-		{"ft", "Financial Times", "https://www.ft.com/rss/home"},
 		{"economist", "The Economist", "https://www.economist.com/latest/rss.xml"},
 		{"telegraph", "The Telegraph", "https://www.telegraph.co.uk/rss.xml"},
 		{"aljazeera", "Al Jazeera", "https://www.aljazeera.com/xml/rss/all.xml"},

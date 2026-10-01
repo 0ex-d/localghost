@@ -62,8 +62,12 @@ type newsResult struct {
 	Failed                          []string
 }
 
-// seedFeeds puts the default list in once; an operator's edits stand after that.
+// seedFeeds puts the default list in once; an operator's edits stand after that. The papers an
+// earlier list seeded and this one does not are taken off once (feeds.Retired).
 func seedFeeds(db *poltergres.ReadWrite) error {
+	if err := retireFeeds(db); err != nil {
+		return err
+	}
 	rows, err := db.Query("SELECT value FROM settings WHERE key = 'news_seeded'")
 	if err != nil {
 		return err
@@ -78,6 +82,31 @@ func seedFeeds(db *poltergres.ReadWrite) error {
 		}
 	}
 	return db.Exec("INSERT INTO settings (key, value) VALUES ('news_seeded', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", strconv.FormatInt(now, 10))
+}
+
+// retireFeeds takes the retired papers off, once: the feed, its entries, and its count in the
+// stories it told.
+func retireFeeds(db *poltergres.ReadWrite) error {
+	rows, err := db.Query("SELECT value FROM settings WHERE key = 'news_retired_v1'")
+	if err != nil {
+		return err
+	}
+	if len(rows.Vals) > 0 {
+		return nil
+	}
+	for _, r := range feeds.Retired {
+		if err := db.Exec("DELETE FROM news_items WHERE feed_id = $1 AND EXISTS (SELECT 1 FROM news_feeds f WHERE f.id = $1 AND f.url = $2)", r.ID, r.URL); err != nil {
+			return err
+		}
+		if err := db.Exec("DELETE FROM news_feeds WHERE id = $1 AND url = $2", r.ID, r.URL); err != nil {
+			return err
+		}
+	}
+	if err := db.Exec(`UPDATE news_stories s SET sources = greatest(1, (SELECT count(DISTINCT feed_id) FROM news_items i WHERE i.story_id = s.id))
+		WHERE s.last_seen >= extract(epoch from now())::bigint - 30*86400`); err != nil {
+		return err
+	}
+	return db.Exec("INSERT INTO settings (key, value) VALUES ('news_retired_v1', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", strconv.FormatInt(time.Now().Unix(), 10))
 }
 
 // ingestFetched takes one batch: feed health, new entries, their stories.
@@ -116,6 +145,7 @@ func ingestFetched(db *poltergres.ReadWrite, raw []byte, now time.Time) (newsRes
 			if err := db.Exec("UPDATE news_feeds SET last_fetch = $2, last_status = $3, failures = failures + 1 WHERE id = $1", f.ID, b.FetchedAt, status); err != nil {
 				return res, err
 			}
+			giveUp(db, f.ID)
 			res.Failed = append(res.Failed, f.ID+": "+status)
 			e.Error = status
 			logged = append(logged, e)
@@ -126,6 +156,7 @@ func ingestFetched(db *poltergres.ReadWrite, raw []byte, now time.Time) (newsRes
 			if err := db.Exec("UPDATE news_feeds SET last_fetch = $2, last_status = $3, failures = failures + 1 WHERE id = $1", f.ID, b.FetchedAt, "not a feed: "+clip(err.Error(), 100)); err != nil {
 				return res, err
 			}
+			giveUp(db, f.ID)
 			res.Failed = append(res.Failed, f.ID+": "+err.Error())
 			e.Error = "not a feed: " + err.Error()
 			logged = append(logged, e)
@@ -171,6 +202,13 @@ func ingestFetched(db *poltergres.ReadWrite, raw []byte, now time.Time) (newsRes
 	_ = db.Exec("DELETE FROM news_items WHERE published < $1", now.Unix()-int64(newsKeepDays)*86400)
 	_ = db.Exec("DELETE FROM news_stories WHERE last_seen < $1 AND NOT EXISTS (SELECT 1 FROM news_items i WHERE i.story_id = news_stories.id)", now.Unix()-int64(newsKeepDays)*86400)
 	return res, nil
+}
+
+// giveUp switches off a feed that has never once given a feed after feeds.GiveUpAfter fetches in a
+// row: a publication with no feed at that address (a page, a block, a feed that moved) is not
+// asked again every two hours. `ghost-cli ghost.synthd news enable=<id>` asks again.
+func giveUp(db *poltergres.ReadWrite, id string) {
+	_ = db.Exec("UPDATE news_feeds SET enabled = false WHERE id = $1 AND enabled AND last_ok = 0 AND failures >= $2", id, feeds.GiveUpAfter)
 }
 
 // placeInStory finds the story an entry belongs to (a story of the last two days with a similar
@@ -234,14 +272,22 @@ func storyFacts(db *poltergres.ReadWrite, storyID int64) ([]string, error) {
 	return facts, nil
 }
 
-// newsPrompt asks for a one-or-two-sentence account from the reports and nothing else.
-func newsPrompt(facts []string) string {
+// newsPrompt asks for a short account from the reports (and the article, when one was read) and
+// nothing else.
+func newsPrompt(facts []string, article string) string {
 	var b strings.Builder
-	b.WriteString("Below are the headline and the feed description of one news story as several outlets reported it. Write what happened in one or two plain sentences, from these reports only.\n\nREPORTS:\n")
+	if article == "" {
+		b.WriteString("Below are the headline and the feed description of one news story as several outlets reported it. Write what happened in one or two plain sentences, from these reports only.\n\nREPORTS:\n")
+	} else {
+		b.WriteString("Below are the headline and the feed description of one news story as several outlets reported it, and the text of one of the articles. Write what happened in up to three short paragraphs of plain sentences, the most important first, from these only.\n\nREPORTS:\n")
+	}
 	for _, f := range facts {
 		b.WriteString("- " + f + "\n")
 	}
-	b.WriteString("\nKeep every number, name and place exactly as the reports give them; add nothing the reports do not say; no opinion, no headline, no list, no mention of the outlets or of \"the reports\". Reply with the sentences only.")
+	if article != "" {
+		b.WriteString("\nARTICLE:\n" + article + "\n")
+	}
+	b.WriteString("\nKeep every number, name and place exactly as the reports give them; add nothing the reports do not say; no opinion, no headline, no list, no mention of the outlets or of \"the reports\". Reply with the summary only.")
 	return b.String()
 }
 
@@ -249,7 +295,7 @@ func newsPrompt(facts []string) string {
 // number in it present in a report (the same test the day memories pass).
 func groundedNews(out string, facts []string) (string, bool) {
 	s := strings.TrimSpace(strings.Trim(strings.TrimSpace(out), "\"“”"))
-	if len(s) < 30 || len(s) > 500 {
+	if len(s) < 30 || len(s) > 1600 {
 		return "", false
 	}
 	low := strings.ToLower(s)
@@ -305,15 +351,20 @@ func newsSummaryPass(db *poltergres.ReadWrite, oc *oracle.Client, now time.Time,
 			continue
 		}
 		_ = db.Exec("UPDATE news_stories SET tries = tries + 1 WHERE id = $1", id)
+		article := storyArticle(db, id)
 		resp, err := oc.Infer(oracle.Request{
 			Capability: "summarize", Class: oracle.ClassLocalSmall, Priority: oracle.PriorityBackground,
-			Input: newsPrompt(facts), MaxTokens: 160, Temperature: 0.2, DeadlineMS: 90000,
+			Input: newsPrompt(facts, article), MaxTokens: 420, Temperature: 0.2, DeadlineMS: 120000,
 		})
 		if err != nil || resp.Err != "" {
 			lg.Debug("news summary: no answer", "fn", "newsSummaryPass", "story", id, "err", err)
 			continue
 		}
-		text, ok := groundedNews(resp.Output, facts)
+		grounds := facts
+		if article != "" {
+			grounds = append(append([]string(nil), facts...), article) // a number the article gives is the article's
+		}
+		text, ok := groundedNews(resp.Output, grounds)
 		if !ok {
 			lg.Debug("news summary: not grounded, dropped", "fn", "newsSummaryPass", "story", id)
 			continue
@@ -321,6 +372,8 @@ func newsSummaryPass(db *poltergres.ReadWrite, oc *oracle.Client, now time.Time,
 		if err := db.Exec("UPDATE news_stories SET summary = $2, written_by = 'model', model_at = $3 WHERE id = $1", id, text, now.UnixMilli()); err != nil {
 			return written, err
 		}
+		// the summary is kept, the article is not: read for this and let go
+		_ = db.Exec("UPDATE news_items SET body = '' WHERE story_id = $1 AND body <> ''", id)
 		written++
 	}
 	return written, nil
@@ -529,17 +582,27 @@ func newsLoop(ctx context.Context, mount, runDir string, produce func(hw.Notific
 			_ = os.Remove(path)
 		}
 	}
+	client := egress.New()
 	slow := func() {
 		if !connect() {
 			return
 		}
 		now := time.Now()
+		// the articles of the stories about to be summarised, then the summaries, then the brief
+		if _, err := articlePass(ctx, db, client, now, lg); err != nil {
+			lg.Warn("articles not read", "fn", "newsLoop", "err", err)
+		}
 		if n, err := newsSummaryPass(db, oc, now, lg); err != nil {
 			lg.Warn("news summaries failed", "fn", "newsLoop", "err", err)
 			db = nil
 			return
 		} else if n > 0 {
 			lg.Info("news summaries written", "fn", "newsLoop", "stories", n)
+		}
+		if wrote, err := briefPass(db, oc, now, lg); err != nil {
+			lg.Warn("news brief failed", "fn", "newsLoop", "err", err)
+		} else if wrote {
+			lg.Info("news brief written", "fn", "newsLoop")
 		}
 		if kind, day, due := digestDue(db, now); due {
 			n, err := postDigest(db, now, kind, day, produce, lg)
@@ -553,7 +616,6 @@ func newsLoop(ctx context.Context, mount, runDir string, produce func(hw.Notific
 			}
 		}
 	}
-	client := egress.New()
 	fetch := func(forced bool) {
 		if !connect() {
 			return

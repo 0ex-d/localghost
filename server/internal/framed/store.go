@@ -99,6 +99,18 @@ func (s *Store) InsertFrame(f Frame) error {
 		f.ArchivePath, f.PreviewPath, f.ThumbPath, f.Bytes, f.Source, f.ReceivedAt, f.Kind, f.MIME, f.TakenSrc, f.Place, f.Device, PipelineVersion)
 }
 
+// ForgetFrame removes every row the box keeps for a frame: searchd's original (its chunks go with
+// it) and the jobs queued for it, its tags, its journal line, the frame. The file is the caller's.
+func (s *Store) ForgetFrame(hash string) error {
+	return s.db.Exec(`WITH o AS (SELECT id FROM search.originals WHERE source = 'image' AND substring(sha256 from 1 for 16) = decode($1, 'hex')),
+		j AS (DELETE FROM search.jobs WHERE kind IN ('caption','tag') AND (payload->>'origId') IN (SELECT id::text FROM o)),
+		c AS (DELETE FROM search.citations WHERE orig_source = 'image' AND orig_id IN (SELECT id FROM o)),
+		x AS (DELETE FROM search.originals WHERE id IN (SELECT id FROM o)),
+		t AS (DELETE FROM frame_tags WHERE hash = $1),
+		e AS (DELETE FROM journal_entries WHERE source = 'ghost.framed' AND ref = $1)
+		DELETE FROM frames WHERE hash = $1`, hash)
+}
+
 // Audit is one row of the archive's own stock-take: what a frame has and what it is missing,
 // against the running pipeline. Read once at start by Converge, never guessed.
 type Audit struct {

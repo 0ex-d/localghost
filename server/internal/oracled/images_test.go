@@ -68,7 +68,9 @@ func TestImageForModelConvertsWhatTheModelCannotRead(t *testing.T) {
 		t.Fatalf("heic: %v", err)
 	}
 	// a JPEG nothing can decode is never sent whole
-	if _, err := imageForModel(context.Background(), broken); err == nil || !strings.Contains(err.Error(), "not sent whole") {
+	// (the converters here refuse rather than being missing: it reads as damaged, so searchd
+	// finishes the job without a caption instead of retrying it)
+	if _, err := imageForModel(context.Background(), broken); err == nil || !strings.Contains(err.Error(), "not sent whole") || !strings.Contains(err.Error(), "the file looks damaged") {
 		t.Fatalf("broken jpeg: %v", err)
 	}
 	if _, err := imageForModel(context.Background(), filepath.Join(dir, "gone.jpg")); err == nil || !strings.Contains(err.Error(), "read image") {
