@@ -49,33 +49,21 @@ object PhraseOffer {
         if (AppSettings.homeCountry(ctx).length != 2) simCountry(ctx).takeIf { it.isNotEmpty() }?.let { AppSettings.setHomeCountry(ctx, it) }
     }
 
-    /** Look at where the phone is right now and offer if that is somewhere new. Safe to call from
-     *  anywhere, any time; a no-op in every case but the one it is for. */
+    /** The offer is retired (1 Oct 2026): the card is on from the start, the news and prices at
+     *  home and the phrases away. What this does now is take down an offer an older build left
+     *  standing, and redraw, since a new country means the card changes from news to phrases. */
     fun check(ctx: Context) {
-        val where = CountryDetect.detect(ctx.applicationContext)
-        if (where.source == "unknown" || where.country.isEmpty()) return
-        maybeOffer(ctx, where.country)
+        val app = ctx.applicationContext
+        if (PhraseState.offerPending(app).isNotEmpty()) {
+            PhraseState.setOfferPending(app, "")
+            NotificationManagerCompat.from(app).cancel(NOTIF_ID)
+        }
+        if (PhraseState.lockScreenOn(app)) PhraseSurface.refresh(app)
     }
 
-    /**
-     * Offer the phrases for [country] if: the feature is off, the country is not home, a pack
-     * covers it, and it has not been offered before. Marks it offered either way it goes.
-     * Returns true when an offer was made.
-     */
-    fun maybeOffer(ctx: Context, country: String): Boolean {
-        val app = ctx.applicationContext
-        val cc = country.uppercase()
-        if (cc.length != 2 || PhraseState.enabled(app)) return false
-        val home = homeCountry(app)
-        if (home.isEmpty() || cc == home) return false
-        if (PhraseState.offered(app, cc)) return false
-        val packs = PhraseEngine.langsFor(cc, PhrasePacks.all(app))
-        if (packs.isEmpty()) return false
-        PhraseState.setOffered(app, cc)
-        PhraseState.setOfferPending(app, cc)
-        post(app, cc, packs[0])
-        return true
-    }
+    /** Retired with the offer: the card is on from the start. Kept so an older caller compiles. */
+    @Suppress("UNUSED_PARAMETER")
+    fun maybeOffer(ctx: Context, country: String): Boolean = false
 
     /** TURN ON: the feature and the lock-screen card, the surfaces drawn, the question gone. */
     fun accept(ctx: Context) {
@@ -111,6 +99,7 @@ object PhraseOffer {
         ctx.getSystemService(NotificationManager::class.java).createNotificationChannel(ch)
     }
 
+    @Suppress("unused") // the retired offer's notification, kept for reference
     private fun post(ctx: Context, cc: String, pack: PhrasePack) {
         if (!Notifications.hasPermission(ctx)) return // the in-app line still asks
         ensureChannel(ctx)

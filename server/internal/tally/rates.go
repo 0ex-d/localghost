@@ -45,7 +45,7 @@ type RatesResult struct {
 }
 
 const (
-	quotesKeep = 30 * 24 * time.Hour
+	quotesKeep = 2 * 24 * time.Hour // a quote a minute per venue and pair: the series keeps the prices
 	ranksKeep  = 7 * 24 * time.Hour
 )
 

@@ -33,9 +33,9 @@ func TestFetchListAndSpools(t *testing.T) {
 	}
 	var list fetchListDoc
 	_ = json.Unmarshal(rr.Body.Bytes(), &list)
-	// twelve feeds; the rates: the ECB twice, six batch venues, Coinbase for the symbols followed
-	// (the two defaults without a rank list) and the USDT leg, two rank lists; no candles (the box's own)
-	if len(list.Feeds) != 12 || len(list.Rates) != 2+6+3+2 || list.FeedsEvery != 120 || list.Feeds[0].ID != "bbc" || list.Rates[2].ID != "binance:all" || list.Rates[8].ID != "coinbase:BTC-USD" {
+	// twelve feeds; the rates the phone fetches: the ECB twice and the two rank lists (the tickers
+	// are the box's own, every minute)
+	if len(list.Feeds) != 12 || len(list.Rates) != 4 || list.FeedsEvery != 120 || list.Feeds[0].ID != "bbc" || list.Rates[0].ID != "ecb" || list.Rates[3].ID != "coinpaprika" {
 		t.Fatalf("list: %+v", list)
 	}
 	mount := filepath.Join(s.cfg.StateDir, "mnt", "slot0")

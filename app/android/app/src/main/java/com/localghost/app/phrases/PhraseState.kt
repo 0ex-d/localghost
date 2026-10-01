@@ -32,17 +32,16 @@ object PhraseState {
         SpeakerForm.entries.firstOrNull { it.name == p(ctx).getString("form", "") } ?: SpeakerForm.NEUTRAL
     fun setSpeakerForm(ctx: Context, f: SpeakerForm) = p(ctx).edit().putString("form", f.name).apply()
 
-    /** Whether ghost.phrased is ON at all. Off until the person says yes , to the offer that
-     *  appears when the phone lands in a country that is not home and has a pack, or to the
-     *  switch in settings. Off means: no drawer entry, no lock-screen card, no refresh alarm;
-     *  the packs sit in the app and cost nothing. A widget placed by hand still draws. */
-    fun enabled(ctx: Context): Boolean = p(ctx).getBoolean("enabled", false)
+    /** Whether the lock-screen card's feature is ON at all. On from the start (Vlad, 1 Oct 2026:
+     *  no asking): at home the card carries the news and the prices, away the phrases. Off, by
+     *  the switch in settings or PHRASES, means: no drawer entry, no lock-screen card, no refresh
+     *  alarm. A widget placed by hand still draws. */
+    fun enabled(ctx: Context): Boolean = p(ctx).getBoolean("enabled", true)
     fun setEnabled(ctx: Context, on: Boolean) = p(ctx).edit().putBoolean("enabled", on).apply()
 
-    /** The lock-screen card (a silent public notification). Off until the person turns it on ,
-     *  a permanent notification nobody asked for is the opposite of the ethos. Only ever true
-     *  together with [enabled]. */
-    fun lockScreenOn(ctx: Context): Boolean = enabled(ctx) && p(ctx).getBoolean("lockscreen", false)
+    /** The lock-screen card (a silent public notification). On from the start, like [enabled];
+     *  only ever true together with it. */
+    fun lockScreenOn(ctx: Context): Boolean = enabled(ctx) && p(ctx).getBoolean("lockscreen", true)
     fun setLockScreenOn(ctx: Context, on: Boolean) = p(ctx).edit().putBoolean("lockscreen", on).apply()
 
     /** Countries the offer has been made for (accepted or declined): it is made once per

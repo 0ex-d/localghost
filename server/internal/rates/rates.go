@@ -34,17 +34,29 @@ const (
 	ECBHistoryURL = "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-hist.xml" // every day since 1999, 7 MB: the box, once
 )
 
-// Sources is what to fetch for the symbols followed, in rank order: the ECB's day and its last 90
-// days, every batch venue's all-pairs ticker (one call each), Coinbase pair by pair for the ten
-// largest and the USDT leg, and the two rank lists. The daily candles are not here: the box fetches
-// those itself, a page a tick (tallyd), whatever the phone is on.
+// Sources is everything to fetch for the symbols followed: the tickers and the rest.
 func Sources(symbols []string, now time.Time) []Source {
-	out := []Source{
+	return append(PhoneSources(), TickerSources(symbols)...)
+}
+
+// PhoneSources is what the phone fetches on Wi-Fi and the box otherwise: the ECB's day and its
+// last 90 days, and the two rank lists. The tickers are not here: the box reads those itself
+// every minute, whatever the phone is on, so the minute series has no gaps.
+func PhoneSources() []Source {
+	return []Source{
 		{"ecb", "ECB reference rates", ECBDailyURL, 180},
 		{"ecb-90d", "ECB, the last 90 days", ECB90DaysURL, 1440},
+		{"coingecko", "CoinGecko", "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=100&page=1", 60},
+		{"coinpaprika", "CoinPaprika", "https://api.coinpaprika.com/v1/tickers?quotes=USD&limit=100", 60},
 	}
+}
+
+// TickerSources is the prices, every minute: every batch venue's all-pairs ticker (one call
+// each) and Coinbase pair by pair for the ten largest symbols and the USDT leg.
+func TickerSources(symbols []string) []Source {
+	var out []Source
 	for _, ex := range BatchExchanges {
-		out = append(out, Source{ex + ":all", ex + ", every pair", BatchURL(ex), 60})
+		out = append(out, Source{ex + ":all", ex + ", every pair", BatchURL(ex), 1})
 	}
 	n := 0
 	for _, s := range symbols {
@@ -53,17 +65,13 @@ func Sources(symbols []string, now time.Time) []Source {
 			continue
 		}
 		m := Market{"coinbase", s, "USD"}
-		out = append(out, Source{m.ID(), "coinbase " + s + "/USD", m.TickerURL(), 60})
+		out = append(out, Source{m.ID(), "coinbase " + s + "/USD", m.TickerURL(), 1})
 		if n++; n >= CoinbaseTop {
 			break
 		}
 	}
 	m := Market{"coinbase", "USDT", "USD"}
-	out = append(out, Source{m.ID(), "coinbase USDT/USD", m.TickerURL(), 60})
-	out = append(out,
-		Source{"coingecko", "CoinGecko", "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=100&page=1", 60},
-		Source{"coinpaprika", "CoinPaprika", "https://api.coinpaprika.com/v1/tickers?quotes=USD&limit=100", 60},
-	)
+	out = append(out, Source{m.ID(), "coinbase USDT/USD", m.TickerURL(), 1})
 	return out
 }
 

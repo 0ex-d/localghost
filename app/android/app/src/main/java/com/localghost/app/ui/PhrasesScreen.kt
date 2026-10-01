@@ -67,16 +67,16 @@ fun PhrasesScreen() {
     val enabled = remember(tick) { PhraseState.enabled(ctx) }
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         if (!enabled) item {
-            // Off: the screen still works as a phrasebook, but says so and offers the switch. This
-            // is where the offer's notification lands, and where someone at home turns it on by hand.
+            // Off (turned off by hand): the screen still works as a phrasebook, says so and offers
+            // the switch back.
             Spacer(Modifier.height(6.dp))
             Column(Modifier.fillMaxWidth().border(1.dp, TerminalGreen, RectangleShape).background(VoidLighter).padding(14.dp)) {
-                Text("phrases are off", color = GhostText, style = MaterialTheme.typography.bodyMedium)
-                Text("they offer themselves once when you land somewhere that is not home (${CountryNames.of(PhraseOffer.homeCountry(ctx)).ifEmpty { "home is not set" }}) · " +
-                    "turned on, the phrase of the hour goes on your lock screen and PHRASES joins the drawer",
+                Text("the lock-screen card is off", color = GhostText, style = MaterialTheme.typography.bodyMedium)
+                Text("turned on, the card is on your lock screen: at home (${CountryNames.of(PhraseOffer.homeCountry(ctx)).ifEmpty { "home is not set" }}) the news your box picked and BTC and ETH, " +
+                    "away the phrase of the hour, and PHRASES joins the drawer",
                     color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
                 Spacer(Modifier.height(8.dp))
-                GhostButton("turn phrases on", onClick = { Thread { PhraseOffer.accept(ctx) }.start(); changed() })
+                GhostButton("turn the card on", onClick = { Thread { PhraseOffer.accept(ctx) }.start(); changed() })
             }
         }
         item {
@@ -225,7 +225,7 @@ fun PhrasesScreen() {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("card on the lock screen", color = GhostText, style = MaterialTheme.typography.bodyMedium)
-                    Text("a silent notification that changes with the hour · say, next and got it work without unlocking · pull it open for the next two phrases",
+                    Text("a silent notification · away, the phrase of the hour, with say, next and got it · at home, the news your box picked and BTC and ETH, with next · pull it open for more",
                         color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
                 }
                 Switch(checked = lock, onCheckedChange = { on ->

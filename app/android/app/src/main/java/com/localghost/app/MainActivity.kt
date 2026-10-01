@@ -1503,6 +1503,8 @@ class MainActivity : ComponentActivity() {
                     // off at every unlock, so mute undid itself and mobile sync went off while
                     // the switch still showed on.
                     sync = sync.copy(notificationsMuted = NotifyState.isMuted(this@MainActivity))
+                    // the lock-screen card's home brief, fresh as the app opens
+                    com.localghost.app.phrases.HomeBrief.fetch(this@MainActivity)
                 }
             } else if (error == null) error = "Could not reach your box"
         }

@@ -284,6 +284,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/news", s.handleNews)                         // the stories, for the NEWS screen
 	mux.HandleFunc("/v1/rates", s.handleRates)                       // the ECB table, the index per symbol, the rank list
 	mux.HandleFunc("/v1/rates/history", s.handleRatesHistory)        // a symbol's daily closes or a currency's daily rate
+	mux.HandleFunc("/v1/rates/series", s.handleRatesSeries)          // every minute for a week, every hour for thirty days
 	mux.HandleFunc("/v1/geo/country", s.handleCountry)               // one country's tiles, as index keys
 	mux.HandleFunc("/v1/geo/roadtile", s.handleRoadTile)             // one road cell (?l=&x=&y=)
 	mux.HandleFunc("/v1/daemon/summary", s.handleDaemonSummary)      // per-daemon drill-in

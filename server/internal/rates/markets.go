@@ -126,29 +126,52 @@ func (m Market) TickerURL() string {
 // CandlesURL is the venue's daily candles from a day on (Coinbase and Kraken to an end; the
 // others take a start and a count). Each venue pages differently; the box walks back a page a
 // tick and stops when a page comes back empty.
-func (m Market) CandlesURL(from, to time.Time) string {
+func (m Market) CandlesURL(from, to time.Time) string { return m.BarsURL(24*time.Hour, from, to) }
+
+// HourlyURL is the venue's hourly candles between two times.
+func (m Market) HourlyURL(from, to time.Time) string { return m.BarsURL(time.Hour, from, to) }
+
+// MinuteURL is the venue's one-minute candles between two times.
+func (m Market) MinuteURL(from, to time.Time) string { return m.BarsURL(time.Minute, from, to) }
+
+// BarsURL is the venue's candles of one size (a day, an hour or a minute) between two times.
+func (m Market) BarsURL(bar time.Duration, from, to time.Time) string {
 	p := exchangeSymbol(m)
+	sec := int(bar.Seconds())
+	pick := func(day, hour string) string {
+		switch bar {
+		case time.Hour:
+			return hour
+		case time.Minute:
+			// the same spellings with the hour's unit swapped for the minute's
+			return strings.NewReplacer("1hr", "1m", "1H", "1m", "1h", "1m").Replace(hour)
+		}
+		return day
+	}
 	switch m.Exchange {
 	case "coinbase": // at most 300 candles between start and end
-		return fmt.Sprintf("https://api.exchange.coinbase.com/products/%s/candles?granularity=86400&start=%s&end=%s", p, from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339))
-	case "kraken": // the last 720 days from since, whatever the end
-		return fmt.Sprintf("https://api.kraken.com/0/public/OHLC?pair=%s&interval=1440&since=%d", p, from.Unix())
+		return fmt.Sprintf("https://api.exchange.coinbase.com/products/%s/candles?granularity=%d&start=%s&end=%s", p, sec, from.UTC().Format(time.RFC3339), to.UTC().Format(time.RFC3339))
+	case "kraken": // the last 720 bars from since, whatever the end
+		return fmt.Sprintf("https://api.kraken.com/0/public/OHLC?pair=%s&interval=%d&since=%d", p, sec/60, from.Unix())
 	case "bitstamp":
-		return fmt.Sprintf("https://www.bitstamp.net/api/v2/ohlc/%s/?step=86400&limit=1000&start=%d", p, from.Unix())
+		return fmt.Sprintf("https://www.bitstamp.net/api/v2/ohlc/%s/?step=%d&limit=1000&start=%d", p, sec, from.Unix())
 	case "gemini": // no paging: what the venue keeps
-		return fmt.Sprintf("https://api.gemini.com/v2/candles/%s/1day", p)
+		return fmt.Sprintf("https://api.gemini.com/v2/candles/%s/%s", p, pick("1day", "1hr"))
 	case "binance":
-		return fmt.Sprintf("https://api.binance.com/api/v3/klines?symbol=%s&interval=1d&startTime=%d&endTime=%d&limit=1000", p, from.UnixMilli(), to.UnixMilli())
+		return fmt.Sprintf("https://api.binance.com/api/v3/klines?symbol=%s&interval=%s&startTime=%d&endTime=%d&limit=1000", p, pick("1d", "1h"), from.UnixMilli(), to.UnixMilli())
 	case "bitfinex":
-		return fmt.Sprintf("https://api-pub.bitfinex.com/v2/candles/trade:1D:%s/hist?start=%d&end=%d&limit=1000&sort=1", p, from.UnixMilli(), to.UnixMilli())
+		return fmt.Sprintf("https://api-pub.bitfinex.com/v2/candles/trade:%s:%s/hist?start=%d&end=%d&limit=1000&sort=1", pick("1D", "1h"), p, from.UnixMilli(), to.UnixMilli())
 	case "okx": // at most 100 a call, older than `after`
-		return fmt.Sprintf("https://www.okx.com/api/v5/market/history-candles?instId=%s&bar=1D&after=%d&limit=100", p, to.UnixMilli())
+		return fmt.Sprintf("https://www.okx.com/api/v5/market/history-candles?instId=%s&bar=%s&after=%d&limit=100", p, pick("1D", "1H"), to.UnixMilli())
 	}
 	return ""
 }
 
-// PageDays is how many days one candles call covers at most, for walking back.
-func (m Market) PageDays() int {
+// PageDays is how many days one daily candles call covers at most, for walking back.
+func (m Market) PageDays() int { return m.PageBars() }
+
+// PageBars is how many bars one candles call covers at most, whatever their size.
+func (m Market) PageBars() int {
 	switch m.Exchange {
 	case "coinbase":
 		return 300
@@ -250,8 +273,27 @@ type Candle struct {
 	Open, High, Low, Close, Volume float64
 }
 
+// Bar is one candle of any size: its start, in unix seconds.
+type Bar struct {
+	TS                             int64
+	Open, High, Low, Close, Volume float64
+}
+
 // ParseCandles reads one venue's daily candles. Days with no close are dropped; the newest first.
 func ParseCandles(m Market, body []byte) ([]Candle, error) {
+	bars, err := ParseBars(m, body)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Candle, 0, len(bars))
+	for _, b := range bars {
+		out = append(out, Candle{time.Unix(b.TS, 0).UTC().Format("2006-01-02"), b.Open, b.High, b.Low, b.Close, b.Volume})
+	}
+	return out, nil
+}
+
+// ParseBars reads one venue's candles of any size. Bars with no close are dropped; the newest first.
+func ParseBars(m Market, body []byte) ([]Bar, error) {
 	num := func(v any) float64 {
 		switch x := v.(type) {
 		case float64:
@@ -262,8 +304,7 @@ func ParseCandles(m Market, body []byte) ([]Candle, error) {
 		}
 		return 0
 	}
-	day := func(sec int64) string { return time.Unix(sec, 0).UTC().Format("2006-01-02") }
-	var out []Candle
+	var out []Bar
 	switch m.Exchange {
 	case "coinbase": // [time, low, high, open, close, volume]
 		var rows [][]any
@@ -272,7 +313,7 @@ func ParseCandles(m Market, body []byte) ([]Candle, error) {
 		}
 		for _, r := range rows {
 			if len(r) >= 6 {
-				out = append(out, Candle{day(int64(num(r[0]))), num(r[3]), num(r[2]), num(r[1]), num(r[4]), num(r[5])})
+				out = append(out, Bar{int64(num(r[0])), num(r[3]), num(r[2]), num(r[1]), num(r[4]), num(r[5])})
 			}
 		}
 	case "kraken": // result.<pair>: [time, open, high, low, close, vwap, volume, count]
@@ -292,7 +333,7 @@ func ParseCandles(m Market, body []byte) ([]Candle, error) {
 			}
 			for _, r := range rows {
 				if len(r) >= 7 {
-					out = append(out, Candle{day(int64(num(r[0]))), num(r[1]), num(r[2]), num(r[3]), num(r[4]), num(r[6])})
+					out = append(out, Bar{int64(num(r[0])), num(r[1]), num(r[2]), num(r[3]), num(r[4]), num(r[6])})
 				}
 			}
 		}
@@ -306,7 +347,7 @@ func ParseCandles(m Market, body []byte) ([]Candle, error) {
 			return nil, err
 		}
 		for _, r := range obj.Data.OHLC {
-			out = append(out, Candle{day(int64(num(r["timestamp"]))), num(r["open"]), num(r["high"]), num(r["low"]), num(r["close"]), num(r["volume"])})
+			out = append(out, Bar{int64(num(r["timestamp"])), num(r["open"]), num(r["high"]), num(r["low"]), num(r["close"]), num(r["volume"])})
 		}
 	case "gemini": // [time_ms, open, high, low, close, volume]
 		var rows [][]any
@@ -315,7 +356,7 @@ func ParseCandles(m Market, body []byte) ([]Candle, error) {
 		}
 		for _, r := range rows {
 			if len(r) >= 6 {
-				out = append(out, Candle{day(int64(num(r[0])) / 1000), num(r[1]), num(r[2]), num(r[3]), num(r[4]), num(r[5])})
+				out = append(out, Bar{int64(num(r[0])) / 1000, num(r[1]), num(r[2]), num(r[3]), num(r[4]), num(r[5])})
 			}
 		}
 	case "binance": // [openTime, open, high, low, close, volume, closeTime, ...]
@@ -325,7 +366,7 @@ func ParseCandles(m Market, body []byte) ([]Candle, error) {
 		}
 		for _, r := range rows {
 			if len(r) >= 6 {
-				out = append(out, Candle{day(int64(num(r[0])) / 1000), num(r[1]), num(r[2]), num(r[3]), num(r[4]), num(r[5])})
+				out = append(out, Bar{int64(num(r[0])) / 1000, num(r[1]), num(r[2]), num(r[3]), num(r[4]), num(r[5])})
 			}
 		}
 	case "bitfinex": // [MTS, OPEN, CLOSE, HIGH, LOW, VOLUME]
@@ -335,7 +376,7 @@ func ParseCandles(m Market, body []byte) ([]Candle, error) {
 		}
 		for _, r := range rows {
 			if len(r) >= 6 {
-				out = append(out, Candle{day(int64(num(r[0])) / 1000), num(r[1]), num(r[3]), num(r[4]), num(r[2]), num(r[5])})
+				out = append(out, Bar{int64(num(r[0])) / 1000, num(r[1]), num(r[3]), num(r[4]), num(r[2]), num(r[5])})
 			}
 		}
 	case "okx": // data: [[ts, o, h, l, c, vol, ...]] as strings
@@ -347,23 +388,94 @@ func ParseCandles(m Market, body []byte) ([]Candle, error) {
 		}
 		for _, r := range obj.Data {
 			if len(r) >= 6 {
-				out = append(out, Candle{day(int64(num(r[0])) / 1000), num(r[1]), num(r[2]), num(r[3]), num(r[4]), num(r[5])})
+				out = append(out, Bar{int64(num(r[0])) / 1000, num(r[1]), num(r[2]), num(r[3]), num(r[4]), num(r[5])})
 			}
 		}
 	default:
 		return nil, errors.New("unknown exchange " + m.Exchange)
 	}
 	kept := out[:0]
-	for _, c := range out {
-		if c.Close > 0 && c.Day > "2009" {
-			kept = append(kept, c)
+	for _, b := range out {
+		if b.Close > 0 && b.TS > 1230768000 { // 2009
+			kept = append(kept, b)
 		}
 	}
-	sort.Slice(kept, func(i, j int) bool { return kept[i].Day > kept[j].Day })
+	sort.Slice(kept, func(i, j int) bool { return kept[i].TS > kept[j].TS })
 	if len(kept) == 0 {
 		return nil, errors.New(m.Exchange + ": no candles in the answer")
 	}
 	return kept, nil
+}
+
+// FoldBar is one bar of the box's price for a symbol from the venues' bars at the same time: each
+// of open, high, low and close is the mean of the venues' within 5% of their median, USDT bars
+// folded into dollars with the USDT/USD rate of that time (1 when there is none). n is how many
+// venues went in.
+func FoldBar(bars map[Market]Bar, symbol string, usdt float64) (Bar, int) {
+	if usdt <= 0 {
+		usdt = 1
+	}
+	var o, h, l, c []float64
+	var vol float64
+	var ts int64
+	for m, b := range bars {
+		if m.Base != symbol || b.Close <= 0 {
+			continue
+		}
+		f := 1.0
+		if m.Quote == "USDT" {
+			f = usdt
+		}
+		o, h, l, c = append(o, b.Open*f), append(h, b.High*f), append(l, b.Low*f), append(c, b.Close*f)
+		vol += b.Volume
+		ts = b.TS
+	}
+	if len(c) == 0 {
+		return Bar{}, 0
+	}
+	cl, n := filteredMean(c)
+	op, _ := filteredMean(o)
+	hi, _ := filteredMean(h)
+	lo, _ := filteredMean(l)
+	if op <= 0 {
+		op = cl
+	}
+	if hi < cl || hi <= 0 {
+		hi = math.Max(cl, op)
+	}
+	if lo <= 0 || lo > cl {
+		lo = math.Min(cl, op)
+	}
+	return Bar{TS: ts, Open: op, High: hi, Low: lo, Close: cl, Volume: vol}, n
+}
+
+// filteredMean is the mean of the values within 5% of their median, and how many.
+func filteredMean(vals []float64) (float64, int) {
+	var ps []float64
+	for _, v := range vals {
+		if v > 0 && !math.IsNaN(v) && !math.IsInf(v, 0) {
+			ps = append(ps, v)
+		}
+	}
+	if len(ps) == 0 {
+		return 0, 0
+	}
+	sort.Float64s(ps)
+	med := ps[len(ps)/2]
+	if len(ps)%2 == 0 {
+		med = (ps[len(ps)/2-1] + ps[len(ps)/2]) / 2
+	}
+	sum, n := 0.0, 0
+	for _, p := range ps {
+		if math.Abs(p-med)/med <= 0.05 {
+			sum += p
+			n++
+		}
+	}
+	if n == 0 {
+		return med, len(ps)
+	}
+	return sum / float64(n), n
 }
 
 // USDTRate is the dollar price of one USDT from the fresh USDT/USD quotes: their median, or 1

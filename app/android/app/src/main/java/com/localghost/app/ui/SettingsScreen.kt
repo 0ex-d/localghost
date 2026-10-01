@@ -302,16 +302,16 @@ fun SettingsScreen(
 
         Fold("PHRASES", "the language around you, on the lock screen", openAtFirst = false) {
             Spacer(Modifier.height(8.dp))
-            // Off until the phone lands somewhere that is not home and the person says yes; this is the
-            // manual way in (and out), and where home is set , the SIM's country by default.
+            // On from the start: at home the news and the prices, away the phrases. This is the way
+            // out (and back in), and where home is set , the SIM's country by default.
             var phraseTick by remember { mutableIntStateOf(0) }
             val phrasesOn = remember(phraseTick) { com.localghost.app.phrases.PhraseState.enabled(ctx) }
             val home = remember(phraseTick) { com.localghost.app.phrases.PhraseOffer.homeCountry(ctx) }
             val here = remember(phraseTick) { com.localghost.app.phrases.CountryDetect.detect(ctx) }
             toggleRow(
-                label = "phrases on the lock screen",
-                sub = if (phrasesOn) "on · the phrase of the hour in the language around you · PHRASES is in the drawer"
-                    else "off · offered once when you land somewhere that is not home; this switch is the other way in",
+                label = "the lock-screen card",
+                sub = if (phrasesOn) "on · at home, the news your box picked and BTC and ETH; away, the phrase of the hour in the language around you"
+                    else "off · no card on the lock screen",
                 checked = phrasesOn,
                 onChange = { on ->
                     if (on) com.localghost.app.phrases.PhraseOffer.accept(ctx)

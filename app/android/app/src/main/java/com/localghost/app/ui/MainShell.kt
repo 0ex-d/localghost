@@ -430,8 +430,7 @@ private fun DrawerPanel(
 
             Spacer(Modifier.height(20.dp))
             SectionLabel("YOUR ARCHIVE")
-            // PHRASES appears once the phrases are on , after the offer that comes with landing
-            // somewhere new, or the switch in settings; until then the drawer does not mention it.
+            // PHRASES appears while the lock-screen card is on (from the start; off by hand in settings).
             val phrasesOn = com.localghost.app.phrases.PhraseState.enabled(androidx.compose.ui.platform.LocalContext.current)
             listOf(Dest.GALLERY, Dest.MAP, Dest.PHRASES, Dest.HEALTH, Dest.MEMORIES, Dest.NEWS, Dest.SYNC)
                 .filter { it != Dest.PHRASES || phrasesOn || current == Dest.PHRASES }

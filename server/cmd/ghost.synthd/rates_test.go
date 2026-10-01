@@ -56,7 +56,7 @@ func TestRatesItems(t *testing.T) {
 	snap := hw.RatesSnapshot{FXDay: "2026-09-30", FX: map[string]float64{"USD": 1.2, "GBP": 0.9, "RON": 5},
 		Index: map[string]hw.IndexRow{
 			"BTC": {Price: 65000, At: now.Add(-5 * time.Minute).Unix(), N: 4, Spread: 0.003, Used: "bitstamp,coinbase,gemini,kraken"},
-			"ETH": {Price: 3250, At: now.Add(-5 * time.Minute).Unix(), N: 3, Spread: 0.001, Used: "binance,coinbase,kraken"},
+			"ETH": {Price: 3250, At: now.Add(-5 * time.Minute).Unix(), N: 3, Spread: 0.001, Used: "binance,coinbase,kraken", Change24: -1.5, HasChange: true},
 		}}
 	items := ratesItems(snap, []string{"EUR", "GBP"}, 100, now)
 	if len(items) != 2 || !strings.Contains(items[0].Snippet, "0.9000 GBP") || items[1].Snippet != "100.00 EUR = 90.00 GBP at these rates" {
@@ -71,7 +71,7 @@ func TestRatesItems(t *testing.T) {
 		t.Fatalf("%+v", items)
 	}
 	items = ratesItems(snap, []string{"ETH", "USD"}, 2, now)
-	if len(items) != 3 || !strings.Contains(items[1].Snippet, "ETH 3,250 USD") || items[2].Snippet != "2.00 ETH = 6,500 USD at these rates" {
+	if len(items) != 3 || !strings.Contains(items[1].Snippet, "ETH 3,250 USD, -1.50% in 24 h ,") || items[2].Snippet != "2.00 ETH = 6,500 USD at these rates" {
 		t.Fatalf("%+v", items)
 	}
 	empty := ratesItems(hw.RatesSnapshot{FX: map[string]float64{}}, []string{"EUR", "GBP"}, 10, now)

@@ -71,23 +71,37 @@ func TestMarketsAndURLs(t *testing.T) {
 	if u := (Market{"coinbase", "BTC", "USD"}).CandlesURL(from, from.AddDate(0, 0, 10)); !strings.Contains(u, "granularity=86400&start=2026-01-01T00:00:00Z") {
 		t.Fatal(u)
 	}
-	// twelve symbols: six batch venues once each, Coinbase for the ten largest and USDT, the rest
+	// twelve symbols: the phone's four, then six batch venues once each and Coinbase for the ten
+	// largest and USDT, every minute
 	syms := []string{"BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "ADA", "TRX", "AVAX", "LINK", "TON", "DOT"}
-	srcs := Sources(syms, from)
-	if srcs[0].ID != "ecb" || srcs[1].ID != "ecb-90d" || srcs[2].ID != "binance:all" || srcs[7].ID != "gemini:all" || srcs[8].ID != "coinbase:BTC-USD" || srcs[len(srcs)-1].ID != "coinpaprika" {
-		t.Fatalf("sources: %v", srcs)
+	ph := PhoneSources()
+	if len(ph) != 4 || ph[0].ID != "ecb" || ph[3].ID != "coinpaprika" {
+		t.Fatalf("phone sources: %v", ph)
+	}
+	tk := TickerSources(syms)
+	if tk[0].ID != "binance:all" || tk[5].ID != "gemini:all" || tk[6].ID != "coinbase:BTC-USD" || tk[len(tk)-1].ID != "coinbase:USDT-USD" {
+		t.Fatalf("tickers: %v", tk)
 	}
 	cb := 0
-	for _, s := range srcs {
+	for _, s := range tk {
 		if strings.HasPrefix(s.ID, "coinbase:") {
 			cb++
 		}
-		if strings.HasPrefix(s.ID, "hist:") {
-			t.Fatal("candles are the box's own, not in the list")
+		if s.Every != 1 {
+			t.Fatalf("a ticker every %d min", s.Every)
 		}
 	}
-	if cb != CoinbaseTop+1 || len(srcs) != 2+6+CoinbaseTop+1+2 {
-		t.Fatalf("coinbase %d, sources %d", cb, len(srcs))
+	if cb != CoinbaseTop+1 || len(tk) != 6+CoinbaseTop+1 || len(Sources(syms, from)) != 4+len(tk) {
+		t.Fatalf("coinbase %d, tickers %d", cb, len(tk))
+	}
+	if u := (Market{"binance", "BTC", "USDT"}).HourlyURL(from, from.Add(time.Hour)); !strings.Contains(u, "interval=1h") {
+		t.Fatal(u)
+	}
+	if u := (Market{"kraken", "BTC", "USD"}).HourlyURL(from, from); !strings.Contains(u, "interval=60") {
+		t.Fatal(u)
+	}
+	if u := (Market{"okx", "BTC", "USDT"}).HourlyURL(from, from); !strings.Contains(u, "bar=1H") {
+		t.Fatal(u)
 	}
 }
 

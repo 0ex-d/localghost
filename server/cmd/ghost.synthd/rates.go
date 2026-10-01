@@ -140,8 +140,12 @@ func ratesItems(snap hw.RatesSnapshot, codes []string, amount float64, now time.
 			continue
 		}
 		age := now.Sub(time.Unix(r.At, 0)).Truncate(time.Minute)
+		change := ""
+		if r.HasChange {
+			change = fmt.Sprintf(", %+.2f%% in 24 h", r.Change24)
+		}
 		out = append(out, ctxItem{When: time.Unix(r.At, 0).UTC().Format("2006-01-02"), Source: "rates",
-			Snippet: fmt.Sprintf("%s %s USD , the box's average of %d exchanges (%s), spread %.2f%%, %s ago", sym, money(r.Price), r.N, r.Used, 100*r.Spread, age),
+			Snippet: fmt.Sprintf("%s %s USD%s , the box's average of %d exchanges (%s), spread %.2f%%, %s ago", sym, money(r.Price), change, r.N, r.Used, 100*r.Spread, age),
 			Why:     "the box's own " + sym + " index from the public tickers (USDT markets folded into dollars)"})
 	}
 	if amount > 0 && len(codes) >= 2 {

@@ -94,12 +94,13 @@ func (s *Server) handleFetchList(w http.ResponseWriter, r *http.Request) {
 		s.appearsDown(w)
 		return
 	}
-	doc := fetchListDoc{Rates: rates.DefaultSources(), FeedsEvery: 120}
+	// the phone's part of the rates: the ECB and the rank lists (the tickers are the box's own,
+	// every minute, whatever the phone is on)
+	doc := fetchListDoc{Rates: rates.PhoneSources(), FeedsEvery: 120}
 	if db, err := s.notif.DB(mounted); err == nil {
 		if fl, err := hw.FeedList(db); err == nil {
 			doc.Feeds = fl
 		}
-		doc.Rates = rates.Sources(tally.Symbols(db), time.Now())
 	}
 	if doc.Feeds == nil {
 		doc.Feeds = feeds.DefaultSources()
@@ -283,6 +284,57 @@ func (s *Server) handleRatesHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"code": strings.ToUpper(code), "days": hist})
+}
+
+// handleRatesSeries , GET /v1/rates/series?code=BTC|CRYPTO50&res=1m|1h&hours=N , a symbol's (or
+// the market index's) price every minute (the last week) or every hour (the last thirty days),
+// oldest first: {ts, o, h, l, c, n, src}. src says how each point was made: live (the box's
+// minute), minutes (an hour rolled up from them), venues (folded from the venues' candles, before
+// the box was watching).
+func (s *Server) handleRatesSeries(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodGet {
+		s.appearsDown(w)
+		return
+	}
+	mounted, ok := s.mountedSlot()
+	if !ok {
+		s.appearsDown(w)
+		return
+	}
+	q := r.URL.Query()
+	code, res := q.Get("code"), q.Get("res")
+	if res == "" {
+		res = tally.ResHour
+	}
+	ri, ok := tally.Resolutions[res]
+	if code == "" || len(code) > 10 || !ok {
+		http.Error(w, "code=BTC|CRYPTO50 and res=1m|1h", http.StatusBadRequest)
+		return
+	}
+	hours, _ := strconv.Atoi(q.Get("hours"))
+	span := time.Duration(hours) * time.Hour
+	if span <= 0 {
+		span = 24 * time.Hour
+		if res == tally.ResHour {
+			span = ri.Window
+		}
+	}
+	if span > ri.Keep {
+		span = ri.Keep
+	}
+	db, err := s.notif.DB(mounted)
+	if err != nil {
+		s.appearsDown(w)
+		return
+	}
+	now := time.Now()
+	pts, err := tally.Series(db, code, res, now.Add(-span), now)
+	if err != nil {
+		s.appearsDown(w)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"code": strings.ToUpper(code), "res": res, "points": pts})
 }
 
 // handleRates , GET /v1/rates , the box's market numbers as they stand.

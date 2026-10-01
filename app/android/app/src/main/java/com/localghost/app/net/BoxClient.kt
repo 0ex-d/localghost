@@ -1214,7 +1214,7 @@ object BoxClient {
 
     data class CoinRow(val rank: Int, val symbol: String, val name: String, val priceUsd: Double, val marketCap: Double, val change24: Double)
     /** The box's USD price of one symbol and how it was made. */
-    data class IndexRow(val symbol: String, val price: Double, val at: Long, val n: Int, val spread: Double, val used: String)
+    data class IndexRow(val symbol: String, val price: Double, val at: Long, val n: Int, val spread: Double, val used: String, val change24: Double? = null)
     /** The market index: one number for crypto as a whole (the fifty largest, weighted by last month's volume). */
     data class Market(val code: String, val value: Double, val dayChange: Double, val constituents: Int, val priced: Int, val month: String)
     data class Rates(val fxDay: String, val fx: Map<String, Double>, val index: List<IndexRow>, val btcUsd: Double, val btcAt: Long, val btcN: Int, val btcSpread: Double, val btcUsed: String, val ranksAt: Long, val ranks: List<CoinRow>, val ranksSource: String, val days: Int, val fxDays: Int, val market: Market?)
@@ -1229,7 +1229,8 @@ object BoxClient {
         r.optJSONObject("index")?.let { o ->
             o.keys().forEach { sym ->
                 val row = o.optJSONObject(sym) ?: return@forEach
-                index.add(IndexRow(sym, row.optDouble("price", 0.0), row.optLong("at"), row.optInt("n"), row.optDouble("spread", 0.0), row.optString("used")))
+                index.add(IndexRow(sym, row.optDouble("price", 0.0), row.optLong("at"), row.optInt("n"), row.optDouble("spread", 0.0), row.optString("used"),
+                    if (row.optBoolean("hasChange")) row.optDouble("change24", 0.0) else null))
             }
         }
         index.sortBy { it.symbol }

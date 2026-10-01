@@ -2153,6 +2153,22 @@ func DaemonSummaryFrom(c *poltergres.ReadWrite, name string) []DaemonKV {
 			if snap.Days > 0 || snap.FXDays > 0 {
 				add("daily history", fmt.Sprintf("%d days of crypto closes · %d days of ECB rates", snap.Days, snap.FXDays))
 			}
+			for _, d := range tally.Depth(c, tally.Symbols(c), time.Now()) {
+				name := map[string]string{"1m": "every minute", "1h": "every hour"}[d.Res]
+				if d.Points == 0 && d.Pending == 0 {
+					add(name, "nothing yet")
+					continue
+				}
+				v := fmt.Sprintf("%d points of the market index", d.Points)
+				if d.Oldest > 0 {
+					v += " back to " + time.Unix(d.Oldest, 0).UTC().Format("2 Jan 15:04")
+				}
+				v += fmt.Sprintf(" · %d symbols in the newest step", d.Symbols)
+				if d.Pending > 0 {
+					v += fmt.Sprintf(" · %d markets' history still being fetched", d.Pending)
+				}
+				key(name, v)
+			}
 			if st, merr := tally.MarketNow(c, time.Now()); merr == nil && st.Value > 0 {
 				key("market index", fmt.Sprintf("%s %.1f (%+.2f%% today) · %d constituents, %d priced live · weights of %s · %d days", st.Code, st.Value, st.DayChange, st.Constituents, st.Priced, st.Month, st.Days))
 			} else if len(snap.Index) > 0 {

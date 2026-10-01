@@ -2,7 +2,9 @@ package rates
 
 import (
 	"math"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestWeightsAndValue(t *testing.T) {
@@ -42,5 +44,38 @@ func TestWeightsAndValue(t *testing.T) {
 	}
 	if MonthOf("2026-10-01") != "2026-10" {
 		t.Fatal(MonthOf("2026-10-01"))
+	}
+}
+
+func TestBarsAndFold(t *testing.T) {
+	from := time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		m    Market
+		want string
+	}{
+		{Market{"binance", "BTC", "USDT"}, "interval=1m"},
+		{Market{"coinbase", "BTC", "USD"}, "granularity=60&"},
+		{Market{"bitstamp", "BTC", "USD"}, "step=60&"},
+		{Market{"bitfinex", "BTC", "USD"}, "trade:1m:tBTCUSD"},
+		{Market{"okx", "BTC", "USDT"}, "bar=1m&"},
+		{Market{"gemini", "BTC", "USD"}, "/btcusd/1m"},
+		{Market{"kraken", "BTC", "USD"}, "interval=1&"},
+	} {
+		if u := c.m.MinuteURL(from, from.Add(time.Hour)); !strings.Contains(u, c.want) {
+			t.Fatalf("%s: %s", c.m.ID(), u)
+		}
+	}
+	bars := map[Market]Bar{
+		{"coinbase", "BTC", "USD"}: {TS: 60, Open: 100, High: 110, Low: 95, Close: 105, Volume: 2},
+		{"binance", "BTC", "USDT"}: {TS: 60, Open: 100.2, High: 110.2, Low: 95.2, Close: 105.2, Volume: 3},
+		{"gemini", "BTC", "USD"}:   {TS: 60, Open: 100, High: 110, Low: 95, Close: 140, Volume: 1}, // a bad close
+		{"coinbase", "ETH", "USD"}: {TS: 60, Open: 1, High: 1, Low: 1, Close: 1, Volume: 1},
+	}
+	b, n := FoldBar(bars, "BTC", 0.999)
+	if n != 2 || math.Abs(b.Close-(105+105.2*0.999)/2) > 1e-9 || b.TS != 60 || b.Volume != 6 {
+		t.Fatalf("%+v %d", b, n)
+	}
+	if _, n := FoldBar(bars, "SOL", 1); n != 0 {
+		t.Fatal("sol")
 	}
 }

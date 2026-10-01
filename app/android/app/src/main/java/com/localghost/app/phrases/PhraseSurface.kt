@@ -51,8 +51,8 @@ object PhraseSurface {
 
     fun ensureChannel(ctx: Context) {
         // LOW, not MIN: a live update may not live on a MIN channel, and LOW is still silent.
-        val ch = NotificationChannel(CHANNEL_ID, "Phrase on the lock screen", NotificationManager.IMPORTANCE_LOW).apply {
-            description = "The phrase you are likely to need right now, in the language around you. Silent, never vibrates."
+        val ch = NotificationChannel(CHANNEL_ID, "Lock-screen card", NotificationManager.IMPORTANCE_LOW).apply {
+            description = "At home, the news your box picked and the BTC and ETH prices; away, the phrase you are likely to need in the language around you. Silent, never vibrates."
             setShowBadge(false)
             lockscreenVisibility = Notification.VISIBILITY_PUBLIC
         }
@@ -80,7 +80,15 @@ object PhraseSurface {
         val known: Int = 0,
         val total: Int = 0,
         val band: Int = 1,
+        /** "home" for the home brief (news and prices), "" for the phrases. */
+        val mode: String = "",
+        /** Home: the prices line, the chip, and when the brief was fetched ("14:05"). */
+        val extra: String = "",
+        val chip: String = "",
+        val asOf: String = "",
     ) {
+        val home: Boolean get() = mode == "home"
+
         /** The card the rotation and the person's NEXT taps point at right now. */
         fun index(ctx: Context, cal: Calendar = Calendar.getInstance()): Int {
             if (cards.isEmpty()) return 0
@@ -101,14 +109,15 @@ object PhraseSurface {
         }
 
         fun without(id: String): Snapshot = Snapshot(slotKey, late, headline, lang, langCode, tts,
-            cards.filter { it.id != id }, why, known + 1, total, band)
+            cards.filter { it.id != id }, why, known + 1, total, band, mode, extra, chip, asOf)
 
         fun toJson(): String {
             val arr = JSONArray()
             for (c in cards) arr.put(JSONObject().put("id", c.id).put("lv", c.level).put("l", c.local).put("s", c.say)
                 .put("r", c.roman).put("e", c.en).put("n", c.note))
             return JSONObject().put("k", slotKey).put("late", late).put("h", headline).put("lang", lang).put("code", langCode)
-                .put("tts", tts).put("why", why).put("cards", arr).put("known", known).put("total", total).put("band", band).toString()
+                .put("tts", tts).put("why", why).put("cards", arr).put("known", known).put("total", total).put("band", band)
+                .put("m", mode).put("x", extra).put("chip", chip).put("asof", asOf).toString()
         }
 
         companion object {
@@ -120,8 +129,27 @@ object PhraseSurface {
                     Card(c.optString("id"), c.optInt("lv", 1), c.optString("l"), c.optString("s"), c.optString("r"), c.optString("e"), c.optString("n"))
                 }
                 Snapshot(o.optString("k"), o.optBoolean("late"), o.optString("h"), o.optString("lang"), o.optString("code"),
-                    o.optString("tts"), cards, o.optString("why"), o.optInt("known"), o.optInt("total"), o.optInt("band", 1))
+                    o.optString("tts"), cards, o.optString("why"), o.optInt("known"), o.optInt("total"), o.optInt("band", 1),
+                    o.optString("m"), o.optString("x"), o.optString("chip"), o.optString("asof"))
             }.getOrNull()
+
+            /** The home brief as a snapshot: one card per story, the prices on every card. */
+            fun home(now: Now, kept: HomeBrief.Kept?): Snapshot {
+                val cards = kept?.cards.orEmpty().map { c -> Card(c.id, 1, c.headline, c.outlets, "", c.summary, "") }
+                val prices = kept?.prices.orEmpty()
+                val why = when {
+                    kept == null -> "the news and the prices come from your box; the phone asks it every quarter hour"
+                    cards.isEmpty() && prices.isEmpty() -> "nothing from your box yet today"
+                    else -> ""
+                }
+                val asOf = kept?.at?.takeIf { it > 0 }?.let {
+                    java.text.SimpleDateFormat("HH:mm", java.util.Locale.UK).format(java.util.Date(it * 1000))
+                } ?: ""
+                // no stories but prices: one card that is the prices
+                val shown = if (cards.isEmpty() && prices.isNotEmpty()) listOf(Card("prices", 1, prices, "", "", "", "")) else cards
+                return Snapshot(now.slotKey, now.late, "home · news & markets", "", "", "en-GB", shown, why,
+                    mode = "home", extra = prices, chip = kept?.chip.orEmpty(), asOf = asOf)
+            }
 
             fun of(now: Now): Snapshot {
                 val pack = now.pack
@@ -157,7 +185,9 @@ object PhraseSurface {
     fun refresh(ctx: Context, keep: String? = null) {
         val app = ctx.applicationContext
         val now = PhraseNow.resolve(app)
-        val snap = Snapshot.of(now)
+        // AT HOME the card is the home brief (the news the box picked, BTC and ETH); away, the
+        // phrase of the hour in the language around you
+        val snap = if (HomeBrief.atHome(app)) Snapshot.home(now, HomeBrief.kept(app)) else Snapshot.of(now)
         if (keep != null) {
             val j = snap.cards.indexOfFirst { it.id == keep }
             if (j >= 0) snap.pinIndex(app, j)
@@ -184,7 +214,7 @@ object PhraseSurface {
         }
         val card = snap.cards.getOrNull(i)
         val next = snap.cards.getOrNull((i + 1) % snap.cards.size.coerceAtLeast(1))
-        val key = "${snap.slotKey}|$i|${card?.id}|${card?.local}|${next?.id}|${snap.known}|${snap.why}|${PhraseState.liveUpdate(ctx)}"
+        val key = "${snap.slotKey}|$i|${card?.id}|${card?.local}|${next?.id}|${snap.known}|${snap.why}|${PhraseState.liveUpdate(ctx)}|${snap.mode}|${snap.extra}|${snap.asOf}"
         if (key == lastPosted) return
         lastPosted = key
         postCard(ctx, snap, i)
@@ -207,13 +237,13 @@ object PhraseSurface {
         ctx, req, Intent(ctx, PhraseReceiver::class.java).setAction(action),
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
 
-    private fun openApp(ctx: Context): PendingIntent {
+    private fun openApp(ctx: Context, home: Boolean = false): PendingIntent {
         val i = Intent(ctx, MainActivity::class.java).apply {
-            action = "com.localghost.app.OPEN_PHRASES"
-            putExtra("nav", "phrases")
+            action = if (home) "com.localghost.app.OPEN_NEWS" else "com.localghost.app.OPEN_PHRASES"
+            putExtra("nav", if (home) "news" else "phrases")
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
-        return PendingIntent.getActivity(ctx, 4712, i, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        return PendingIntent.getActivity(ctx, if (home) 4714 else 4712, i, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
     }
 
     // --- the lock-screen card ---
@@ -259,9 +289,30 @@ object PhraseSurface {
             .setShowWhen(false)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setContentIntent(openApp(ctx))
+            .setContentIntent(openApp(ctx, snap.home))
         val card = snap.cards.getOrNull(index)
         var chip = ""
+        if (snap.home) {
+            // HOME: the story as the title, the prices as the line under it, the summary, the
+            // outlets and the next two stories when pulled open; the BTC price on the chip
+            chip = snap.chip
+            if (card == null) {
+                b.setSubText(snap.headline).setContentTitle("…").setContentText(snap.why)
+            } else {
+                b.setSubText(snap.headline)
+                    .setContentTitle(card.local)
+                    .setContentText(snap.extra.ifEmpty { card.say })
+                    .setStyle(NotificationCompat.BigTextStyle().bigText(
+                        HomeBriefText.expanded(snap.cards.map { HomeBriefText.Card(it.id, it.local, it.en, it.say) }, index, snap.extra, snap.asOf)))
+                if (snap.cards.size > 1) b.addAction(0, "NEXT", broadcast(ctx, ACTION_NEXT, 2))
+                b.addAction(0, "OPEN NEWS", openApp(ctx, true))
+            }
+            if (PhraseState.liveUpdate(ctx) && card != null) {
+                b.setRequestPromotedOngoing(true).setShortCriticalText((chip.ifEmpty { card.local }).take(24))
+            }
+            NotificationManagerCompat.from(ctx).notify(NOTIF_ID, b.build())
+            return
+        }
         if (card == null) {
             b.setSubText("ghost.phrased").setContentTitle("…").setContentText(snap.why)
         } else {
@@ -320,7 +371,7 @@ object PhraseSurface {
 
     /** Redraw the widgets from the packs (a launcher callback). */
     fun updateWidgets(ctx: Context) {
-        val snap = current(ctx) ?: Snapshot.of(PhraseNow.resolve(ctx))
+        val snap = current(ctx) ?: PhraseNow.resolve(ctx).let { now -> if (HomeBrief.atHome(ctx)) Snapshot.home(now, HomeBrief.kept(ctx)) else Snapshot.of(now) }
         updateWidgets(ctx, snap, snap.index(ctx))
     }
 
@@ -337,7 +388,12 @@ object PhraseSurface {
     fun buildWidget(ctx: Context, snap: Snapshot, index: Int, look: PhraseState.WidgetLook): RemoteViews {
         val rv = RemoteViews(ctx.packageName, R.layout.widget_phrase)
         val card = snap.cards.getOrNull(index)
-        if (card == null) {
+        if (snap.home) {
+            rv.setTextViewText(R.id.w_head, "› " + snap.headline + (if (snap.asOf.isNotEmpty()) " · " + snap.asOf else ""))
+            rv.setTextViewText(R.id.w_local, card?.local ?: "…")
+            rv.setTextViewText(R.id.w_say, if (card == null) snap.why.substringBefore(";") else card.say)
+            rv.setTextViewText(R.id.w_en, snap.extra)
+        } else if (card == null) {
             rv.setTextViewText(R.id.w_head, "› ghost.phrased")
             rv.setTextViewText(R.id.w_local, snap.headline.substringAfter("· ", "where are we?"))
             rv.setTextViewText(R.id.w_say, snap.why.substringBefore(" ,"))
@@ -365,10 +421,13 @@ object PhraseSurface {
         rv.setViewVisibility(R.id.w_say, if (look.showSay) android.view.View.VISIBLE else android.view.View.GONE)
         rv.setViewVisibility(R.id.w_en, if (look.showEn) android.view.View.VISIBLE else android.view.View.GONE)
         rv.setViewVisibility(R.id.w_buttons, if (look.showButtons && card != null) android.view.View.VISIBLE else android.view.View.GONE)
+        // at home there is nothing to say aloud or to know: NEXT alone
+        rv.setViewVisibility(R.id.w_say_btn, if (snap.home) android.view.View.GONE else android.view.View.VISIBLE)
+        rv.setViewVisibility(R.id.w_got_btn, if (snap.home) android.view.View.GONE else android.view.View.VISIBLE)
         rv.setTextColor(R.id.w_head, look.accentDim)
         rv.setTextColor(R.id.w_say, look.accent)
         for (id in intArrayOf(R.id.w_say_btn, R.id.w_next_btn, R.id.w_got_btn)) rv.setTextColor(id, look.accent)
-        rv.setOnClickPendingIntent(R.id.w_root, openApp(ctx))
+        rv.setOnClickPendingIntent(R.id.w_root, openApp(ctx, snap.home))
         rv.setOnClickPendingIntent(R.id.w_say_btn, broadcast(ctx, ACTION_SAY, 1))
         rv.setOnClickPendingIntent(R.id.w_next_btn, broadcast(ctx, ACTION_NEXT, 2))
         rv.setOnClickPendingIntent(R.id.w_got_btn, broadcast(ctx, ACTION_GOT_IT, 3))
@@ -410,8 +469,8 @@ object PhraseSurface {
         val snap = current(app)
         val i = snap?.index(app) ?: 0
         val card = snap?.cards?.getOrNull(i)
-        if (snap == null || card == null) {
-            refresh(app)
+        if (snap == null || card == null || snap.home) {
+            refresh(app) // at home there is nothing to know
             return
         }
         PhraseState.setKnown(app, snap.langCode, card.id, true)
@@ -419,7 +478,7 @@ object PhraseSurface {
         val at: Int
         if (i == 0 || snap.cards.size <= 1) { // the greeting, or the last card standing: just advance
             after = Snapshot(snap.slotKey, snap.late, snap.headline, snap.lang, snap.langCode, snap.tts, snap.cards, snap.why,
-                snap.known + 1, snap.total, snap.band)
+                snap.known + 1, snap.total, snap.band, snap.mode, snap.extra, snap.chip, snap.asOf)
             at = if (snap.cards.size > 1) 1 else 0
         } else {
             after = snap.without(card.id)
@@ -436,6 +495,7 @@ object PhraseSurface {
     fun say(ctx: Context): Boolean {
         val app = ctx.applicationContext
         val snap = current(app) ?: Snapshot.of(PhraseNow.resolve(app))
+        if (snap.home) return false
         val card = snap.cards.getOrNull(snap.index(app)) ?: return false
         PhraseSpeaker.say(app, card.local, snap.tts)
         return true

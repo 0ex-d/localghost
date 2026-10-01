@@ -175,6 +175,7 @@ func main() {
 			} else {
 				out["marketErr"] = merr.Error()
 			}
+			out["series"] = tally.Depth(db, tally.Symbols(db), time.Now())
 			if a.Fetch {
 				select {
 				case forceFetch <- struct{}{}:

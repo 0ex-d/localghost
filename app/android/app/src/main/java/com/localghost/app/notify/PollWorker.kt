@@ -18,6 +18,8 @@ class PollWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         // the box hears what network this phone is on: on Wi-Fi the phone fetches the feeds and
         // the tickers for it, on mobile data or in silence the box fetches for itself
         try { BoxClient.reportNet(applicationContext) } catch (_: Exception) {}
+        // the lock-screen card's home brief: the news the box picked and the prices, every quarter hour
+        try { com.localghost.app.phrases.HomeBrief.fetch(applicationContext) } catch (_: Exception) {}
         return try {
             Notifications.postBatch(applicationContext, BoxClient.pollPending(applicationContext))
             Result.success()

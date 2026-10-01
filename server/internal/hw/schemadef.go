@@ -408,6 +408,48 @@ var schemaRegistry = []SchemaTable{
 		{"priced", "INTEGER", true, "0"},
 		{"missing", "TEXT", true, "''"},
 	}},
+	// THE SERIES: a price every minute for the last week and every hour for the last thirty days.
+	// crypto_bars is each venue's own candles (the history fetched back when the box starts),
+	// crypto_series the box's price per symbol (source live: the minute's index from the tickers;
+	// minutes: an hour rolled up from the minutes; venues: folded from the venues' candles where the
+	// box was not yet watching), crypto_market_series the market index the same way.
+	{Name: "crypto_bars", PK: "res, exchange, base, quote, ts", Cols: []SchemaCol{
+		{"res", "TEXT", true, ""},
+		{"ts", "BIGINT", true, ""},
+		{"exchange", "TEXT", true, ""},
+		{"base", "TEXT", true, ""},
+		{"quote", "TEXT", true, ""},
+		{"open", "DOUBLE PRECISION", true, "0"},
+		{"high", "DOUBLE PRECISION", true, "0"},
+		{"low", "DOUBLE PRECISION", true, "0"},
+		{"close", "DOUBLE PRECISION", true, ""},
+		{"volume", "DOUBLE PRECISION", true, "0"},
+	}, Indexes: []string{
+		"CREATE INDEX IF NOT EXISTS crypto_bars_base ON crypto_bars (res, base, ts)",
+	}},
+	{Name: "crypto_series", PK: "res, symbol, ts", Cols: []SchemaCol{
+		{"res", "TEXT", true, ""},
+		{"ts", "BIGINT", true, ""},
+		{"symbol", "TEXT", true, ""},
+		{"open", "DOUBLE PRECISION", true, "0"},
+		{"high", "DOUBLE PRECISION", true, "0"},
+		{"low", "DOUBLE PRECISION", true, "0"},
+		{"close", "DOUBLE PRECISION", true, ""},
+		{"n", "INTEGER", true, "0"},
+		{"source", "TEXT", true, "''"},
+	}, Indexes: []string{
+		"CREATE INDEX IF NOT EXISTS crypto_series_ts ON crypto_series (res, ts)",
+	}},
+	{Name: "crypto_market_series", PK: "res, ts", Cols: []SchemaCol{
+		{"res", "TEXT", true, ""},
+		{"ts", "BIGINT", true, ""},
+		{"open", "DOUBLE PRECISION", true, "0"},
+		{"high", "DOUBLE PRECISION", true, "0"},
+		{"low", "DOUBLE PRECISION", true, "0"},
+		{"close", "DOUBLE PRECISION", true, ""},
+		{"priced", "INTEGER", true, "0"},
+		{"source", "TEXT", true, "''"},
+	}},
 	{Name: "coin_ranks", PK: "ts, rank", Cols: []SchemaCol{
 		{"ts", "BIGINT", true, ""},
 		{"rank", "INTEGER", true, ""},

@@ -239,6 +239,8 @@ func (s *Server) routes() []route {
 			Auth: true, Response: newsDoc{}, Handler: s.handleNews},
 		{Method: "GET", Path: "/v1/rates", Summary: "The box's market numbers: the ECB table of the newest day, the USD index per symbol and its making, the top 100 coins, and the market index (the fifty largest, weighted by last month's volume).",
 			Auth: true, Response: hw.RatesSnapshot{}, Handler: s.handleRates},
+		{Method: "GET", Path: "/v1/rates/series", Summary: "A symbol's or the market index's price every minute (res=1m, the last week) or every hour (res=1h, the last thirty days): ?code=BTC|CRYPTO50&res=1m|1h&hours=N, oldest first.",
+			Auth: true, Response: looseList{}, Handler: s.handleRatesSeries},
 		{Method: "GET", Path: "/v1/rates/history", Summary: "A symbol's daily USD closes (the box's daily index), a currency's daily ECB rate, or the market index (?code=BTC|GBP|CRYPTO50&days=365), newest first.",
 			Auth: true, Response: looseList{}, Handler: s.handleRatesHistory},
 		{Method: "GET", Path: "/v1/geo/countries", Summary: "Every country with the tiles the box holds for it (streets, main roads, coast) and their size, for the whole-country map download.",

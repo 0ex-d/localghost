@@ -8,11 +8,13 @@ import (
 
 // IndexRow is the box's USD price of one symbol, and how it was made.
 type IndexRow struct {
-	Price  float64 `json:"price"`
-	At     int64   `json:"at"`
-	N      int     `json:"n"`
-	Spread float64 `json:"spread"`
-	Used   string  `json:"used"`
+	Price     float64 `json:"price"`
+	At        int64   `json:"at"`
+	N         int     `json:"n"`
+	Spread    float64 `json:"spread"`
+	Used      string  `json:"used"`
+	Change24  float64 `json:"change24"`  // per cent against 24 hours before, from the hourly series
+	HasChange bool    `json:"hasChange"` // false until the series reaches a day back
 }
 
 // RatesSnapshot is the box's market numbers as they stand: the ECB table of the newest day, the
@@ -74,7 +76,8 @@ func RatesNow(c Querier) (RatesSnapshot, error) {
 			s.FX[*v[1]] = r
 		}
 	}
-	rows, err = c.Query(`SELECT DISTINCT ON (symbol) symbol, ts, price, n, spread, used FROM crypto_index ORDER BY symbol, ts DESC`)
+	rows, err = c.Query(`SELECT DISTINCT ON (symbol) symbol, ts, price, n, spread, used FROM crypto_index
+		WHERE ts >= (SELECT coalesce(max(ts), 0) - 86400 FROM crypto_index) ORDER BY symbol, ts DESC`)
 	if err != nil {
 		return s, err
 	}
@@ -89,6 +92,29 @@ func RatesNow(c Querier) (RatesSnapshot, error) {
 		r.Spread, _ = strconv.ParseFloat(deref(v[4]), 64)
 		r.Used = deref(v[5])
 		s.Index[*v[0]] = r
+	}
+	// the change over 24 hours, from the hourly series
+	newest := int64(0)
+	for _, r := range s.Index {
+		if r.At > newest {
+			newest = r.At
+		}
+	}
+	if newest > 0 {
+		if rows, err := c.Query(`SELECT DISTINCT ON (symbol) symbol, close FROM crypto_series WHERE res = '1h' AND ts <= $1 AND ts >= $2 ORDER BY symbol, ts DESC`,
+			newest-86400, newest-86400-7200); err == nil {
+			for _, v := range rows.Vals {
+				if len(v) != 2 || v[0] == nil || v[1] == nil {
+					continue
+				}
+				old, _ := strconv.ParseFloat(*v[1], 64)
+				if r, ok := s.Index[*v[0]]; ok && old > 0 && r.Price > 0 {
+					r.Change24 = 100 * (r.Price/old - 1)
+					r.HasChange = true
+					s.Index[*v[0]] = r
+				}
+			}
+		}
 	}
 	if b, ok := s.Index["BTC"]; ok {
 		s.BTCUSD, s.BTCAt, s.BTCN, s.BTCSpread, s.BTCUsed = b.Price, b.At, b.N, b.Spread, b.Used

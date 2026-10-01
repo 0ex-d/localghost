@@ -4156,3 +4156,56 @@ Tested: `TestParseBatchSixVenues`, `TestKrakenAndBitfinexPairs`, `TestSymbolsFro
 volumes, the venues' close over the rank list's, a carried coin, the live value against the live
 index, a rebuild that moves nothing), `TestRatesIngestAgainstPostgres` (coin days from the rank
 list, the symbols followed), `TestMarketQuestionAndItem`, `NewsTextTest`.
+
+## A price every minute for a week, every hour for thirty days (rates, tally, tallyd, secd, synthd, app); the lock screen at home
+
+Vlad: "i need an hourly price for the last 30 days and a minute price for the last week, we can
+pull prices every minute from the sources". And: "can we not have the hey do you want this on the
+lock screen, let's have it on by default and when it's on home soil we just show news and crypto
+stuff for now, just a news summary with the most interesting news and the btc and eth prices".
+
+- Every minute, from the box. A minute series cannot come from a phone Android wakes every quarter
+  hour at best, so the tickers are the box's own now, whatever the phone is on: tallyd ticks on the
+  minute and asks the seven venues (six all-pairs calls, Binance's compact `type=MINI` form, and
+  Coinbase pair by pair for the ten largest and the USDT leg: seventeen requests). Each minute's
+  index per symbol goes into `crypto_series` (res 1m, source live) and the market index's value
+  into `crypto_market_series`. The phone keeps the ECB and the rank lists while it is on Wi-Fi
+  (`/v1/fetch/list` now lists only those four); the box takes them over otherwise, as before.
+- The hours. Every complete hour with at least thirty minutes is rolled up from the minutes (open,
+  high, low, close; source minutes), every ten minutes, again when more minutes land under it.
+- The history, so the thirty days and the week are there now and not in a month: each symbol's
+  hourly and minute candles are walked back from two venues that quote it (hours: Binance,
+  Coinbase, Kraken, Bitstamp, Bitfinex, OKX, Gemini in that order; minutes: Binance, Bitstamp,
+  Bitfinex, Coinbase, OKX, since Kraken's 720 bars and Gemini's single page cannot walk a week of
+  minutes), the USDT/USD leg first, twelve pages a minute within a 45-second budget, into
+  `crypto_bars`; each page is folded into the series where the box has no point of its own
+  (`rates.FoldBar`: per open, high, low, close the mean of the venues within 5% of their median,
+  USDT folded at that time's USDT/USD), source venues. A live point is never overwritten by a
+  folded one; a rolled hour replaces a folded one. A venue that brings nothing older, or fails
+  three times, ends that market's walk (`bars_done_<res>_<market>`). Once a resolution's walk is
+  whole, the market index is made over it (`RefoldMarket`, a day at a time). The hours take about a
+  quarter of an hour after the first start, the week of minutes about two hours.
+- Kept: minutes eight days, hours thirty-five, the venue bars the same, each venue's raw quotes two
+  days (they are a quote a minute per pair now). Pruned once an hour.
+- Read: `GET /v1/rates/series?code=BTC|CRYPTO50&res=1m|1h&hours=N`, oldest first, each point
+  `{ts, o, h, l, c, n, src}`. `/v1/rates` carries each symbol's change over 24 hours from the hourly
+  series; chat says it ("ETH 3,250 USD, -1.50% in 24 h"). `ghost-cli ghost.tallyd rates` shows
+  `series` (per resolution: the market's points, how far back, symbols in the newest step, markets
+  still being walked); Box Status › ghost.tallyd has a key row per resolution.
+- The lock screen. The card is on from the start; the offer is retired (an offer an older build left
+  standing is taken down). At home (the network's country is home's, or unknown) the card is the
+  home brief: the most-told stories of the last day (several outlets telling the same thing is what
+  makes a story worth a glance; the newest first among equals), the headline as the title, BTC and
+  ETH with their 24-hour change as the line under it, the summary, the outlets and the next two
+  headlines pulled open, NEXT and OPEN NEWS as its buttons, and the BTC price on the live-update
+  chip. Away, the phrases as before. The phone fetches the brief with the notification poll every
+  quarter hour and when the app opens (`HomeBrief`), keeps it, and the card redraws from it. The
+  widget follows the same switch. Welcome, PHRASES and Settings say so.
+
+Tested: `TestBarsAndFold`, `TestMarketsAndURLs` (minute and hour URLs, the phone's and the box's
+sources), `TestSeriesAgainstPostgres` (the pages chosen with the USDT leg first, folded hours, the
+walk back and its end, live minutes over a folded one, the hour rolled up, the market over the
+folded hours without touching the rolled one, depth, pruning), `TestRatesItems` (the 24-hour
+change), `TestFetchListAndSpools`, `HomeBriefTextTest` (the most-told first, the prices line, the
+chip, the card pulled open). The tick itself and the card are not run here; the real venues were
+not reached.

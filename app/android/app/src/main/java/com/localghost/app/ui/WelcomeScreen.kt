@@ -82,7 +82,7 @@ fun WelcomeScreen(
                 "a point every quarter hour, kept on this phone · drawn on the map, by day, with a clock along the line",
                 trailOn, onTrail)
             Spacer(Modifier.height(6.dp))
-            Text("When you land somewhere that is not home, the phone asks once whether you want the phrase you'll need on the lock screen. Nothing until then.",
+            Text("Your lock screen gets a quiet card: at home, the news your box picked and the BTC and ETH prices; somewhere that is not home, the phrase you'll need in the language around you. SETTINGS turns it off.",
                 color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
 
             Spacer(Modifier.height(24.dp))

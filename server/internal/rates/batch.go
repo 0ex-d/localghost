@@ -19,8 +19,8 @@ var BatchExchanges = []string{"binance", "okx", "kraken", "bitfinex", "bitstamp"
 // BatchURL is the venue's all-pairs ticker call.
 func BatchURL(exchange string) string {
 	switch exchange {
-	case "binance":
-		return "https://api.binance.com/api/v3/ticker/24hr"
+	case "binance": // MINI: the price, the volume and the close time, a third of the full answer
+		return "https://api.binance.com/api/v3/ticker/24hr?type=MINI"
 	case "okx":
 		return "https://www.okx.com/api/v5/market/tickers?instType=SPOT"
 	case "kraken":
