@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LocalGhostDao/localghost/server/internal/apparedis"
 	"github.com/LocalGhostDao/localghost/server/internal/egress"
 	"github.com/LocalGhostDao/localghost/server/internal/feeds"
 	"github.com/LocalGhostDao/localghost/server/internal/feedstat"
@@ -68,6 +69,9 @@ func seedFeeds(db *poltergres.ReadWrite) error {
 	if err := retireFeeds(db); err != nil {
 		return err
 	}
+	if err := retellStories(db, time.Now()); err != nil {
+		return err
+	}
 	rows, err := db.Query("SELECT value FROM settings WHERE key = 'news_seeded'")
 	if err != nil {
 		return err
@@ -107,6 +111,28 @@ func retireFeeds(db *poltergres.ReadWrite) error {
 		return err
 	}
 	return db.Exec("INSERT INTO settings (key, value) VALUES ('news_retired_v1', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", strconv.FormatInt(time.Now().Unix(), 10))
+}
+
+// retellStories asks once for the last day's summaries again, in the lead-and-points shape (2 Oct
+// 2026): the model's summaries cleared, their articles to be read again, the brief rewritten from
+// them. Older stories keep the paragraph they had; the phone shows it as a lead alone.
+func retellStories(db *poltergres.ReadWrite, now time.Time) error {
+	rows, err := db.Query("SELECT value FROM settings WHERE key = 'news_points_v1'")
+	if err != nil {
+		return err
+	}
+	if len(rows.Vals) > 0 {
+		return nil
+	}
+	since := now.Unix() - 86400
+	if err := db.Exec(`UPDATE news_items SET body = '', body_at = 0, body_status = ''
+		WHERE story_id IN (SELECT id FROM news_stories WHERE last_seen >= $1 AND written_by = 'model')`, since); err != nil {
+		return err
+	}
+	if err := db.Exec("UPDATE news_stories SET summary = '', tries = 0 WHERE last_seen >= $1 AND written_by = 'model'", since); err != nil {
+		return err
+	}
+	return db.Exec("INSERT INTO settings (key, value) VALUES ('news_points_v1', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", strconv.FormatInt(now.Unix(), 10))
 }
 
 // ingestFetched takes one batch: feed health, new entries, their stories.
@@ -273,13 +299,14 @@ func storyFacts(db *poltergres.ReadWrite, storyID int64) ([]string, error) {
 }
 
 // newsPrompt asks for a short account from the reports (and the article, when one was read) and
-// nothing else.
+// nothing else. With an article the account is a lead and a few points: what happened in one
+// sentence, then the key facts as bullets, the way the phone shows a story.
 func newsPrompt(facts []string, article string) string {
 	var b strings.Builder
 	if article == "" {
 		b.WriteString("Below are the headline and the feed description of one news story as several outlets reported it. Write what happened in one or two plain sentences, from these reports only.\n\nREPORTS:\n")
 	} else {
-		b.WriteString("Below are the headline and the feed description of one news story as several outlets reported it, and the text of one of the articles. Write what happened in up to three short paragraphs of plain sentences, the most important first, from these only.\n\nREPORTS:\n")
+		b.WriteString("Below are the headline and the feed description of one news story as several outlets reported it, and the text of one of the articles. From these only, write what happened as a lead and a few points: first line, what happened in one plain sentence; then two to four lines each starting with \"- \", one key fact each (who, how much, when, what comes next), the most important first.\n\nREPORTS:\n")
 	}
 	for _, f := range facts {
 		b.WriteString("- " + f + "\n")
@@ -287,12 +314,76 @@ func newsPrompt(facts []string, article string) string {
 	if article != "" {
 		b.WriteString("\nARTICLE:\n" + article + "\n")
 	}
-	b.WriteString("\nKeep every number, name and place exactly as the reports give them; add nothing the reports do not say; no opinion, no headline, no list, no mention of the outlets or of \"the reports\". Reply with the summary only.")
+	if article == "" {
+		b.WriteString("\nKeep every number, name and place exactly as the reports give them; add nothing the reports do not say; no opinion, no headline, no list, no mention of the outlets or of \"the reports\". Reply with the summary only.")
+	} else {
+		b.WriteString("\nKeep every number, name and place exactly as the reports give them; add nothing the reports do not say; no opinion, no headline, no mention of the outlets or of \"the reports\". Reply with the lead and the points only.")
+	}
 	return b.String()
 }
 
-// groundedNews holds a summary to the reports: a sane length, no list or refusal, and every
-// number in it present in a report (the same test the day memories pass).
+const (
+	newsPointsMax = 5   // points under a story's lead
+	newsPointMin  = 8   // characters, under this a point says nothing
+	newsPointMax  = 320 // characters, over this a point is a paragraph
+)
+
+// bulletLine says whether a line is a point ("- ", "• ", "* ", "1. ", "2) ") and gives its text.
+func bulletLine(line string) (string, bool) {
+	t := strings.TrimSpace(line)
+	for _, p := range []string{"- ", "• ", "* ", "– ", "—"} {
+		if strings.HasPrefix(t, p) {
+			return strings.TrimSpace(t[len(p):]), true
+		}
+	}
+	if t == "-" || t == "•" || t == "*" {
+		return "", true
+	}
+	if i := strings.IndexAny(t, ".)"); i > 0 && i <= 2 && len(t) > i+1 && t[i+1] == ' ' {
+		if _, err := strconv.Atoi(t[:i]); err == nil {
+			return strings.TrimSpace(t[i+2:]), true
+		}
+	}
+	return t, false
+}
+
+// splitStory reads a summary as its lead and its points: the lines before the first point are the
+// lead (joined), each point is its own line, a plain line after a point carries on that point. A
+// summary written before the points were asked for is all lead.
+func splitStory(s string) (lead string, points []string) {
+	var head []string
+	for _, line := range strings.Split(s, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		t, isPoint := bulletLine(line)
+		switch {
+		case isPoint:
+			if t != "" {
+				points = append(points, t)
+			}
+		case len(points) > 0:
+			points[len(points)-1] += " " + t
+		default:
+			head = append(head, t)
+		}
+	}
+	lead = strings.Join(strings.Fields(strings.Join(head, " ")), " ")
+	for i, p := range points {
+		points[i] = strings.Join(strings.Fields(p), " ")
+	}
+	return lead, points
+}
+
+// newsLead is a summary's first sentence or lead, for the digest and the brief.
+func newsLead(summary string) string {
+	lead, _ := splitStory(summary)
+	return lead
+}
+
+// groundedNews holds a summary to the reports: a sane length, no refusal, a lead before any
+// point, a few points of a sane length, and every number in it present in a report (the same
+// test the day memories pass). What it keeps is written "lead\n- point\n- point".
 func groundedNews(out string, facts []string) (string, bool) {
 	s := strings.TrimSpace(strings.Trim(strings.TrimSpace(out), "\"“”"))
 	if len(s) < 30 || len(s) > 1600 {
@@ -304,8 +395,20 @@ func groundedNews(out string, facts []string) (string, bool) {
 			return "", false
 		}
 	}
-	if strings.Contains(low, "the reports") || strings.HasPrefix(low, "-") || strings.HasPrefix(low, "•") {
+	if strings.Contains(low, "the reports") {
 		return "", false
+	}
+	if _, first := bulletLine(strings.SplitN(s, "\n", 2)[0]); first {
+		return "", false // a list with no lead
+	}
+	lead, points := splitStory(s)
+	if len(lead) < 30 || len(points) > newsPointsMax {
+		return "", false
+	}
+	for _, p := range points {
+		if len(p) < newsPointMin || len(p) > newsPointMax {
+			return "", false
+		}
 	}
 	allowed := map[string]bool{}
 	for _, f := range facts {
@@ -317,12 +420,16 @@ func groundedNews(out string, facts []string) (string, bool) {
 			}
 		}
 	}
-	for _, n := range numberRe.FindAllString(s, -1) {
+	text := lead
+	for _, p := range points {
+		text += "\n- " + p
+	}
+	for _, n := range numberRe.FindAllString(text, -1) { // the kept text: a list's own numbering is not a fact
 		if !allowed[n] && !allowed[strings.ReplaceAll(n, ",", "")] {
 			return "", false
 		}
 	}
-	return strings.Join(strings.Fields(s), " "), true
+	return text, true
 }
 
 // newsSummaryPass writes summaries for the stories that want one: told by two outlets or more, or
@@ -418,7 +525,7 @@ func digestBody(stories []digestStory) string {
 		}
 		line := s.Title
 		if s.Summary != "" {
-			line = s.Summary
+			line = newsLead(s.Summary) // the lead; the points wait on the phone's NEWS
 		}
 		if s.Sources > 1 {
 			line += fmt.Sprintf(" (%d outlets)", s.Sources)
@@ -544,6 +651,29 @@ func newsLoop(ctx context.Context, mount, runDir string, produce func(hw.Notific
 		db = poltergres.NewReadWrite(hw.SocketForMount(mount), cfg.Postgres.Port, cfg.Postgres.RWUser, cfg.Postgres.RWPass, cfg.Postgres.Name)
 		return true
 	}
+	// the phone's copy of the last two days in Redis (hw.HotNews), rewritten after every batch and
+	// every slow pass, so /v1/news answers from memory
+	var rd *apparedis.ReadWrite
+	putHot := func() {
+		if db == nil {
+			return
+		}
+		if rd == nil {
+			r, err := hw.HotRedis(mount)
+			if err != nil {
+				return
+			}
+			rd = r
+		}
+		now := time.Now()
+		d, err := hw.NewsDocNow(db, now.Add(-hw.NewsHotDays*24*time.Hour).Unix(), 0, now.Unix())
+		if err != nil {
+			return
+		}
+		if err := hw.HotPut(rd, hw.HotNews, d, hw.HotNewsTTL); err != nil {
+			lg.Debug("news not put in redis", "fn", "newsLoop", "err", err)
+		}
+	}
 	drain := func() {
 		if !connect() {
 			return
@@ -560,6 +690,12 @@ func newsLoop(ctx context.Context, mount, runDir string, produce func(hw.Notific
 		if err != nil {
 			return
 		}
+		taken := 0
+		defer func() {
+			if taken > 0 {
+				putHot()
+			}
+		}()
 		for _, e := range entries {
 			if e.IsDir() || strings.HasSuffix(e.Name(), ".part") {
 				continue
@@ -576,6 +712,7 @@ func newsLoop(ctx context.Context, mount, runDir string, produce func(hw.Notific
 				return
 			}
 			lg.Info("news batch taken", "fn", "newsLoop", "feeds", res.Feeds, "ok", res.OK, "newItems", res.NewItems, "newStories", res.NewStories, "failed", len(res.Failed))
+			taken++
 			if len(res.Failed) > 0 {
 				lg.Debug("news feeds that did not come", "fn", "newsLoop", "which", res.Failed)
 			}
@@ -587,6 +724,7 @@ func newsLoop(ctx context.Context, mount, runDir string, produce func(hw.Notific
 		if !connect() {
 			return
 		}
+		defer putHot()
 		now := time.Now()
 		// the articles of the stories about to be summarised, then the summaries, then the brief
 		if _, err := articlePass(ctx, db, client, now, lg); err != nil {
@@ -629,6 +767,7 @@ func newsLoop(ctx context.Context, mount, runDir string, produce func(hw.Notific
 			return
 		}
 		lg.Debug("news fetch by the box", "fn", "newsLoop", "what", what)
+		putHot()
 	}
 	drain()
 	fast := time.NewTicker(30 * time.Second)
@@ -735,11 +874,43 @@ func newsSource(runDir, prompt string) []ctxItem {
 	if db == nil {
 		return nil
 	}
+	// "what's the news": the day's brief and the most-told stories, which the plan told the phone
+	// the box has
+	if headlineHint.MatchString(strings.TrimSpace(prompt)) {
+		return headlineItems(db, time.Now())
+	}
 	terms := memoryTerms(prompt)
 	if len(terms) < 2 {
 		return nil
 	}
 	return newsItemsFor(db, terms, time.Now())
+}
+
+// headlineItems is the day's news for a chat answer: the brief, then the five most-told stories of
+// the last day by their leads (or titles before a summary).
+func headlineItems(db *poltergres.ReadWrite, now time.Time) []ctxItem {
+	var out []ctxItem
+	day := now.UTC().Format("2006-01-02")
+	if text, at, _ := hw.NewsBrief(db); text != "" && now.Unix()-at < 86400 {
+		out = append(out, ctxItem{When: day, Source: "news", Snippet: "the day's brief: " + strings.ReplaceAll(strings.TrimPrefix(text, "- "), "\n- ", "; "),
+			Why: "the box's brief of the day's most-told stories, from the feeds it gathered"})
+	}
+	rows, err := db.Query(`SELECT title, summary, sources FROM news_stories WHERE last_seen >= $1 ORDER BY sources DESC, last_seen DESC LIMIT 5`, now.Unix()-86400)
+	if err != nil {
+		return out
+	}
+	for _, v := range rows.Vals {
+		if len(v) < 3 || v[0] == nil {
+			continue
+		}
+		line := *v[0]
+		if l := newsLead(str(v[1])); l != "" {
+			line = l
+		}
+		out = append(out, ctxItem{When: day, Source: "news", Snippet: line + " (" + str(v[2]) + " outlets)",
+			Why: "one of the day's most-told stories, from the feeds the box gathered"})
+	}
+	return out
 }
 
 // newsItemsFor is the query behind newsSource (the Postgres test calls it).

@@ -52,15 +52,15 @@ func PhoneSources() []Source {
 // THE RANK LIST is Coinbase's: the coins it lists, largest market cap first, with each one's
 // price, market cap, circulating supply, change over the day and dollar volume across the market.
 // It is the list coinbase.com's own price pages read (not a documented API: Coinbase's documented
-// public endpoints give products and volumes, and no market cap). The old aggregators' ids stay
-// readable so a batch an older phone posts still lands.
+// public endpoints give products and volumes, and no market cap). The supply makes the cap at the
+// box's own minute price, not the list's hourly one.
 const (
 	CoinbaseRanks    = "coinbase-ranks"
 	CoinbaseRanksURL = "https://www.coinbase.com/api/v2/assets/search?base=USD&filter=listed&include_prices=true&resolution=day&sort=rank&order=asc&limit=100&page=1"
 )
 
-// RankSources are the rank lists' ids, the one in use first.
-var RankSources = []string{CoinbaseRanks, "coingecko", "coinpaprika"}
+// RankSources are the rank lists' ids.
+var RankSources = []string{CoinbaseRanks}
 
 // IsRankSource says whether an id is a rank list.
 func IsRankSource(id string) bool {
@@ -272,10 +272,10 @@ type Coin struct {
 	MarketCap float64 `json:"marketCap"`
 	Volume24  float64 `json:"volume24"`
 	Change24  float64 `json:"change24"` // per cent
+	Supply    float64 `json:"supply"`   // circulating, in coins: the cap at any price is price × supply
 }
 
-// ParseCoins reads a rank list by source id: Coinbase's asset search, or CoinGecko's
-// /coins/markets or CoinPaprika's /tickers (kept for batches from older phones).
+// ParseCoins reads the rank list by source id: Coinbase's asset search.
 func ParseCoins(source string, body []byte) ([]Coin, error) {
 	switch source {
 	case CoinbaseRanks: // {data:[{symbol, name, slug, rank, market_cap:"…", latest:"…", volume_24h:"…", percent_change: 0.0095}]}
@@ -289,6 +289,7 @@ func ParseCoins(source string, body []byte) ([]Coin, error) {
 				Price  any    `json:"latest"`
 				Vol    any    `json:"volume_24h"`
 				Change any    `json:"percent_change"` // a fraction of one: 0.0095 is +0.95%
+				Supply any    `json:"circulating_supply"`
 				Listed *bool  `json:"listed"`
 			} `json:"data"`
 		}
@@ -300,53 +301,7 @@ func ParseCoins(source string, body []byte) ([]Coin, error) {
 			if r.Listed != nil && !*r.Listed {
 				continue
 			}
-			out = append(out, Coin{r.Rank, r.Slug, strings.ToUpper(r.Symbol), r.Name, anyNum(r.Price), anyNum(r.Cap), anyNum(r.Vol), 100 * anyNum(r.Change)})
-		}
-		return finishCoins(out)
-	case "coingecko":
-		var rows []struct {
-			ID     string  `json:"id"`
-			Symbol string  `json:"symbol"`
-			Name   string  `json:"name"`
-			Price  float64 `json:"current_price"`
-			Cap    float64 `json:"market_cap"`
-			Rank   int     `json:"market_cap_rank"`
-			Vol    float64 `json:"total_volume"`
-			Change float64 `json:"price_change_percentage_24h"`
-		}
-		if err := json.Unmarshal(body, &rows); err != nil {
-			return nil, err
-		}
-		out := make([]Coin, 0, len(rows))
-		for i, r := range rows {
-			rank := r.Rank
-			if rank == 0 {
-				rank = i + 1
-			}
-			out = append(out, Coin{rank, r.ID, strings.ToUpper(r.Symbol), r.Name, r.Price, r.Cap, r.Vol, r.Change})
-		}
-		return finishCoins(out)
-	case "coinpaprika":
-		var rows []struct {
-			ID     string `json:"id"`
-			Name   string `json:"name"`
-			Symbol string `json:"symbol"`
-			Rank   int    `json:"rank"`
-			Quotes struct {
-				USD struct {
-					Price  float64 `json:"price"`
-					Vol    float64 `json:"volume_24h"`
-					Cap    float64 `json:"market_cap"`
-					Change float64 `json:"percent_change_24h"`
-				} `json:"USD"`
-			} `json:"quotes"`
-		}
-		if err := json.Unmarshal(body, &rows); err != nil {
-			return nil, err
-		}
-		out := make([]Coin, 0, len(rows))
-		for _, r := range rows {
-			out = append(out, Coin{r.Rank, r.ID, strings.ToUpper(r.Symbol), r.Name, r.Quotes.USD.Price, r.Quotes.USD.Cap, r.Quotes.USD.Vol, r.Quotes.USD.Change})
+			out = append(out, Coin{r.Rank, r.Slug, strings.ToUpper(r.Symbol), r.Name, anyNum(r.Price), anyNum(r.Cap), anyNum(r.Vol), 100 * anyNum(r.Change), anyNum(r.Supply)})
 		}
 		return finishCoins(out)
 	}

@@ -34,16 +34,8 @@ type fetchListDoc struct {
 	FeedsEvery int `json:"feedsEvery"`
 }
 
-// newsDoc is the stories, with the marks for the screen's header.
-type newsDoc struct {
-	Stories    []hw.NewsStory `json:"stories"`
-	LastFetch  int64          `json:"lastFetch"`
-	LastDigest int64          `json:"lastDigest"`
-	// Brief is the day's news in three or four sentences, written from the most-told stories'
-	// summaries (the home screen's); "" before the first
-	Brief   string `json:"brief"`
-	BriefAt int64  `json:"briefAt"`
-}
+// newsDoc is /v1/news (hw.NewsDoc): the stories, the marks for the screen's header, the brief.
+type newsDoc = hw.NewsDoc
 
 func (s *Server) mountedSlot() (int, bool) {
 	s.mu.Lock()
@@ -208,7 +200,9 @@ func (s *Server) handleRatesFetched(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "sources": len(b.Sources)})
 }
 
-// handleNews , GET /v1/news?since=<unix>&limit=N , the stories for the NEWS screen.
+// handleNews , GET /v1/news?since=<unix>&limit=N , the stories for the NEWS screen and home. The
+// last two days come from Redis (synthd rewrites the copy when a story, summary or brief changes);
+// a miss, an older since or a limit of its own reads Postgres.
 func (s *Server) handleNews(w http.ResponseWriter, r *http.Request) {
 	if !s.session.Valid(bearer(r)) || r.Method != http.MethodGet {
 		s.appearsDown(w)
@@ -219,29 +213,41 @@ func (s *Server) handleNews(w http.ResponseWriter, r *http.Request) {
 		s.appearsDown(w)
 		return
 	}
+	now := time.Now()
+	window := now.Add(-hw.NewsHotDays * 24 * time.Hour).Unix()
+	since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
+	if since <= 0 {
+		since = window
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	hot := limit <= 0 && since >= window-3600 // the copy's two days, give or take its age
+	rd, rerr := s.notif.Cache(mounted)
+	if hot && rerr == nil {
+		var d hw.NewsDoc
+		if hw.HotGet(rd, hw.HotNews, &d) && d.Since <= since {
+			writeJSON(w, d.Within(since))
+			return
+		}
+	}
 	db, err := s.notif.DB(mounted)
 	if err != nil {
 		s.appearsDown(w)
 		return
 	}
-	since, _ := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
-	if since <= 0 {
-		since = time.Now().Add(-48 * time.Hour).Unix()
+	from := since
+	if hot {
+		from = window
 	}
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	stories, err := hw.NewsStories(db, since, limit)
+	d, err := hw.NewsDocNow(db, from, limit, now.Unix())
 	if err != nil {
 		secdLog.Warn("news read failed", "fn", "handleNews", "err", err)
 		s.appearsDown(w)
 		return
 	}
-	if stories == nil {
-		stories = []hw.NewsStory{}
+	if hot && rerr == nil {
+		_ = hw.HotPut(rd, hw.HotNews, d, time.Minute) // synthd's own copy lasts longer
 	}
-	lf, ld := hw.NewsMarks(db)
-	brief, briefAt := hw.NewsBrief(db)
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(newsDoc{Stories: stories, LastFetch: lf, LastDigest: ld, Brief: brief, BriefAt: briefAt})
+	writeJSON(w, d.Within(since))
 }
 
 // handleRatesHistory , GET /v1/rates/history?code=BTC&days=N , a symbol's daily USD closes (the
@@ -354,31 +360,80 @@ func (s *Server) handleRates(w http.ResponseWriter, r *http.Request) {
 		s.appearsDown(w)
 		return
 	}
-	db, err := s.notif.DB(mounted)
-	if err != nil {
+	now := time.Now()
+	rd, rerr := s.notif.Cache(mounted)
+	var d hw.RatesDoc
+	if rerr != nil || !hw.HotGet(rd, hw.HotRates, &d) {
+		db, err := s.notif.DB(mounted)
+		if err != nil {
+			s.appearsDown(w)
+			return
+		}
+		if d, err = hw.RatesDocNow(db, now); err != nil {
+			secdLog.Warn("rates read failed", "fn", "handleRates", "err", err)
+			s.appearsDown(w)
+			return
+		}
+		if rerr == nil {
+			_ = hw.HotPut(rd, hw.HotRates, d, time.Minute) // tallyd rewrites it on its minute
+		}
+	}
+	if d.Index == nil {
+		d.Index = map[string]hw.IndexRow{}
+	}
+	if d.Ranks == nil {
+		d.Ranks = []hw.CoinRow{}
+	}
+	// BTC, ETH and SOL as of the last five seconds, over the minute's index
+	var f hw.Fast
+	if rerr == nil && hw.HotGet(rd, hw.HotFast, &f) {
+		hw.ApplyFast(&d.RatesSnapshot, f, now)
+	}
+	writeJSON(w, d)
+}
+
+// fastDoc is /v1/rates/fast: the fast coins as the index rows /v1/rates gives, seconds old.
+type fastDoc struct {
+	At    int64                  `json:"at"` // unix ms of the fast pass; 0 when the lane is quiet
+	Index map[string]hw.IndexRow `json:"index"`
+}
+
+// handleRatesFast , GET /v1/rates/fast , BTC, ETH and SOL every five seconds (tallyd's fast lane),
+// each with its 24-hour change; Redis only, so home can ask every five seconds while it is open.
+func (s *Server) handleRatesFast(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodGet {
 		s.appearsDown(w)
 		return
 	}
-	snap, err := hw.RatesNow(db)
-	if err != nil {
-		secdLog.Warn("rates read failed", "fn", "handleRates", "err", err)
+	mounted, ok := s.mountedSlot()
+	if !ok {
 		s.appearsDown(w)
 		return
 	}
-	if snap.Ranks == nil {
-		snap.Ranks = []hw.CoinRow{}
+	out := fastDoc{Index: map[string]hw.IndexRow{}}
+	rd, err := s.notif.Cache(mounted)
+	if err != nil {
+		writeJSON(w, out)
+		return
 	}
-	// the market index rides with the snapshot: one number for crypto as a whole
-	type withMarket struct {
-		hw.RatesSnapshot
-		Market *tally.MarketState `json:"market,omitempty"`
+	var d hw.RatesDoc
+	var f hw.Fast
+	if !hw.HotGet(rd, hw.HotFast, &f) {
+		writeJSON(w, out)
+		return
 	}
-	out := withMarket{RatesSnapshot: snap}
-	if st, err := tally.MarketNow(db, time.Now()); err == nil {
-		out.Market = &st
+	if !hw.HotGet(rd, hw.HotRates, &d) || d.Index == nil {
+		d.Index = map[string]hw.IndexRow{}
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(out)
+	snap := d.RatesSnapshot
+	hw.ApplyFast(&snap, f, time.Now())
+	out.At = f.At
+	for _, sym := range hw.FastSymbols {
+		if row, ok := snap.Index[sym]; ok && row.Fast {
+			out.Index[sym] = row
+		}
+	}
+	writeJSON(w, out)
 }
 
 // handleFeedsStatus , GET /v1/feeds/status , how the data the box pulls in is doing: the prices

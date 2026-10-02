@@ -291,6 +291,21 @@ func prices(db *poltergres.ReadWrite, now time.Time) Section {
 		}
 		s.Rows = append(s.Rows, r)
 	}
+	// the fast lane: BTC, ETH and SOL every five seconds, one fetch-log line a minute
+	if st, err := feedstat.Stats(db, feedstat.KindFast, now.Add(-time.Hour), false); err == nil && len(st) > 0 {
+		t := st[0]
+		r := Row{K: "BTC, ETH, SOL every 5 s", V: fmt.Sprintf("%.0f%% of minutes clean · %s typical (last hour)", 100*t.Rate(), Ms(t.P50Ms))}
+		switch {
+		case t.LastOKAt == 0 || now.Unix()-t.LastOKAt > 5*60:
+			r.State = Failing
+		case t.Rate() < 0.9:
+			r.State = Flaky
+		}
+		if t.LastError != "" && r.State != "" {
+			r.V += " · last: " + t.LastError
+		}
+		s.Rows = append(s.Rows, r)
+	}
 	s.Line = fmt.Sprintf("%d of %d symbols", priced, len(followed))
 	if x, ok := bySym["BTC"]; ok {
 		s.Line += " · BTC " + Money(x.price)
@@ -726,7 +741,7 @@ func fetchRow(st feedstat.Stat, now time.Time, name string) Row {
 	return r
 }
 
-var rankNames = map[string]string{"coinbase-ranks": "Coinbase", "coingecko": "CoinGecko", "coinpaprika": "CoinPaprika"}
+var rankNames = map[string]string{"coinbase-ranks": "Coinbase"}
 
 // --- the rank list -------------------------------------------------------------------------
 
@@ -930,7 +945,8 @@ func news(db *poltergres.ReadWrite, now time.Time) Section {
 			s.Rows = append(s.Rows, Row{K: "articles read", V: fmt.Sprintf("%d · %d whole · %d paywalled (free part only) · %d with little text · %d failed", n, i64(v[1]), i64(v[2]), i64(v[3]), i64(v[4]))})
 		}
 	}
-	if text, at := hw.NewsBrief(db); text != "" {
+	s.Rows = append(s.Rows, articleOutlets(db, since)...)
+	if text, at, _ := hw.NewsBrief(db); text != "" {
 		s.Rows = append(s.Rows, Row{K: "brief", V: "written " + Ago(age(now, at)) + " ago"})
 	}
 	if delay > 0 {
@@ -1049,6 +1065,45 @@ func one(db *poltergres.ReadWrite, q string, args ...any) int64 {
 		return 0
 	}
 	return i64(rows.Vals[0][0])
+}
+
+// articleOutlets is a row per outlet whose pages did not all come whole in the last day: how
+// many were read, and what the rest answered (an HTTP status, a failed fetch, little text). An
+// outlet that refused six pages and gave none is left alone for the day (synthd's articlePass).
+func articleOutlets(db *poltergres.ReadWrite, since int64) []Row {
+	rows, err := db.Query(`SELECT f.name, count(*), count(*) FILTER (WHERE i.body_status IN ('ok','paywalled')),
+		count(*) FILTER (WHERE i.body_status = 'short'),
+		(array_agg(i.body_status ORDER BY i.body_at DESC) FILTER (WHERE i.body_status NOT IN ('ok','paywalled','short')))[1]
+		FROM news_items i JOIN news_feeds f ON f.id = i.feed_id WHERE i.body_at >= $1 GROUP BY f.name ORDER BY f.name`, since)
+	if err != nil {
+		return nil
+	}
+	var out []Row
+	for _, v := range rows.Vals {
+		if len(v) < 5 || v[0] == nil {
+			continue
+		}
+		n, read, short, why := i64(v[1]), i64(v[2]), i64(v[3]), str(v[4])
+		if n == 0 || read == n {
+			continue
+		}
+		val := fmt.Sprintf("%d of %d read", read, n)
+		if short > 0 {
+			val += fmt.Sprintf(" · %d with little text on the page", short)
+		}
+		if failed := n - read - short; failed > 0 {
+			val += fmt.Sprintf(" · %d refused or failed (last: %s)", failed, why)
+		}
+		r := Row{K: "articles, " + *v[0], V: val}
+		if read == 0 {
+			r.State = Flaky
+			if short == 0 && n >= 6 {
+				r.V += " · left alone for the day"
+			}
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 func i64(p *string) int64 {

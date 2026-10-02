@@ -97,6 +97,23 @@ func TestGroundedNews(t *testing.T) {
 	if _, ok := groundedNews("As an AI I cannot summarise the reports.", facts); ok {
 		t.Fatal("a refusal passed")
 	}
+	// a lead and its points
+	s, ok := groundedNews("The Bank of England kept its rate at 4% on Thursday.\n\n- Inflation is cooling, the Bank said.\n* The vote was close\nand split the committee.\n2. The next decision is in November.", facts)
+	if !ok || s != "The Bank of England kept its rate at 4% on Thursday.\n- Inflation is cooling, the Bank said.\n- The vote was close and split the committee.\n- The next decision is in November." {
+		t.Fatalf("%q %v", s, ok)
+	}
+	if _, ok := groundedNews("The Bank of England kept its rate at 4% on Thursday.\n- It was 3.5% last year.", facts); ok {
+		t.Fatal("a point's number not in the reports passed")
+	}
+	if _, ok := groundedNews("The Bank of England kept its rate at 4% on Thursday.\n- ok", facts); ok {
+		t.Fatal("a point that says nothing passed")
+	}
+	if lead, pts := splitStory("A paragraph from before the points.\nIts second line."); lead != "A paragraph from before the points. Its second line." || len(pts) != 0 {
+		t.Fatalf("%q %v", lead, pts)
+	}
+	if body := digestBody([]digestStory{{1, "Rates held", 3, "The Bank kept its rate at 4%.\n- Inflation cooled."}}); body != "The Bank kept its rate at 4%. (3 outlets)" {
+		t.Fatalf("the digest tells the lead: %q", body)
+	}
 }
 
 func TestDigestBody(t *testing.T) {

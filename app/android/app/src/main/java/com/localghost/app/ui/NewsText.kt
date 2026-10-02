@@ -2,6 +2,34 @@ package com.localghost.app.ui
 
 /** The words of the NEWS screen. Pure, so the JVM tests read them. */
 object NewsText {
+    /** A story's summary as the box writes it: a lead, then points ("- " lines). */
+    data class Told(val lead: String, val points: List<String>)
+
+    private val bullet = Regex("""^\s*(?:[-•*–]\s+|\d{1,2}[.)]\s+)""")
+
+    /** Reads a summary as its lead and points; a summary from before the points is all lead. */
+    fun told(summary: String): Told {
+        val head = ArrayList<String>()
+        val points = ArrayList<String>()
+        summary.lines().forEach { raw ->
+            val line = raw.trim()
+            if (line.isEmpty()) return@forEach
+            val m = bullet.find(line)
+            when {
+                m != null -> line.substring(m.range.last + 1).trim().takeIf { it.isNotEmpty() }?.let { points.add(it) }
+                points.isNotEmpty() -> points[points.size - 1] = points.last() + " " + line
+                else -> head.add(line)
+            }
+        }
+        return Told(head.joinToString(" "), points)
+    }
+
+    /** The lead alone, for a line that has room for one sentence (the lock screen, a list). */
+    fun lead(summary: String): String = told(summary).let { if (it.lead.isNotEmpty()) it.lead else it.points.firstOrNull() ?: "" }
+
+    /** Whether a pull should also fetch the feeds: the last fetch is half an hour old or more. */
+    fun wantsFetch(lastFetch: Long, now: Long): Boolean = lastFetch <= 0 || now - lastFetch >= 1800
+
     fun ago(sec: Long, now: Long): String {
         if (sec <= 0) return "never"
         val d = now - sec

@@ -39,4 +39,34 @@ class HomeTextTest {
         assertEquals("written 23 min ago", HomeText.written(now - 23 * 60, now))
         assertEquals("written 3 h ago", HomeText.written(now - 3 * 3600, now))
     }
+
+    @Test fun capFollowsTheShownPriceTimesSupply() {
+        val ranks = listOf(HomeText.Coin(1, "BTC", "Bitcoin", 84000.0, 0.5, 1.69e12, supply = 20_000_000.0),
+            HomeText.Coin(2, "XRP", "XRP", 1.5, 2.0, 8.9e10))
+        val rows = HomeText.merge(ranks, mapOf("BTC" to (85000.0 to 1.0)))
+        assertEquals(1.7e12, rows[0].cap, 1.0)
+        assertEquals(8.9e10, rows[1].cap, 0.0) // no supply: the list's own cap
+    }
+
+    @Test fun fastPricesSitOverTheMinute() {
+        val live = mapOf("BTC" to (84000.0 to 0.5), "ETH" to (2690.0 to null))
+        val fast = mapOf("BTC" to (84123.0 to 0.6), "SOL" to (0.0 to null))
+        val m = HomeText.withFast(live, fast)
+        assertEquals(84123.0, m.getValue("BTC").first, 0.0)
+        assertEquals(2690.0, m.getValue("ETH").first, 0.0)
+        assertEquals(false, m.containsKey("SOL"))
+    }
+
+    @Test fun briefPointsOpenTheirStories() {
+        val p = HomeText.points("- The minister resigned on Tuesday.\n- Storms closed 40 schools.", listOf(11L, 12L))
+        assertEquals(listOf("The minister resigned on Tuesday.", "Storms closed 40 schools."), p.map { it.text })
+        assertEquals(listOf(11L, 12L), p.map { it.story })
+        // the points and stories do not pair up: no story to open, NEWS opens instead
+        assertEquals(listOf<Long?>(null, null), HomeText.points("- one point here\n- and another", listOf(11L)).map { it.story })
+        // a brief from before the points is one point
+        val old = HomeText.points("The minister resigned. Storms closed 40 schools.", listOf(11L, 12L))
+        assertEquals(1, old.size)
+        assertEquals(null, old[0].story)
+        assertEquals(0, HomeText.points("", emptyList()).size)
+    }
 }

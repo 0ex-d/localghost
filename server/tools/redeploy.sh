@@ -2,6 +2,7 @@
 # redeploy.sh , rebuild and restart the LocalGhost server after a code change, in one command.
 #
 # What it does, in order:
+#   0. tools/apply_removed.sh    , delete the files a drop removed (tools/removed.txt)
 #   1. make box                  , rebuild every binary into ./bin
 #   2. stage ghost.secd          , atomic-replace the systemd-launched binary in /opt/localghost/bin
 #      (the cohort daemons live ON the encrypted volume and are respawned by watchd on the next
@@ -78,6 +79,10 @@ if [ "$NGINX_ONLY" = 1 ]; then
     echo "nginx reloaded , no secd restart, box stays in whatever state it was."
     exit 0
 fi
+
+# THE FILES A DROP REMOVED go before the build: a stale file the drop no longer has (one that
+# still names something deleted) would fail the build of a tree the drop was copied over.
+bash "$REPO/tools/apply_removed.sh"
 
 if [ "$NO_BUILD" = 0 ]; then
     say "1/4  build (as $SVC_USER)"

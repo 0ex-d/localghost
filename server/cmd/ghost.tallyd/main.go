@@ -72,6 +72,7 @@ func main() {
 	ing := &ingestState{}
 	rs := &ratesState{}
 	fs := &fetchState{}
+	fast := &fastState{}
 	forceFetch := make(chan struct{}, 1)
 	srv := ghosthealth.NewServer(service, ghosthealth.ReporterFunc(func() ghosthealth.Health {
 		h := ing.health()
@@ -96,6 +97,7 @@ func main() {
 			runDir = filepath.Join(filepath.Dir(ld), "run")
 		}
 	}
+	hot := &hotRedis{mount: filepath.Dir(runDir)}
 	if runDir != "" {
 		ctl := ctlsock.NewServer(service, runDir, lg)
 		svcconf.BindBase(ctl, service, lvl, func() (svcconf.Base, map[string]string, error) {
@@ -137,7 +139,7 @@ func main() {
 				_ = json.Unmarshal(args, &a)
 			}
 			mount := filepath.Dir(runDir)
-			out := map[string]any{"ingest": rs.snapshot(), "inbox": inboxDepth(filepath.Join(mount, "tallyd", "rates")), "fetch": fs.snapshot()}
+			out := map[string]any{"ingest": rs.snapshot(), "inbox": inboxDepth(filepath.Join(mount, "tallyd", "rates")), "fetch": fs.snapshot(), "fast": fast.snapshot()}
 			cfg, cerr := hw.LoadServicesConfig(mount)
 			if cerr != nil {
 				return ctlsock.Response{OK: false, Err: cerr.Error()}, nil
@@ -236,8 +238,9 @@ func main() {
 	// time-series + diary out , exactly the charter.
 	if runDir != "" {
 		go healthLoop(ctx, filepath.Dir(runDir), ing, lg)
-		go ratesLoop(ctx, filepath.Dir(runDir), rs, lg)
-		go ratesFetchLoop(ctx, filepath.Dir(runDir), rs, fs, lg, forceFetch)
+		go ratesLoop(ctx, filepath.Dir(runDir), rs, hot, lg)
+		go ratesFetchLoop(ctx, filepath.Dir(runDir), rs, fs, hot, lg, forceFetch)
+		go fastLoop(ctx, hot, fast, lg)
 		lg.Info("health and rates ingestion up; the box fetches rates itself when the phone is not on Wi-Fi", "fn", "main")
 	} else {
 		ing.note("", errors.New("no run dir: ingestion is off (started by hand without GHOST_RUN_DIR)"), tally.Result{})
@@ -466,7 +469,7 @@ func (s *ratesState) line() string {
 // ratesLoop drains <mount>/tallyd/rates: once at start, then every 30 s. A batch that fails
 // stays and is tried again next tick (the database away); a batch that is not a batch is moved
 // aside once.
-func ratesLoop(ctx context.Context, mount string, rs *ratesState, lg *slog.Logger) {
+func ratesLoop(ctx context.Context, mount string, rs *ratesState, hot *hotRedis, lg *slog.Logger) {
 	inbox := filepath.Join(mount, "tallyd", "rates")
 	done := filepath.Join(mount, "tallyd", "rates-done")
 	for _, d := range []string{inbox, done} {
@@ -521,6 +524,7 @@ func ratesLoop(ctx context.Context, mount string, rs *ratesState, lg *slog.Logge
 			} else if n > 0 {
 				lg.Debug("market index rebuilt", "fn", "ratesLoop", "days", n)
 			}
+			hot.putRates(db, time.Now(), lg) // the phone's batch is in: its copy too
 		}
 		pruneDone(done, 50)
 	}

@@ -83,7 +83,7 @@ func TestIngestRatesLogsEachSource(t *testing.T) {
 	db := fresh(t)
 	now := time.Date(2026, 10, 1, 12, 0, 2, 0, time.UTC)
 	body := fmt.Sprintf(`[{"symbol":"BTCUSDT","lastPrice":"65000","volume":"10","closeTime":%d},{"symbol":"ETHUSDT","lastPrice":"3200","volume":"100","closeTime":%d}]`, now.UnixMilli(), now.UnixMilli())
-	batch := fmt.Sprintf(`{"fetchedAt":%d,"by":"box","sources":[{"id":"binance:all","status":200,"body":%q,"tookMs":140},{"id":"kraken:all","status":503,"tookMs":2000},{"id":"coinpaprika","status":0,"error":"dial tcp: i/o timeout"}]}`, now.Unix(), body)
+	batch := fmt.Sprintf(`{"fetchedAt":%d,"by":"box","sources":[{"id":"binance:all","status":200,"body":%q,"tookMs":140},{"id":"kraken:all","status":503,"tookMs":2000},{"id":"coinbase-ranks","status":0,"error":"dial tcp: i/o timeout"}]}`, now.Unix(), body)
 	if _, err := tally.IngestRates(db, []byte(batch), now); err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestIngestRatesLogsEachSource(t *testing.T) {
 		}
 	}
 	rk, _ := feedstat.Stats(db, feedstat.KindRanks, now.Add(-time.Hour), false)
-	if len(rk) != 1 || rk[0].Key != "coinpaprika" || !strings.Contains(rk[0].LastError, "timeout") {
+	if len(rk) != 1 || rk[0].Key != "coinbase-ranks" || !strings.Contains(rk[0].LastError, "timeout") {
 		t.Fatalf("ranks: %+v", rk)
 	}
 }
@@ -160,7 +160,7 @@ func TestMonitorReport(t *testing.T) {
 	// the ECB's newest is Monday's; Tuesday to Thursday are due
 	exec("INSERT INTO fx_rates (day, code, rate) VALUES ('2026-09-28','USD',1.1), ('2026-09-28','GBP',0.85), ('2026-09-25','USD',1.1)")
 	// a rank list half an hour old
-	exec("INSERT INTO coin_ranks (ts, rank, coin_id, symbol, source) VALUES ($1,1,'bitcoin','BTC','coingecko'), ($1,2,'ethereum','ETH','coingecko')", now.Unix()-1800)
+	exec("INSERT INTO coin_ranks (ts, rank, coin_id, symbol, source) VALUES ($1,1,'bitcoin','BTC','coinbase-ranks'), ($1,2,'ethereum','ETH','coinbase-ranks')", now.Unix()-1800)
 	// three feeds, one failing three times in a row
 	exec(`INSERT INTO news_feeds (id, name, url, enabled, last_fetch, last_ok, last_status, failures) VALUES
 		('bbc','BBC','u1',true,$1,$1,'ok',0), ('ft','FT','u2',true,$1,$1,'ok',0), ('dw','DW','u3',true,$1,$2,'HTTP 403',3)`, now.Unix()-1200, now.Unix()-86400)

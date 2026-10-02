@@ -28,11 +28,11 @@ func TestRatesIngestAgainstPostgres(t *testing.T) {
 	at := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
 	ms := func(t time.Time) string { return itoa(int(t.UnixMilli())) }
 	day := func(d int) time.Time { return time.Date(2026, 9, 24+d, 0, 0, 0, 0, time.UTC) }
-	coins := `[{"id":"bitcoin","symbol":"btc","name":"Bitcoin","current_price":65000,"market_cap":1.28e12,"market_cap_rank":1,"total_volume":3e10,"price_change_percentage_24h":1.2}`
+	coins := `{"data":[{"slug":"bitcoin","symbol":"BTC","name":"Bitcoin","listed":true,"rank":1,"latest":"65000","market_cap":"1.28e12","volume_24h":"3e10","percent_change":0.012,"circulating_supply":"19700000"}`
 	for i := 2; i <= 12; i++ {
-		coins += `,{"id":"c` + itoa(i) + `","symbol":"s","name":"Coin","current_price":10,"market_cap":1,"market_cap_rank":` + itoa(i) + `,"total_volume":1,"price_change_percentage_24h":0}`
+		coins += `,{"slug":"c` + itoa(i) + `","symbol":"s","name":"Coin","listed":true,"rank":` + itoa(i) + `,"latest":"10","market_cap":"1","volume_24h":"1","percent_change":0}`
 	}
-	coins += `]`
+	coins += `]}`
 	// candles: coinbase BTC-USD and binance BTC-USDT for seven days, and the USDT/USD leg on coinbase
 	cb, bn, us := `[`, `[`, `[`
 	for d := 0; d < 7; d++ {
@@ -61,14 +61,14 @@ func TestRatesIngestAgainstPostgres(t *testing.T) {
 		{"id": "hist:coinbase:BTC-USD", "status": 200, "body": cb},
 		{"id": "hist:binance:BTC-USDT", "status": 200, "body": bn},
 		{"id": "hist:coinbase:USDT-USD", "status": 200, "body": us},
-		{"id": "coingecko", "status": 200, "body": coins},
+		{"id": "coinbase-ranks", "status": 200, "body": coins},
 	}}
 	raw, _ := json.Marshal(batch)
 	res, err := tally.IngestRates(db, raw, at)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.FXDay != "2026-09-30" || res.FXDays != 2 || res.Quotes != 6 || res.Coins != 12 || res.CoinSource != "coingecko" || res.Failed["bitstamp:BTC-USD"] != "HTTP 429" {
+	if res.FXDay != "2026-09-30" || res.FXDays != 2 || res.Quotes != 6 || res.Coins != 12 || res.CoinSource != "coinbase-ranks" || res.Failed["bitstamp:BTC-USD"] != "HTTP 429" {
 		t.Fatalf("%+v", res)
 	}
 	usdt := 0.9991
@@ -105,7 +105,7 @@ func TestRatesIngestAgainstPostgres(t *testing.T) {
 		t.Fatalf("fx history: %+v", fx)
 	}
 	marks := tally.Marks(db)
-	if marks["coinbase:BTC-USD"] != at.Unix() || marks["bitstamp:BTC-USD"] != at.Unix() || marks["coingecko"] != at.Unix() || marks["hist:coinbase:BTC-USD"] != at.Unix() {
+	if marks["coinbase:BTC-USD"] != at.Unix() || marks["bitstamp:BTC-USD"] != at.Unix() || marks["coinbase-ranks"] != at.Unix() || marks["hist:coinbase:BTC-USD"] != at.Unix() {
 		t.Fatalf("marks: %v", marks)
 	}
 	if o := tally.OldestDay(db, rates.Market{Exchange: "coinbase", Base: "BTC", Quote: "USD"}); o != "2026-09-24" {
@@ -118,11 +118,11 @@ func TestRatesIngestAgainstPostgres(t *testing.T) {
 	at2 := at.Add(time.Hour)
 	batch2 := map[string]any{"fetchedAt": at2.Unix(), "sources": []map[string]any{
 		{"id": "kraken:BTC-USD", "status": 200, "body": `{"result":{"XXBTZUSD":{"c":["66000","1"],"v":["1","2000"]}}}`},
-		{"id": "coinpaprika", "status": 200, "body": `[]`},
+		{"id": "coinbase-ranks", "status": 200, "body": `{"data":[]}`},
 	}}
 	raw, _ = json.Marshal(batch2)
 	res, err = tally.IngestRates(db, raw, at2)
-	if err != nil || res.Index["BTC"].N != 1 || res.Failed["coinpaprika"] == "" {
+	if err != nil || res.Index["BTC"].N != 1 || res.Failed["coinbase-ranks"] == "" {
 		t.Fatalf("second: %+v %v", res, err)
 	}
 	// ten minutes on, bitstamp alone: kraken's ten-minute-old quote joins it

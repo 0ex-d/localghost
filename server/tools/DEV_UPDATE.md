@@ -4391,3 +4391,58 @@ sign-in's record, never served back, a header-injecting cookie refused, forgotte
 Tested: `TestDamagedPhotoSetAside`, `TestFeedsRetiredAndGivenUp`, `TestArticlesRead` (a free page
 whole, a paywalled one's free part, both let go after a day), `TestDefaultSourcesAreWellFormed`,
 `TestFetchListAndSpools`, and the rest as before.
+
+## Prices and news from Redis, BTC/ETH/SOL every five seconds, the news as points, pull to refresh, back home, the aggregators gone, removed files handled
+
+- Redis holds what the phone wants at once (`hw/hot.go`, the vault's Redis through apparedis):
+  `hot:rates` is `/v1/rates` as it stands (tallyd rewrites it after every minute and every batch
+  the phone sends, five minutes to live), `hot:news` is the last two days of `/v1/news` with the
+  brief (synthd rewrites it after every batch it takes and every five-minute pass, half an hour to
+  live). secd answers from there and goes to Postgres only on a miss (and puts what it read back
+  for a minute), or for a `since` older than two days or a `limit` of its own. Postgres stays the
+  record, the rank list included; Redis is the copy, gone on a restart and rebuilt on the first
+  read.
+- The fast lane: tallyd asks Coinbase's ticker (`api.exchange.coinbase.com/products/X-USD/ticker`)
+  for BTC, ETH and SOL every five seconds (three small requests, well inside its public limit) and
+  keeps the last trades in Redis only (`hot:fast`, a minute to live; the minute series stays the
+  record). `/v1/rates` puts them over the minute's index (`hw.ApplyFast`: the 24-hour change moved
+  to match, a trade over 30 s old or more than 5% off the minute left out, `fast:true` on the
+  row), and `GET /v1/rates/fast` gives just those three from Redis, so home and CRYPTO ask it every
+  five seconds while they are open. A minute of the lane is one fetch-log line (`coinbase:fast`,
+  kind `fast`); Box Status' prices section has a row for it, and `ghost-cli ghost.tallyd rates`
+  a `fast` block. The other coins stay on the minute.
+- The news as points. A story's summary written with its article is a lead and two to four points
+  (`lead\n- point\n- point`); `groundedNews` takes bullets, numbered lines and wrapped lines, and
+  holds every number of the kept text to the reports. From the feeds alone it stays one or two
+  sentences. The brief is one point per story, in the stories' order (`groundedBrief`: no
+  preamble, no more points than stories), written from the stories' leads; `/v1/news` adds
+  `briefStories`, so a point opens its story. The digest and the lock screen tell the lead alone.
+  Once, the last day's model summaries are cleared and their articles read again
+  (`news_points_v1`), and a prose brief is rewritten at once.
+- "What's the news" in chat now gets the box's brief and the five most-told stories in its context
+  (the plan already told the phone the box has it).
+- Articles: a page that builds its paragraphs in the browser often carries the article in its
+  schema.org block (`articleBody`); it is read from there when the page says it is free. An outlet
+  that refused six pages in a day and gave none is left alone for the day (its stories told from
+  the feeds); Box Status lists per outlet what its pages answered ("articles, The Telegraph: 0 of 9
+  read · 9 refused or failed (last: HTTP 403)").
+- CoinGecko and CoinPaprika are gone everywhere: the parser takes Coinbase's list only, and tallyd
+  deletes their rows from `coin_ranks`, today's `coin_daily`, the fetch log and their fetch marks
+  once a start (`tally.PurgeOldRankLists`). The rank list stores Coinbase's circulating supply
+  (`coin_ranks.supply`); CRYPTO and the chat's top list show the cap at the box's own price
+  (price × supply). CRYPTO50's October constituents were fixed on 1 October from the old list;
+  November's are Coinbase's.
+- The app: pull down to refresh on home, CRYPTO and NEWS (the box's copy at once; the feeds fetched
+  too when they are half an hour old); a ‹ beside the title goes home from any screen (the ghost
+  and the title too); home's brief is a list of points, each opening its story in NEWS; a story in
+  NEWS shows its lead and the first two points (all of them open).
+- Removed files: `tools/removed.txt` lists them and `tools/apply_removed.sh` deletes each one still
+  holding a drop's stand-in (a file with content of its own at a listed path is left alone).
+  `redeploy.sh` runs it before the build; on Windows run `bash server/tools/apply_removed.sh` once
+  after unpacking and commit, and git takes them out of the box's tree too.
+
+Tested: `TestApplyFast`, `TestNewsDocWithin`, `TestGroundedNews` (lead and points, numbering,
+a point's number not in the reports), `TestGroundedBrief`, `TestLDArticleBody`,
+`TestRefusedOutletLeftAlone`, `TestRetellAndBriefStories`, `TestSQLPrepareEveryStatement`; app
+`HomeTextTest` (cap from supply, fast over the minute, brief points to stories) and
+`NewsTextTest` (lead and points). The fast lane and the Redis copies run on the box only.

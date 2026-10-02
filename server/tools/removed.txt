@@ -1,0 +1,11 @@
+# Files a drop removed, one repo path per line (from the repo root, the folder holding server/ and
+# app/). tools/apply_removed.sh deletes each one that is still there as the drop's empty stand-in;
+# redeploy.sh runs it before the build. A file with real content at a listed path is left alone.
+# 2 Oct 2026: the paper sign-ins, the "unreadable" marking (damaged photos are moved aside instead)
+app/android/app/src/main/java/com/localghost/app/ui/PaperSignIn.kt
+app/android/app/src/main/java/com/localghost/app/ui/PaperText.kt
+app/android/app/src/main/java/com/localghost/app/ui/UnreadableText.kt
+app/android/app/src/test/java/com/localghost/app/ui/PaperTextTest.kt
+app/android/app/src/test/java/com/localghost/app/ui/UnreadableTextTest.kt
+server/internal/framed/unreadable.go
+server/internal/pgtest/unreadable_pg_test.go

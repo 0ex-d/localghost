@@ -229,29 +229,13 @@ func TestDailyIndex(t *testing.T) {
 	}
 }
 
-func TestParseCoinsBothSources(t *testing.T) {
-	gecko := `[` + repeat(`{"id":"c%d","symbol":"s%d","name":"Coin %d","current_price":%d,"market_cap":1000,"market_cap_rank":%d,"total_volume":5,"price_change_percentage_24h":1.5}`, 12) + `]`
-	coins, err := ParseCoins("coingecko", []byte(gecko))
-	if err != nil || len(coins) != 12 || coins[0].Symbol != "S1" || coins[0].Rank != 1 || coins[11].PriceUSD != 12 {
-		t.Fatalf("gecko: %d %v %+v", len(coins), err, coins)
-	}
-	pap := `[` + repeat(`{"id":"p%d","name":"Pap %d","symbol":"p%d","rank":%d,"quotes":{"USD":{"price":%d,"volume_24h":1,"market_cap":2,"percent_change_24h":-0.5}}}`, 12) + `]`
-	coins, err = ParseCoins("coinpaprika", []byte(pap))
-	if err != nil || len(coins) != 12 || coins[0].Name != "Pap 1" || coins[0].Change24 != -0.5 {
-		t.Fatalf("paprika: %d %v", len(coins), err)
-	}
-	if _, err := ParseCoins("coingecko", []byte(`{"status":{"error_code":429}}`)); err == nil {
-		t.Fatal("an error body passed")
-	}
-}
-
 // Coinbase's list as coinbase.com's price pages read it: numbers as strings, the day's change as a
-// fraction of one, a coin it no longer lists left out.
+// fraction of one, the circulating supply, a coin it no longer lists left out.
 func TestParseCoinbaseRanks(t *testing.T) {
 	var rows []string
 	for i := 1; i <= 12; i++ {
-		rows = append(rows, fmt.Sprintf(`{"id":"u%d","symbol":"c%d","name":"Coin %d","slug":"coin-%d","listed":%v,"rank":%d,"market_cap":"%d000.5","latest":"%d.25","volume_24h":"77.5","percent_change":-0.0123}`,
-			i, i, i, i, i != 3, i, 100-i, i))
+		rows = append(rows, fmt.Sprintf(`{"id":"u%d","symbol":"c%d","name":"Coin %d","slug":"coin-%d","listed":%v,"rank":%d,"market_cap":"%d000.5","latest":"%d.25","volume_24h":"77.5","percent_change":-0.0123,"circulating_supply":"%d500"}`,
+			i, i, i, i, i != 3, i, 100-i, i, i))
 	}
 	body := `{"pagination":{"limit":100},"data":[` + strings.Join(rows, ",") + `]}`
 	coins, err := ParseCoins(CoinbaseRanks, []byte(body))
@@ -259,7 +243,7 @@ func TestParseCoinbaseRanks(t *testing.T) {
 		t.Fatalf("coinbase: %d %v", len(coins), err)
 	}
 	c := coins[0]
-	if c.Symbol != "C1" || c.ID != "coin-1" || c.Rank != 1 || c.PriceUSD != 1.25 || c.MarketCap != 99000.5 || c.Volume24 != 77.5 || math.Abs(c.Change24+1.23) > 1e-9 {
+	if c.Symbol != "C1" || c.ID != "coin-1" || c.Rank != 1 || c.PriceUSD != 1.25 || c.MarketCap != 99000.5 || c.Volume24 != 77.5 || math.Abs(c.Change24+1.23) > 1e-9 || c.Supply != 1500 {
 		t.Fatalf("first: %+v", c)
 	}
 	if coins[2].Symbol != "C4" {
@@ -268,7 +252,10 @@ func TestParseCoinbaseRanks(t *testing.T) {
 	if _, err := ParseCoins(CoinbaseRanks, []byte(`{"errors":[{"id":"not_found"}]}`)); err == nil {
 		t.Fatal("an error body passed")
 	}
-	if !IsRankSource(CoinbaseRanks) || !IsRankSource("coingecko") || IsRankSource("coinbase:BTC-USD") {
+	if _, err := ParseCoins("coingecko", []byte(`[]`)); err == nil {
+		t.Fatal("a list the box no longer reads was read")
+	}
+	if !IsRankSource(CoinbaseRanks) || IsRankSource("coingecko") || IsRankSource("coinbase:BTC-USD") {
 		t.Fatal("rank sources")
 	}
 }

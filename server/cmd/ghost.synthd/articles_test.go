@@ -33,20 +33,41 @@ func TestArticleText(t *testing.T) {
 }
 
 func TestGroundedBrief(t *testing.T) {
-	sums := []string{"The minister resigned on Tuesday after a vote of 312 to 290.", "Storms closed 40 schools in the north."}
-	if s, ok := groundedBrief("The minister resigned on Tuesday after a 312 to 290 vote, and storms closed 40 schools in the north.", sums); !ok || !strings.HasPrefix(s, "The minister") {
+	sums := []string{"The minister resigned on Tuesday after a vote of 312 to 290.\n- Her deputy takes over.", "Storms closed 40 schools in the north."}
+	s, ok := groundedBrief("- The minister resigned on Tuesday after a 312 to 290 vote.\n• Storms closed 40 schools in the north.", sums)
+	if !ok || s != "- The minister resigned on Tuesday after a 312 to 290 vote.\n- Storms closed 40 schools in the north." {
 		t.Fatalf("%q %v", s, ok)
 	}
-	if _, ok := groundedBrief("The minister resigned after a vote of 312 to 291, and storms closed 40 schools across the north.", sums); ok {
+	if _, ok := groundedBrief("- The minister resigned after a vote of 312 to 291.\n- Storms closed 40 schools across the north.", sums); ok {
 		t.Fatal("a number no story gave")
 	}
-	if _, ok := groundedBrief("- minister resigned\n- storms closed 40 schools in the north today", sums); ok {
-		t.Fatal("a list")
+	if _, ok := groundedBrief("The minister resigned on Tuesday after a 312 to 290 vote, and storms closed 40 schools in the north.", sums); ok {
+		t.Fatal("prose, not a point per story")
+	}
+	if _, ok := groundedBrief("Here are the points:\n- The minister resigned on Tuesday.\n- Storms closed 40 schools in the north.", sums); ok {
+		t.Fatal("a preamble")
+	}
+	if _, ok := groundedBrief("- The minister resigned on Tuesday.\n- Storms closed 40 schools in the north.\n- A third story nobody told about at all.", sums); ok {
+		t.Fatal("more points than stories")
 	}
 	if !sameIDs([]int64{3, 1, 2}, []int64{1, 2, 3}) || sameIDs([]int64{1, 2}, []int64{1, 3}) {
 		t.Fatal("same ids")
 	}
-	if p := briefPrompt(sums); !strings.Contains(p, "- Storms closed 40 schools") || !strings.Contains(p, "three or four plain sentences") {
+	p := briefPrompt([]string{newsLead(sums[0]), newsLead(sums[1])})
+	if !strings.Contains(p, "2. Storms closed 40 schools") || !strings.Contains(p, "one line per story") || strings.Contains(p, "deputy") {
 		t.Fatal(p)
+	}
+}
+
+func TestLDArticleBody(t *testing.T) {
+	body := strings.Repeat("The council voted to keep the library open after a long campaign. ", 12)
+	page := `<html><head><script type="application/ld+json">{"@context":"https://schema.org","@graph":[{"@type":"WebPage"},{"@type":"NewsArticle","articleBody":"` + body + `\nA second paragraph of the article."}]}</script></head><body><div id="app"></div></body></html>`
+	text, pw := articleText(page)
+	if pw || !strings.HasPrefix(text, "The council voted") || !strings.HasSuffix(text, "A second paragraph of the article.") {
+		t.Fatalf("%v %q", pw, text)
+	}
+	paid := `<script type="application/ld+json">{"@type":"NewsArticle","isAccessibleForFree":false,"articleBody":"` + body + `"}</script><article><p>The free part of the article, long enough to count as prose here.</p></article>`
+	if text, pw := articleText(paid); !pw || strings.Contains(text, "library") {
+		t.Fatalf("a paywalled page keeps its free part only: %v %q", pw, text)
 	}
 }

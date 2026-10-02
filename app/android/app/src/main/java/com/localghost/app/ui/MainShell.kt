@@ -127,6 +127,8 @@ fun MainShell(
 ) {
     // HOME first: the prices, the day's news and a box to ask from; a question asked there opens CHAT
     var dest by rememberSaveable { mutableStateOf(Dest.HOME) }
+    // the story a point of home's brief opens in NEWS (0: none)
+    var newsFocus by rememberSaveable { mutableLongStateOf(0L) }
     // A notification tap lands here AFTER the security gate (MainShell only exists unlocked):
     // navigate to the thing the notification was about, once.
     LaunchedEffect(navRequest) {
@@ -178,6 +180,7 @@ fun MainShell(
                 .padding(top = pad.calculateTopPadding())
                 .padding(top = 4.dp)) {
                 TopBar(title = dest.label, onMenu = { open() },
+                    onHome = if (dest != Dest.HOME) ({ dest = Dest.HOME }) else null,
                     onNewChat = if (dest == Dest.CHAT) onNewConversation else null,
                     chatToggles = dest == Dest.CHAT, incognito = incognito, onToggleIncognito = onToggleIncognito)
 
@@ -189,7 +192,8 @@ fun MainShell(
                     when (dest) {
                         Dest.HOME -> HomeScreen(
                             onAsk = { q -> onNewConversation(); onSend(q); dest = Dest.CHAT },
-                            onOpenNews = { dest = Dest.NEWS },
+                            onOpenNews = { newsFocus = 0L; dest = Dest.NEWS },
+                            onOpenStory = { id -> newsFocus = id; dest = Dest.NEWS },
                             onOpenCrypto = { dest = Dest.CRYPTO })
                         Dest.CRYPTO -> CryptoScreen()
                         Dest.CHAT -> ChatScreen(messages, streaming, localModeActive, pendingAttachments,
@@ -207,7 +211,7 @@ fun MainShell(
                             onRenameBoxChat = onRenameBoxChat,
                             onDeleteBoxChat = onDeleteBoxChat)
                         Dest.MEMORIES -> MemoriesScreen(lifeContext)
-                        Dest.NEWS -> NewsScreen()
+                        Dest.NEWS -> NewsScreen(openStory = newsFocus, onStoryShown = { newsFocus = 0L })
                         Dest.NOTIFICATIONS -> {
                             val nctx = androidx.compose.ui.platform.LocalContext.current
                             val nowSec = System.currentTimeMillis() / 1000
@@ -296,7 +300,7 @@ fun MainShell(
 
 @Composable
 private fun TopBar(
-    title: String, onMenu: () -> Unit, onNewChat: (() -> Unit)? = null,
+    title: String, onMenu: () -> Unit, onHome: (() -> Unit)? = null, onNewChat: (() -> Unit)? = null,
     chatToggles: Boolean = false, incognito: Boolean = false, onToggleIncognito: () -> Unit = {},
 ) {
     Row(
@@ -305,13 +309,20 @@ private fun TopBar(
     ) {
         Text("≡", color = TerminalGreen, style = MaterialTheme.typography.titleLarge,
             modifier = Modifier.clickable { onMenu() }.padding(end = 16.dp))
-        Image(
-            painter = painterResource(R.drawable.ic_ghost),
-            contentDescription = null,
-            contentScale = ContentScale.Fit,
-            modifier = Modifier.size(22.dp).padding(end = 8.dp),
-        )
-        Text(title, color = GhostText, style = MaterialTheme.typography.titleMedium)
+        // BACK HOME from anywhere but home: the arrow, the ghost and the title all go there
+        val home = Modifier.then(if (onHome != null) Modifier.clickable { onHome() } else Modifier)
+        Row(home, verticalAlignment = Alignment.CenterVertically) {
+            if (onHome != null) {
+                Text("‹", color = TerminalGreen, style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(end = 10.dp))
+            }
+            Image(
+                painter = painterResource(R.drawable.ic_ghost),
+                contentDescription = if (onHome != null) "Home" else null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.size(22.dp).padding(end = 8.dp),
+            )
+            Text(title, color = GhostText, style = MaterialTheme.typography.titleMedium)
+        }
         Spacer(Modifier.weight(1f))
         if (chatToggles) {
             // INCOGNITO and WEB, one icon each, up here where they are seen before typing. Incognito

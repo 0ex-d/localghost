@@ -101,12 +101,13 @@ func (f *fetchState) snapshot() map[string]any {
 }
 
 // ratesFetchLoop is the box's side of the rates. force makes one pass regardless of the phone.
-func ratesFetchLoop(ctx context.Context, mount string, rs *ratesState, fs *fetchState, lg *slog.Logger, force <-chan struct{}) {
+func ratesFetchLoop(ctx context.Context, mount string, rs *ratesState, fs *fetchState, hot *hotRedis, lg *slog.Logger, force <-chan struct{}) {
 	client := egress.New()
 	var db *poltergres.ReadWrite
 	fs.mu.Lock()
 	fs.started = time.Now()
 	fs.mu.Unlock()
+	purged := false
 	pass := func(forced bool) {
 		if db == nil {
 			cfg, err := hw.LoadServicesConfig(mount)
@@ -118,6 +119,10 @@ func ratesFetchLoop(ctx context.Context, mount string, rs *ratesState, fs *fetch
 		start := time.Now()
 		now := start
 		minute := now.Truncate(time.Minute)
+		if !purged {
+			tally.PurgeOldRankLists(db, now) // the aggregators' lists, once a start
+			purged = true
+		}
 		proxy, why := hw.PhoneNetFrom(db).Proxy(now)
 		syms := tally.Symbols(db)
 		marks := tally.Marks(db)
@@ -205,12 +210,13 @@ func ratesFetchLoop(ctx context.Context, mount string, rs *ratesState, fs *fetch
 			backfill = bf.ID() + " is as far back as the venue goes"
 		}
 		bfWhy := backfill
-		// 5. the minute: each symbol's index and the market's value
+		// 5. the minute: each symbol's index and the market's value, and the phone's copy in Redis
 		if mv, err := tally.RecordMinute(db, minute, res.Index); err != nil {
 			lg.Warn("minute series not written", "fn", "ratesFetchLoop", "err", err)
 		} else {
 			lg.Debug("minute recorded", "fn", "ratesFetchLoop", "symbols", len(res.Index), "market", mv)
 		}
+		hot.putRates(db, now, lg)
 		// 6. the history: the hours first (thirty days), then the minutes (a week), until the budget
 		pages := tally.NextBarPages(db, tally.ResHour, syms, seen, now, historyPages)
 		fs.setPending(tally.ResHour, len(pages))

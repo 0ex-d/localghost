@@ -6,8 +6,8 @@ package main
 // would, and keeps the paragraphs the page serves anyone. A page that says it is behind a paywall
 // (schema.org's isAccessibleForFree: false) keeps only its free part, marked paywalled, and the
 // story is told from that and the feeds' words. Then, from the summaries of the day's most-told
-// stories, the brief: the day's news in three or four sentences, for the phone's home screen
-// (settings news_brief).
+// stories, the brief: the day's news as one point per story, in the stories' order, for the
+// phone's home screen (settings news_brief); a tap on a point opens its story.
 
 import (
 	"context"
@@ -39,6 +39,7 @@ var (
 	reTag       = regexp.MustCompile(`(?s)<[^>]+>`)
 	reSpace     = regexp.MustCompile(`\s+`)
 	rePaywall   = regexp.MustCompile(`(?i)"isAccessibleForFree"\s*:\s*"?(false|no)"?`)
+	reLDJSON    = regexp.MustCompile(`(?is)<script[^>]+type=["']application/ld\+json["'][^>]*>(.*?)</script>`)
 	boilerplate = []string{"cookie", "subscribe", "sign up", "newsletter", "advertisement", "all rights reserved", "follow us", "share this",
 		"read more", "click here", "javascript", "your browser", "log in", "sign in", "terms of use", "privacy policy"}
 )
@@ -88,17 +89,63 @@ func articleText(page string) (text string, paywalled bool) {
 		}
 	}
 	text = strings.Join(paras, "\n")
+	// a page that builds its paragraphs in the browser often carries the article in its
+	// schema.org block (articleBody), served to anyone; used only when the page says it is free
+	if len(text) < articleShort && !paywalled {
+		if body := ldArticleBody(page); len(body) > len(text) {
+			text = body
+		}
+	}
 	if len(text) > articleKeep {
 		text = text[:articleKeep]
 	}
 	return text, paywalled
 }
 
+// ldArticleBody is the longest articleBody in a page's schema.org blocks, "" when none.
+func ldArticleBody(page string) string {
+	best := ""
+	var walk func(v any)
+	walk = func(v any) {
+		switch x := v.(type) {
+		case map[string]any:
+			if b, ok := x["articleBody"].(string); ok && len(b) > len(best) {
+				best = b
+			}
+			for _, c := range x {
+				walk(c)
+			}
+		case []any:
+			for _, c := range x {
+				walk(c)
+			}
+		}
+	}
+	for _, m := range reLDJSON.FindAllStringSubmatch(page, 8) {
+		var v any
+		if json.Unmarshal([]byte(strings.TrimSpace(m[1])), &v) == nil {
+			walk(v)
+		}
+	}
+	best = html.UnescapeString(reTag.ReplaceAllString(best, " "))
+	var paras []string
+	for _, p := range strings.Split(best, "\n") {
+		if p = strings.TrimSpace(reSpace.ReplaceAllString(p, " ")); p != "" {
+			paras = append(paras, p)
+		}
+	}
+	return strings.Join(paras, "\n")
+}
+
 // articlePass reads the pages of the stories about to be summarised. Returns how many it read.
 func articlePass(ctx context.Context, db *poltergres.ReadWrite, client *egress.Client, now time.Time, lg *slog.Logger) (int, error) {
+	// an outlet that refused every page it was asked for in the last day is left alone until the
+	// day has passed: its stories are told from the feeds' words (refusedAfter)
 	rows, err := db.Query(`SELECT i.id, i.link, i.story_id, i.feed_id FROM news_items i JOIN news_stories s ON s.id = i.story_id
 		WHERE i.body_at = 0 AND i.link LIKE 'http%' AND s.summary = '' AND s.tries < $1 AND (s.sources >= 2 OR s.first_seen < $2)
-		ORDER BY s.sources DESC, s.last_seen DESC, i.published DESC LIMIT $3`, newsModelTries, now.Unix()-7200, articlesPerPass*3)
+		AND i.feed_id NOT IN (SELECT feed_id FROM news_items WHERE body_at >= $4 GROUP BY feed_id
+			HAVING count(*) >= $5 AND count(*) FILTER (WHERE body_status IN ('ok','paywalled','short')) = 0)
+		ORDER BY s.sources DESC, s.last_seen DESC, i.published DESC LIMIT $3`, newsModelTries, now.Unix()-7200, articlesPerPass*3, now.Unix()-86400, refusedAfter)
 	if err != nil {
 		return 0, err
 	}
@@ -155,6 +202,10 @@ func articlePass(ctx context.Context, db *poltergres.ReadWrite, client *egress.C
 	return read, nil
 }
 
+// refusedAfter pages refused in a day, none read, and an outlet's articles are left for the day
+// (the monitor names the outlet on Box Status).
+const refusedAfter = 6
+
 func errIf(status string) string {
 	switch status {
 	case "ok", "paywalled", "short":
@@ -186,7 +237,8 @@ const (
 	briefEvery   = 2 * time.Hour // a brief stands this long when its stories have not changed
 )
 
-// Brief is the day's news in a few sentences, as the home screen shows it.
+// Brief is the day's news as home shows it: "- point" lines, the nth telling Stories[n] when the
+// counts agree.
 type Brief struct {
 	At      int64   `json:"at"`
 	Text    string  `json:"text"`
@@ -202,21 +254,28 @@ func loadBrief(db *poltergres.ReadWrite) (Brief, bool) {
 	return b, json.Unmarshal([]byte(*rows.Vals[0][0]), &b) == nil
 }
 
-// briefPrompt asks for the day's news from the stories' own summaries and nothing else.
-func briefPrompt(summaries []string) string {
+// briefPrompt asks for one point per story from the stories' own leads and nothing else.
+func briefPrompt(leads []string) string {
 	var b strings.Builder
-	b.WriteString("Below are the day's main news stories, each already told in a sentence or two, the most widely reported first. Write the day's news as a short brief: three or four plain sentences, the most important first.\n\nSTORIES:\n")
-	for _, s := range summaries {
-		b.WriteString("- " + s + "\n")
+	b.WriteString("Below are the day's main news stories, each already told in a sentence, the most widely reported first. Write the day's news as a brief: one line per story, in the order given, each starting with \"- \" and saying in one short plain sentence what happened.\n\nSTORIES:\n")
+	for i, s := range leads {
+		b.WriteString(strconv.Itoa(i+1) + ". " + s + "\n")
 	}
-	b.WriteString("\nKeep every number, name and place exactly as the stories give them; add nothing they do not say; no opinion, no headline, no list, no greeting. Reply with the sentences only.")
+	b.WriteString("\nKeep every number, name and place exactly as the stories give them; add nothing they do not say; no opinion, no headline, no greeting, no numbering. Reply with the lines only.")
 	return b.String()
 }
 
-// groundedBrief holds the brief to the stories, the way a story's summary is held to its reports.
+const (
+	briefPointMin = 20
+	briefPointMax = 280
+)
+
+// groundedBrief holds the brief to the stories, the way a story's summary is held to its reports:
+// one point per story at most, each a sane length, every number from a story. What it keeps is
+// written "- point\n- point".
 func groundedBrief(out string, summaries []string) (string, bool) {
 	s := strings.TrimSpace(strings.Trim(strings.TrimSpace(out), "\"“”"))
-	if len(s) < 60 || len(s) > 900 {
+	if len(s) < briefPointMin || len(s) > 1800 {
 		return "", false
 	}
 	low := strings.ToLower(s)
@@ -225,8 +284,17 @@ func groundedBrief(out string, summaries []string) (string, bool) {
 			return "", false
 		}
 	}
-	if strings.HasPrefix(low, "-") || strings.HasPrefix(low, "•") || strings.Contains(low, "the stories") {
+	if strings.Contains(low, "the stories") {
 		return "", false
+	}
+	lead, points := splitStory(s)
+	if lead != "" || len(points) < 2 || len(points) > len(summaries) {
+		return "", false // a preamble, or not one point per story
+	}
+	for _, p := range points {
+		if len(p) < briefPointMin || len(p) > briefPointMax {
+			return "", false
+		}
 	}
 	allowed := map[string]bool{}
 	for _, f := range summaries {
@@ -235,12 +303,13 @@ func groundedBrief(out string, summaries []string) (string, bool) {
 			allowed[strings.ReplaceAll(n, ",", "")] = true
 		}
 	}
-	for _, n := range numberRe.FindAllString(s, -1) {
+	text := "- " + strings.Join(points, "\n- ")
+	for _, n := range numberRe.FindAllString(text, -1) {
 		if !allowed[n] && !allowed[strings.ReplaceAll(n, ",", "")] {
 			return "", false
 		}
 	}
-	return s, true
+	return text, true
 }
 
 // briefPass writes the brief when the day's most-told stories changed, or when it is two hours old.
@@ -251,7 +320,7 @@ func briefPass(db *poltergres.ReadWrite, oc *oracle.Client, now time.Time, lg *s
 		return false, err
 	}
 	var ids []int64
-	var sums []string
+	var sums, leads []string
 	for _, v := range rows.Vals {
 		if len(v) < 2 || v[0] == nil || v[1] == nil {
 			continue
@@ -259,11 +328,13 @@ func briefPass(db *poltergres.ReadWrite, oc *oracle.Client, now time.Time, lg *s
 		id, _ := strconv.ParseInt(*v[0], 10, 64)
 		ids = append(ids, id)
 		sums = append(sums, *v[1])
+		leads = append(leads, newsLead(*v[1]))
 	}
 	if len(sums) < 2 {
 		return false, nil
 	}
-	if old, ok := loadBrief(db); ok && sameIDs(old.Stories, ids) && now.Sub(time.Unix(old.At, 0)) < briefEvery {
+	// a brief from before the points (prose) is written again at once
+	if old, ok := loadBrief(db); ok && strings.HasPrefix(old.Text, "- ") && sameIDs(old.Stories, ids) && now.Sub(time.Unix(old.At, 0)) < briefEvery {
 		return false, nil
 	}
 	if onGPU, err := oc.OnGPU(); err != nil || !onGPU {
@@ -271,7 +342,7 @@ func briefPass(db *poltergres.ReadWrite, oc *oracle.Client, now time.Time, lg *s
 	}
 	resp, err := oc.Infer(oracle.Request{
 		Capability: "summarize", Class: oracle.ClassLocalSmall, Priority: oracle.PriorityBackground,
-		Input: briefPrompt(sums), MaxTokens: 260, Temperature: 0.2, DeadlineMS: 90000,
+		Input: briefPrompt(leads), MaxTokens: 360, Temperature: 0.2, DeadlineMS: 90000,
 	})
 	if err != nil || resp.Err != "" {
 		return false, nil

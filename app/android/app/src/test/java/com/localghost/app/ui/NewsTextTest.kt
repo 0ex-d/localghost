@@ -30,4 +30,16 @@ class NewsTextTest {
             NewsText.markets(emptyList(), mapOf("GBP" to 0.8712), "", now, NewsText.market(1234.5, -0.5, 50)))
         assertEquals("0.0001", NewsText.money(0.0001234))
     }
+
+    @Test fun aSummaryIsALeadAndPoints() {
+        val t = NewsText.told("The Bank kept its rate at 4%.\n\n- Inflation is cooling.\n• The vote was close\nand split the committee.\n2. The next decision is in November.")
+        assertEquals("The Bank kept its rate at 4%.", t.lead)
+        assertEquals(listOf("Inflation is cooling.", "The vote was close and split the committee.", "The next decision is in November."), t.points)
+        assertEquals("A paragraph from before. Its second line.", NewsText.told("A paragraph from before.\nIts second line.").lead)
+        assertEquals("The Bank kept its rate at 4%.", NewsText.lead("The Bank kept its rate at 4%.\n- Inflation is cooling."))
+        assertEquals("only a point", NewsText.lead("- only a point"))
+        assertEquals(true, NewsText.wantsFetch(0, now))
+        assertEquals(false, NewsText.wantsFetch(now - 600, now))
+        assertEquals(true, NewsText.wantsFetch(now - 1800, now))
+    }
 }

@@ -245,3 +245,67 @@ func TestFeedsRetiredAndGivenUp(t *testing.T) {
 		}
 	}
 }
+
+// An outlet that refused six pages in a day and gave none is left alone for the day: its next
+// story is told from the feeds' words, and another outlet's pages are still read.
+func TestRefusedOutletLeftAlone(t *testing.T) {
+	db := pgFresh(t, "lgtest_synthd_refused")
+	lg := slog.New(slog.NewTextHandler(io.Discard, nil))
+	now := time.Date(2026, 10, 2, 8, 30, 0, 0, time.UTC)
+	asked := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked[r.URL.Path]++
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+	_ = db.Exec("INSERT INTO news_feeds (id, name, url, added_at) VALUES ('tg','Telegraph','x',1), ('bbc','BBC','y',1)")
+	_ = db.Exec("INSERT INTO news_stories (id, first_seen, last_seen, title, sources) VALUES (9, $1, $1, 'Storms', 2)", now.Add(-time.Hour).Unix())
+	// six refusals from the Telegraph within the day
+	for i := 0; i < 6; i++ {
+		_ = db.Exec("INSERT INTO news_items (feed_id, guid, link, title, published, fetched, body_at, body_status) VALUES ('tg',$1,'http://x','Old',$2,$2,$2,'HTTP 403')",
+			"old"+strconv.Itoa(i), now.Add(-3*time.Hour).Unix())
+	}
+	_ = db.Exec("INSERT INTO news_items (feed_id, guid, link, title, published, fetched, story_id) VALUES ('tg','t1',$1,'Storms',$2,$2,9), ('bbc','b1',$3,'Storms',$2,$2,9)",
+		srv.URL+"/tg", now.Add(-time.Hour).Unix(), srv.URL+"/bbc")
+	if _, err := articlePass(context.Background(), db, egress.New(), now, lg); err != nil {
+		t.Fatal(err)
+	}
+	if asked["/tg"] != 0 || asked["/bbc"] != 1 {
+		t.Fatalf("asked: %v", asked)
+	}
+	// a day on, the Telegraph is asked again
+	if _, err := articlePass(context.Background(), db, egress.New(), now.Add(25*time.Hour), lg); err != nil {
+		t.Fatal(err)
+	}
+	if asked["/tg"] != 1 {
+		t.Fatalf("a day on: %v", asked)
+	}
+}
+
+// The last day's model summaries are written again once in the lead-and-points shape, their
+// articles to be read again; the brief's stories ride with /v1/news.
+func TestRetellAndBriefStories(t *testing.T) {
+	db := pgFresh(t, "lgtest_synthd_retell")
+	now := time.Now()
+	_ = db.Exec("INSERT INTO news_feeds (id, name, url, added_at) VALUES ('bbc','BBC','y',1)")
+	_ = db.Exec(`INSERT INTO news_stories (id, first_seen, last_seen, title, sources, summary, written_by, tries) VALUES
+		(1, $1, $1, 'Today', 2, 'A paragraph.', 'model', 1), (2, $2, $2, 'Last week', 2, 'Kept as it was.', 'model', 1)`, now.Add(-time.Hour).Unix(), now.Add(-72*time.Hour).Unix())
+	_ = db.Exec("INSERT INTO news_items (feed_id, guid, link, title, published, fetched, story_id, body_at, body_status) VALUES ('bbc','b1','http://x','Today',$1,$1,1,$1,'ok')", now.Add(-time.Hour).Unix())
+	for i := 0; i < 2; i++ { // once only
+		if err := retellStories(db, now); err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			_ = db.Exec("UPDATE news_stories SET summary = 'Told again.\n- A point of it.' WHERE id = 1")
+		}
+	}
+	rows, _ := db.Query("SELECT id, summary FROM news_stories ORDER BY id")
+	if *rows.Vals[0][1] != "Told again.\n- A point of it." || *rows.Vals[1][1] != "Kept as it was." {
+		t.Fatalf("%v %v", *rows.Vals[0][1], *rows.Vals[1][1])
+	}
+	_ = db.Exec(`INSERT INTO settings (key, value) VALUES ('news_brief', '{"at":5,"text":"- One.\n- Two.","stories":[1,2]}')`)
+	d, err := hw.NewsDocNow(db, now.Add(-48*time.Hour).Unix(), 0, now.Unix())
+	if err != nil || len(d.Stories) != 1 || d.Brief != "- One.\n- Two." || len(d.BriefStories) != 2 || d.BriefStories[1] != 2 {
+		t.Fatalf("%+v %v", d, err)
+	}
+}

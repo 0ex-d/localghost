@@ -78,7 +78,12 @@ func Symbols(db *poltergres.ReadWrite) []string {
 			out = append(out, s)
 		}
 	}
-	rows, err := db.Query("SELECT symbol FROM coin_daily WHERE day = (SELECT max(day) FROM coin_daily) ORDER BY rank LIMIT 120")
+	// the newest day of Coinbase's list; before its first, the newest day of any list
+	rows, err := db.Query(`SELECT symbol FROM coin_daily WHERE source = $1 AND day = (SELECT max(day) FROM coin_daily WHERE source = $1)
+		ORDER BY rank LIMIT 120`, rates.CoinbaseRanks)
+	if err == nil && len(rows.Vals) == 0 {
+		rows, err = db.Query("SELECT symbol FROM coin_daily WHERE day = (SELECT max(day) FROM coin_daily) ORDER BY rank LIMIT 120")
+	}
 	if err == nil {
 		var coins []rates.Coin
 		for i, v := range rows.Vals {
@@ -342,7 +347,7 @@ func IngestRates(db *poltergres.ReadWrite, raw []byte, now time.Time) (RatesResu
 			}
 		}
 	}
-	// the rank list: Coinbase's (an older phone's aggregator lists still land)
+	// the rank list: Coinbase's
 	for _, src := range rates.RankSources {
 		body, ok := coinBodies[src]
 		if !ok {
@@ -354,10 +359,11 @@ func IngestRates(db *poltergres.ReadWrite, raw []byte, now time.Time) (RatesResu
 			continue
 		}
 		for _, c := range coins {
-			if err := db.Exec(`INSERT INTO coin_ranks (ts, rank, coin_id, symbol, name, price_usd, market_cap, volume_24h, change_24h, source)
-				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (ts, rank) DO UPDATE SET coin_id = EXCLUDED.coin_id, symbol = EXCLUDED.symbol, name = EXCLUDED.name,
-				price_usd = EXCLUDED.price_usd, market_cap = EXCLUDED.market_cap, volume_24h = EXCLUDED.volume_24h, change_24h = EXCLUDED.change_24h, source = EXCLUDED.source`,
-				b.FetchedAt, c.Rank, c.ID, c.Symbol, c.Name, c.PriceUSD, c.MarketCap, c.Volume24, c.Change24, src); err != nil {
+			if err := db.Exec(`INSERT INTO coin_ranks (ts, rank, coin_id, symbol, name, price_usd, market_cap, volume_24h, change_24h, source, supply)
+				VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (ts, rank) DO UPDATE SET coin_id = EXCLUDED.coin_id, symbol = EXCLUDED.symbol, name = EXCLUDED.name,
+				price_usd = EXCLUDED.price_usd, market_cap = EXCLUDED.market_cap, volume_24h = EXCLUDED.volume_24h, change_24h = EXCLUDED.change_24h, source = EXCLUDED.source,
+				supply = EXCLUDED.supply`,
+				b.FetchedAt, c.Rank, c.ID, c.Symbol, c.Name, c.PriceUSD, c.MarketCap, c.Volume24, c.Change24, src, c.Supply); err != nil {
 				return res, err
 			}
 		}
@@ -393,6 +399,16 @@ func IngestRates(db *poltergres.ReadWrite, raw []byte, now time.Time) (RatesResu
 		res.Index = nil
 	}
 	return res, nil
+}
+
+// PurgeOldRankLists takes the aggregators' rank lists the box used before Coinbase's off what it
+// shows: their snapshots, today's rows of theirs and their fetch log. The days they wrote before
+// stay (the market index's weights were averaged from them). Run at start; nothing to do after.
+func PurgeOldRankLists(db *poltergres.ReadWrite, now time.Time) {
+	_ = db.Exec("DELETE FROM coin_ranks WHERE source IN ('coingecko','coinpaprika')")
+	_ = db.Exec("DELETE FROM coin_daily WHERE day >= $1 AND source IN ('coingecko','coinpaprika')", now.UTC().Format("2006-01-02"))
+	_ = db.Exec("DELETE FROM fetch_log WHERE source IN ('coingecko','coinpaprika')")
+	_ = db.Exec("DELETE FROM settings WHERE key IN ('fetch_coingecko','fetch_coinpaprika')")
 }
 
 // rebuildDailyIndex writes one day's USD close for a symbol from the venues' closes.

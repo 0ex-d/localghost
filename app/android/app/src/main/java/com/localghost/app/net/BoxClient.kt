@@ -1205,9 +1205,11 @@ object BoxClient {
 
     data class NewsItem(val feed: String, val outlet: String, val title: String, val link: String, val summary: String, val published: Long)
     data class NewsStory(val id: Long, val title: String, val summary: String, val sources: Int, val firstSeen: Long, val lastSeen: Long, val items: List<NewsItem>)
-    /** [brief]: the day's news in three or four sentences, written on the box from the most-told
-     *  stories' summaries ("" before the first). */
-    data class News(val stories: List<NewsStory>, val lastFetch: Long, val lastDigest: Long, val brief: String = "", val briefAt: Long = 0)
+    /** [brief]: the day's news as one "- " point per story, written on the box from the most-told
+     *  stories' summaries ("" before the first); [briefStories] are the stories the points tell,
+     *  in order. A story's [NewsStory.summary] is a lead and points the same way (NewsText.told). */
+    data class News(val stories: List<NewsStory>, val lastFetch: Long, val lastDigest: Long, val brief: String = "", val briefAt: Long = 0,
+                    val briefStories: List<Long> = emptyList())
 
     /** The stories since a time (/v1/news); null when unreachable. */
     suspend fun news(ctx: Context, since: Long = 0): News? = try {
@@ -1222,10 +1224,12 @@ object BoxClient {
                     val it = ia.optJSONObject(j) ?: return@mapNotNull null
                     NewsItem(it.optString("feed"), it.optString("outlet"), it.optString("title"), it.optString("link"), it.optString("summary"), it.optLong("published"))
                 })
-        }, r.optLong("lastFetch"), r.optLong("lastDigest"), r.optString("brief"), r.optLong("briefAt"))
+        }, r.optLong("lastFetch"), r.optLong("lastDigest"), r.optString("brief"), r.optLong("briefAt"),
+            r.optJSONArray("briefStories")?.let { b -> (0 until b.length()).map { b.optLong(it) } } ?: emptyList())
     } catch (_: Exception) { null }
 
-    data class CoinRow(val rank: Int, val symbol: String, val name: String, val priceUsd: Double, val marketCap: Double, val change24: Double)
+    /** [supply]: Coinbase's circulating supply, so the cap can follow the box's own price. */
+    data class CoinRow(val rank: Int, val symbol: String, val name: String, val priceUsd: Double, val marketCap: Double, val change24: Double, val supply: Double = 0.0)
     /** The box's USD price of one symbol and how it was made. */
     data class IndexRow(val symbol: String, val price: Double, val at: Long, val n: Int, val spread: Double, val used: String, val change24: Double? = null)
     /** The market index: one number for crypto as a whole (the fifty largest, weighted by last month's volume). */
@@ -1250,9 +1254,25 @@ object BoxClient {
         Rates(r.optString("fxDay"), fx, index, r.optDouble("btcUsd", 0.0), r.optLong("btcAt"), r.optInt("btcN"), r.optDouble("btcSpread", 0.0), r.optString("btcUsed"),
             r.optLong("ranksAt"), (0 until ra.length()).mapNotNull { i ->
                 val o = ra.optJSONObject(i) ?: return@mapNotNull null
-                CoinRow(o.optInt("rank"), o.optString("symbol"), o.optString("name"), o.optDouble("priceUsd", 0.0), o.optDouble("marketCap", 0.0), o.optDouble("change24", 0.0))
+                CoinRow(o.optInt("rank"), o.optString("symbol"), o.optString("name"), o.optDouble("priceUsd", 0.0), o.optDouble("marketCap", 0.0), o.optDouble("change24", 0.0),
+                    o.optDouble("supply", 0.0))
             }, r.optString("ranksSource"), r.optInt("days"), r.optInt("fxDays"),
             r.optJSONObject("market")?.let { m -> Market(m.optString("code"), m.optDouble("value", 0.0), m.optDouble("dayChange", 0.0), m.optInt("constituents"), m.optInt("priced"), m.optString("month")) })
+    } catch (_: Exception) { null }
+
+    /** BTC, ETH and SOL as of the last five seconds (/v1/rates/fast, from the box's Redis): each
+     *  symbol's price and 24-hour change; empty when the fast lane is quiet, null when unreachable. */
+    suspend fun fast(ctx: Context): Map<String, Pair<Double, Double?>>? = try {
+        val r = BoxHttp.getJson(ctx, "/v1/rates/fast")
+        val out = HashMap<String, Pair<Double, Double?>>()
+        r.optJSONObject("index")?.let { o ->
+            o.keys().forEach { sym ->
+                val row = o.optJSONObject(sym) ?: return@forEach
+                val p = row.optDouble("price", 0.0)
+                if (p > 0) out[sym] = p to (if (row.optBoolean("hasChange")) row.optDouble("change24", 0.0) else null)
+            }
+        }
+        out
     } catch (_: Exception) { null }
 
     /** One country as the box lists it: the tiles it holds for it, and their size on disk. */

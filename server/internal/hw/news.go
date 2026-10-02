@@ -102,19 +102,72 @@ func NewsMarks(c Querier) (lastFetch, lastDigest int64) {
 	return
 }
 
-// NewsBrief is the day's news in a few sentences, as synthd last wrote it from the summaries of
-// the most-told stories (settings news_brief); "" before the first.
-func NewsBrief(c Querier) (text string, at int64) {
+// NewsBrief is the day's news as synthd last wrote it from the summaries of the most-told
+// stories (settings news_brief): "- point" lines, the nth telling stories[n] when the counts
+// agree (a brief from before the points is a paragraph); "" before the first.
+func NewsBrief(c Querier) (text string, at int64, stories []int64) {
 	rows, err := c.Query("SELECT value FROM settings WHERE key = 'news_brief'")
 	if err != nil || len(rows.Vals) != 1 || rows.Vals[0][0] == nil {
-		return "", 0
+		return "", 0, nil
 	}
 	var b struct {
-		At   int64  `json:"at"`
-		Text string `json:"text"`
+		At      int64   `json:"at"`
+		Text    string  `json:"text"`
+		Stories []int64 `json:"stories"`
 	}
 	if json.Unmarshal([]byte(*rows.Vals[0][0]), &b) != nil {
-		return "", 0
+		return "", 0, nil
 	}
-	return b.Text, b.At
+	return b.Text, b.At, b.Stories
+}
+
+// NewsDoc is /v1/news: the stories, when the feeds were fetched and the digest went, and the
+// brief. The box keeps the last two days' in Redis (hw/hot.go), so the phone has it at once.
+type NewsDoc struct {
+	Stories    []NewsStory `json:"stories"`
+	LastFetch  int64       `json:"lastFetch"`
+	LastDigest int64       `json:"lastDigest"`
+	// Brief is the day's news as one point per story ("- " lines), written from the most-told
+	// stories' summaries (the home screen's); "" before the first. BriefStories are the stories
+	// the points tell, in order.
+	Brief        string  `json:"brief"`
+	BriefAt      int64   `json:"briefAt"`
+	BriefStories []int64 `json:"briefStories"`
+	Since        int64   `json:"since"` // how far back the stories go
+	BuiltAt      int64   `json:"builtAt"`
+}
+
+// NewsDocNow reads /v1/news from Postgres.
+func NewsDocNow(c Querier, since int64, limit int, now int64) (NewsDoc, error) {
+	stories, err := NewsStories(c, since, limit)
+	if err != nil {
+		return NewsDoc{}, err
+	}
+	if stories == nil {
+		stories = []NewsStory{}
+	}
+	d := NewsDoc{Stories: stories, Since: since, BuiltAt: now}
+	d.LastFetch, d.LastDigest = NewsMarks(c)
+	d.Brief, d.BriefAt, d.BriefStories = NewsBrief(c)
+	if d.BriefStories == nil {
+		d.BriefStories = []int64{}
+	}
+	return d, nil
+}
+
+// Within is the doc cut to the stories seen since a time (the cached two days serve any later
+// since).
+func (d NewsDoc) Within(since int64) NewsDoc {
+	if since <= d.Since {
+		return d
+	}
+	out := d
+	out.Stories = make([]NewsStory, 0, len(d.Stories))
+	for _, s := range d.Stories {
+		if s.LastSeen >= since {
+			out.Stories = append(out.Stories, s)
+		}
+	}
+	out.Since = since
+	return out
 }

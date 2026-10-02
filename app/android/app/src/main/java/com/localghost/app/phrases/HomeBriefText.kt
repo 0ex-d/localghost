@@ -21,7 +21,8 @@ object HomeBriefText {
             .take(n)
 
     fun cards(stories: List<Story>, now: Long, n: Int = 6): List<Card> = pick(stories, now, n).map { s ->
-        Card("news:" + s.id, s.title.trim(), s.summary.trim().takeIf { it != s.title.trim() } ?: "", outlets(s.outlets, s.lastSeen, now))
+        // the lead alone: the lock screen has room for a sentence, the points wait in NEWS
+        Card("news:" + s.id, s.title.trim(), com.localghost.app.ui.NewsText.lead(s.summary).takeIf { it != s.title.trim() } ?: "", outlets(s.outlets, s.lastSeen, now))
     }
 
     fun outlets(names: List<String>, lastSeen: Long, now: Long): String {

@@ -65,8 +65,8 @@ func TestKrakenAndBitfinexPairs(t *testing.T) {
 }
 
 func TestSymbolsFromRanks(t *testing.T) {
-	coins := []Coin{{1, "bitcoin", "BTC", "Bitcoin", 1, 1, 1, 0}, {2, "ethereum", "ETH", "Ethereum", 1, 1, 1, 0}, {3, "tether", "USDT", "Tether", 1, 1, 1, 0},
-		{4, "x", "XRP", "XRP", 1, 1, 1, 0}, {5, "usdc", "USDC", "USDC", 1, 1, 1, 0}, {6, "wbtc", "WBTC", "Wrapped", 1, 1, 1, 0}, {7, "sol", "SOL", "Solana", 1, 1, 1, 0}}
+	coins := []Coin{{1, "bitcoin", "BTC", "Bitcoin", 1, 1, 1, 0, 0}, {2, "ethereum", "ETH", "Ethereum", 1, 1, 1, 0, 0}, {3, "tether", "USDT", "Tether", 1, 1, 1, 0, 0},
+		{4, "x", "XRP", "XRP", 1, 1, 1, 0, 0}, {5, "usdc", "USDC", "USDC", 1, 1, 1, 0, 0}, {6, "wbtc", "WBTC", "Wrapped", 1, 1, 1, 0, 0}, {7, "sol", "SOL", "Solana", 1, 1, 1, 0, 0}}
 	got := SymbolsFromRanks(coins, 4)
 	if len(got) != 4 || got[0] != "BTC" || got[1] != "ETH" || got[2] != "XRP" || got[3] != "SOL" {
 		t.Fatalf("%v", got)

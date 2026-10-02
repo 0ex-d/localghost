@@ -13,8 +13,9 @@ type IndexRow struct {
 	N         int     `json:"n"`
 	Spread    float64 `json:"spread"`
 	Used      string  `json:"used"`
-	Change24  float64 `json:"change24"`  // per cent against 24 hours before, from the hourly series
-	HasChange bool    `json:"hasChange"` // false until the series reaches a day back
+	Change24  float64 `json:"change24"`       // per cent against 24 hours before, from the hourly series
+	HasChange bool    `json:"hasChange"`      // false until the series reaches a day back
+	Fast      bool    `json:"fast,omitempty"` // the price is Coinbase's last trade, seconds old (hot.go)
 }
 
 // RatesSnapshot is the box's market numbers as they stand: the ECB table of the newest day, the
@@ -46,6 +47,7 @@ type CoinRow struct {
 	PriceUSD  float64 `json:"priceUsd"`
 	MarketCap float64 `json:"marketCap"`
 	Change24  float64 `json:"change24"`
+	Supply    float64 `json:"supply"` // circulating, in coins: the cap at the box's price is price × supply
 }
 
 // USD is the index prices by symbol, the shape rates.Convert takes.
@@ -119,13 +121,13 @@ func RatesNow(c Querier) (RatesSnapshot, error) {
 	if b, ok := s.Index["BTC"]; ok {
 		s.BTCUSD, s.BTCAt, s.BTCN, s.BTCSpread, s.BTCUsed = b.Price, b.At, b.N, b.Spread, b.Used
 	}
-	rows, err = c.Query(`SELECT ts, rank, symbol, name, price_usd, market_cap, change_24h, source FROM coin_ranks
+	rows, err = c.Query(`SELECT ts, rank, symbol, name, price_usd, market_cap, change_24h, source, supply FROM coin_ranks
 		WHERE ts = (SELECT max(ts) FROM coin_ranks) ORDER BY rank LIMIT 100`)
 	if err != nil {
 		return s, err
 	}
 	for _, v := range rows.Vals {
-		if len(v) < 8 {
+		if len(v) < 9 {
 			continue
 		}
 		s.RanksAt, _ = strconv.ParseInt(deref(v[0]), 10, 64)
@@ -136,6 +138,7 @@ func RatesNow(c Querier) (RatesSnapshot, error) {
 		r.PriceUSD, _ = strconv.ParseFloat(deref(v[4]), 64)
 		r.MarketCap, _ = strconv.ParseFloat(deref(v[5]), 64)
 		r.Change24, _ = strconv.ParseFloat(deref(v[6]), 64)
+		r.Supply, _ = strconv.ParseFloat(deref(v[8]), 64)
 		s.Ranks = append(s.Ranks, r)
 	}
 	if rows, err := c.Query("SELECT count(DISTINCT day) FROM fx_rates"); err == nil && len(rows.Vals) == 1 && rows.Vals[0][0] != nil {

@@ -656,6 +656,9 @@ func NewNotifStore(pgSocketFor func(slot int) string) *NotifStore {
 // DB is the slot's connection for the read helpers that take a Querier (news, rates, countries).
 func (s *NotifStore) DB(slot int) (*poltergres.ReadWrite, error) { return s.pg(slot) }
 
+// Cache is the slot's Redis, for the hot copies the phone reads first (hot.go).
+func (s *NotifStore) Cache(slot int) (*apparedis.ReadWrite, error) { return s.rds(slot) }
+
 func (s *NotifStore) pg(slot int) (*poltergres.ReadWrite, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2170,7 +2173,11 @@ func DaemonSummaryFrom(c *poltergres.ReadWrite, name string) []DaemonKV {
 			}
 			if len(snap.Ranks) > 0 {
 				d := time.Since(time.Unix(snap.RanksAt, 0)).Truncate(time.Minute)
-				add("top coins", fmt.Sprintf("%d from %s · %s ago", len(snap.Ranks), snap.Source, d))
+				src := snap.Source
+				if src == "coinbase-ranks" {
+					src = "Coinbase"
+				}
+				add("top coins", fmt.Sprintf("%d from %s · %s ago", len(snap.Ranks), src, d))
 			} else {
 				add("top coins", "none yet")
 			}

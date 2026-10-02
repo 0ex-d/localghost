@@ -488,6 +488,7 @@ var schemaRegistry = []SchemaTable{
 		{"volume_24h", "DOUBLE PRECISION", true, "0"},
 		{"change_24h", "DOUBLE PRECISION", true, "0"},
 		{"source", "TEXT", true, "''"},
+		{"supply", "DOUBLE PRECISION", true, "0"}, // circulating, in coins (Coinbase's list)
 	}},
 	{Name: "frame_tags", PK: "hash, tag", Cols: []SchemaCol{
 		{"hash", "TEXT", true, ""},

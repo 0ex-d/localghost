@@ -11,8 +11,6 @@ func TestKindsAndVenues(t *testing.T) {
 		"ecb-90d":                   {KindECB, "ecb-90d"},
 		"ecb-hist":                  {KindECB, "ecb-hist"},
 		"coinbase-ranks":            {KindRanks, "coinbase-ranks"},
-		"coingecko":                 {KindRanks, "coingecko"},
-		"coinpaprika":               {KindRanks, "coinpaprika"},
 		"hist:kraken:BTC-USD":       {KindDaily, "kraken"},
 		"bars:1h:okx:ETH-USDT":      {KindHistory, "okx"},
 		"bars:1m:coinbase:USDT-USD": {KindHistory, "coinbase"},

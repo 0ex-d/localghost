@@ -191,7 +191,11 @@ func topItem(snap hw.RatesSnapshot, n int, now time.Time) (ctxItem, bool) {
 		if r, ok := snap.Index[strings.ToUpper(c.Symbol)]; ok && r.Price > 0 {
 			price = r.Price
 		}
-		parts = append(parts, fmt.Sprintf("%d. %s (%s) %s USD, cap %s, %+.1f%% 24 h", c.Rank, strings.ToUpper(c.Symbol), c.Name, money(price), bigMoney(c.MarketCap), c.Change24))
+		capUSD := c.MarketCap
+		if c.Supply > 0 && price > 0 {
+			capUSD = price * c.Supply // the cap at the box's price: Coinbase's circulating supply times it
+		}
+		parts = append(parts, fmt.Sprintf("%d. %s (%s) %s USD, cap %s, %+.1f%% 24 h", c.Rank, strings.ToUpper(c.Symbol), c.Name, money(price), bigMoney(capUSD), c.Change24))
 	}
 	src := snap.Source
 	if src == "coinbase-ranks" {

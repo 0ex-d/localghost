@@ -4,13 +4,35 @@ import java.util.Locale
 
 /**
  * THE HOME SCREEN'S WORDS. Home is where the app opens: BTC and ETH always (the other coins a tap
- * away, on CRYPTO), the day's news in a few sentences (the box's brief, written from the summaries
- * of the most-told stories), the top stories under it, and a box to ask from. The box made every
- * number and sentence; the phone only picks and writes them. Pure, so the JVM tests read it.
+ * away, on CRYPTO), the day's news as one point per story (the box's brief, written from the
+ * summaries of the most-told stories, each point opening its story), and a box to ask from. The
+ * box made every number and sentence; the phone only picks and writes them. Pure, so the JVM
+ * tests read it.
  */
 object HomeText {
-    /** A coin as home and CRYPTO show it: the box's own price where it has one, the list's otherwise. */
-    data class Coin(val rank: Int, val symbol: String, val name: String, val usd: Double, val change24: Double?, val cap: Double)
+    /**
+     * A coin as home and CRYPTO show it: the box's own price where it has one, the list's
+     * otherwise. [supply] is Coinbase's circulating supply; the cap is the shown price times it.
+     */
+    data class Coin(val rank: Int, val symbol: String, val name: String, val usd: Double, val change24: Double?, val cap: Double, val supply: Double = 0.0)
+
+    /** One point of the brief and the story it tells (null when the points and stories do not pair up). */
+    data class Point(val text: String, val story: Long?)
+
+    /**
+     * The brief as points: its "- " lines, the nth paired with the nth of [stories] when the counts
+     * agree. A brief from before the points is one point of its own.
+     */
+    fun points(brief: String, stories: List<Long>): List<Point> {
+        val t = NewsText.told(brief)
+        val lines = if (t.points.isEmpty()) listOfNotNull(t.lead.takeIf { it.isNotEmpty() }) else listOfNotNull(t.lead.takeIf { it.isNotEmpty() }) + t.points
+        val paired = t.lead.isEmpty() && t.points.size == stories.size
+        return lines.mapIndexed { i, s -> Point(s, if (paired) stories[i] else null) }
+    }
+
+    /** The box's prices with the fast lane's over them (BTC, ETH, SOL, seconds old). */
+    fun withFast(live: Map<String, Pair<Double, Double?>>, fast: Map<String, Pair<Double, Double?>>): Map<String, Pair<Double, Double?>> =
+        live + fast.filterValues { it.first > 0 }
 
     /** "84,498", "2,692", "0.2512", "169.71". */
     fun money(v: Double): String = when {
@@ -42,7 +64,8 @@ object HomeText {
     fun merge(ranks: List<Coin>, live: Map<String, Pair<Double, Double?>>, n: Int = 50): List<Coin> =
         ranks.sortedBy { it.rank }.take(n).map { c ->
             val l = live[c.symbol]
-            if (l != null && l.first > 0) c.copy(usd = l.first, change24 = l.second ?: c.change24) else c
+            val m = if (l != null && l.first > 0) c.copy(usd = l.first, change24 = l.second ?: c.change24) else c
+            if (m.supply > 0 && m.usd > 0) m.copy(cap = m.usd * m.supply) else m
         }
 
     /** The home row for a pinned coin with no rank list yet: the box's own price alone. */
@@ -62,7 +85,7 @@ object HomeText {
 
     /** What home says in the brief's place before the box has written one. */
     fun noBrief(stories: Int): String = when (stories) {
-        0 -> "no news on the box yet: the feeds are fetched every two hours"
+        0 -> "no news on the box yet: pull down to fetch the feeds"
         else -> "the box writes the day's brief once a few stories have their summaries"
     }
 }
