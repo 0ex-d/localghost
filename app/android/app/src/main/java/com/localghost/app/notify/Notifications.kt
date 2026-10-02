@@ -60,11 +60,15 @@ object Notifications {
      *  the app goes to the thing it is about (NotifLink): the day on MAP, the memory, NEWS, Box
      *  Status; NOTIFICATIONS when it names nothing. The extra rides the launch intent; unlock
      *  consumes it. */
-    private fun tapPI(ctx: Context, item: PendingNotification, reqCode: Int): PendingIntent {
+    private fun tapPI(ctx: Context, item: PendingNotification, reqCode: Int): PendingIntent =
+        // where the box says it goes (the day on MAP, the memory, NEWS), else by its kind
+        tapPI(ctx, com.localghost.app.ui.NotifLink.nav(item.link, item.daemonId, item.kind), reqCode)
+
+    /** The summary of several goes to the list of them. */
+    private fun tapPI(ctx: Context, nav: String, reqCode: Int): PendingIntent {
         val i = android.content.Intent(ctx, com.localghost.app.MainActivity::class.java).apply {
             action = "com.localghost.app.OPEN_NOTIFICATION"
-            // where the box says it goes (the day on MAP, the memory, NEWS), else by its kind
-            putExtra("nav", com.localghost.app.ui.NotifLink.nav(item.link, item.daemonId, item.kind))
+            putExtra("nav", nav)
             flags = android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
         return PendingIntent.getActivity(ctx, reqCode, i,
@@ -101,7 +105,7 @@ object Notifications {
             .setStyle(inbox)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setPublicVersion(publicVersion(ctx, R.drawable.ic_ghost_notif))
-            .setContentIntent(tapPI(ctx, "summary", 9999))
+            .setContentIntent(tapPI(ctx, "notifications", 9999))
             .setGroup(GROUP_KEY)
             .setGroupSummary(true)
             .setAutoCancel(true)

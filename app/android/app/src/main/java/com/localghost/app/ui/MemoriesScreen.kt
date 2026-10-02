@@ -4,7 +4,9 @@ import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.BasicTextField
@@ -47,6 +49,7 @@ fun MemoriesScreen(context: LifeContext?, open: String = "", onOpened: () -> Uni
     var rows by remember { mutableStateOf<List<BoxClient.MemRow>?>(null) }
     var adding by remember { mutableStateOf(false) }
     var memQuery by remember { mutableStateOf("") }
+    var memKind by remember { mutableStateOf("all") }
     var otd by remember { mutableStateOf<List<BoxClient.OtdYear>?>(null) }
     var otdOpen by remember { mutableStateOf(false) }
     var otdLoading by remember { mutableStateOf(false) }
@@ -151,6 +154,11 @@ fun MemoriesScreen(context: LifeContext?, open: String = "", onOpened: () -> Uni
             }
             if (jotSent) Text("sent to the journal , distilled within minutes", color = TerminalDim,
                 style = MaterialTheme.typography.labelMedium)
+        }
+        item {
+            // ABOUT ME AND MY PEOPLE: a note the box makes memories from (one per person, and facts
+            // about me), and the chat starts every question from
+            AboutCard(onSaved = { reload() })
         }
         item {
             CheckinCard(history = checkinHist, onSaved = { reloadCheckins() })
@@ -321,9 +329,24 @@ fun MemoriesScreen(context: LifeContext?, open: String = "", onOpened: () -> Uni
                     val yours = rows!!.count { it.kind == "user" }
                     Text("${rows!!.size} memories" + (if (yours > 0) " · $yours yours" else ""),
                         color = TerminalDim, style = MaterialTheme.typography.labelMedium)
+                    Spacer(Modifier.height(6.dp))
+                    // the kinds, as chips: one picked shows only its memories
+                    val counts = MemoryKinds.counts(rows!!.map { it.kind })
+                    Row(Modifier.horizontalScroll(rememberScrollState())) {
+                        MemoryKinds.all.forEach { k ->
+                            val n = counts[k.id] ?: 0
+                            if (k.id != "all" && n == 0) return@forEach
+                            val on = memKind == k.id
+                            Text(k.label + (if (k.id != "all") " $n" else ""), color = if (on) Void else TerminalGreen,
+                                style = MaterialTheme.typography.labelMedium,
+                                modifier = Modifier.padding(end = 6.dp).border(1.dp, if (on) TerminalGreen else TerminalDim, RectangleShape)
+                                    .background(if (on) TerminalGreen else Void).clickable { memKind = k.id }
+                                    .padding(horizontal = 10.dp, vertical = 4.dp))
+                        }
+                    }
                 }
-                items(rows!!.filter { memQuery.isBlank() ||
-                        it.title.contains(memQuery, true) || it.body.contains(memQuery, true) },
+                items(rows!!.filter { MemoryKinds.matches(memKind, it.kind) && (memQuery.isBlank() ||
+                        it.title.contains(memQuery, true) || it.body.contains(memQuery, true)) },
                     key = { "mem-${it.id}" }) { m ->
                 MemoryRowCard(m,
                     onEdit = { t, b -> scope.launch { BoxClient.memoryEdit(ctx, m.id, t, b); reload() } },
@@ -753,6 +776,8 @@ private fun MemoryRowCard(m: BoxClient.MemRow, onEdit: (String, String) -> Unit,
             val line = m.outingLine
             val origin = when (m.kind) {
                 "user" -> "yours"
+                "me" -> "about me, from my note"
+                "person" -> "one of my people"
                 "outing" -> if (line != null) "from your photos · $line" else "from your photos"
                 "day" -> m.meta?.optString("line")?.takeIf { it.isNotBlank() }?.let { "a day, from your trail and photos · $it" } ?: "a day, from your trail and photos"
                 "episode" -> "a day"
@@ -853,6 +878,53 @@ private fun NearbyCard(n: BoxClient.Nearby, km: Int, onKm: (Int) -> Unit) {
                     color = if (s.beenThere == 0) GhostText else GhostTextDim, style = MaterialTheme.typography.bodySmall)
                 Text(s.why, color = TerminalDim, style = MaterialTheme.typography.labelMedium)
             }
+        }
+    }
+}
+
+
+/** The note about me and my people: written here, kept on the box, made into memories there. */
+@Composable
+private fun AboutCard(onSaved: () -> Unit) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val scope = rememberCoroutineScope()
+    var open by remember { mutableStateOf(false) }
+    var about by remember { mutableStateOf<BoxClient.About?>(null) }
+    var text by remember { mutableStateOf("") }
+    var saving by remember { mutableStateOf(false) }
+    LaunchedEffect(open) {
+        if (open) BoxClient.about(ctx)?.let { about = it; text = it.text }
+    }
+    Text(if (open) "[ − about me and my people ]" else "[ + about me and my people ]", color = TerminalGreen,
+        style = MaterialTheme.typography.labelMedium, modifier = Modifier.clickable { open = !open })
+    if (!open) return
+    Column(Modifier.fillMaxWidth().padding(top = 6.dp).border(1.dp, GhostBorder, RectangleShape).background(Void).padding(12.dp)) {
+        Text("who I am, and the people in my life: names, who they are to me, what matters. The box makes memories from it, one per person, and every chat starts from it.",
+            color = GhostTextDim, style = MaterialTheme.typography.labelSmall)
+        Spacer(Modifier.height(8.dp))
+        BasicTextField(text, { if (it.length <= 8000) text = it },
+            textStyle = MaterialTheme.typography.bodySmall.copy(color = GhostText),
+            cursorBrush = SolidColor(TerminalGreen),
+            decorationBox = { inner -> Box(Modifier.fillMaxWidth().heightIn(min = 120.dp)
+                .border(1.dp, GhostBorder, RectangleShape).padding(8.dp)) {
+                if (text.isEmpty()) Text("I'm … I live in … My partner … My friends …", color = TerminalDim,
+                    style = MaterialTheme.typography.bodySmall); inner() } },
+            modifier = Modifier.fillMaxWidth())
+        Spacer(Modifier.height(6.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(if (saving) "saving…" else "[ save ]", color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.clickable(enabled = !saving && text != about?.text) {
+                    saving = true
+                    scope.launch {
+                        BoxClient.saveAbout(ctx, text.trim())?.let { about = it }
+                        saving = false
+                        onSaved()
+                    }
+                })
+            Spacer(Modifier.width(12.dp))
+            val a = about
+            if (a != null) Text(AboutText.status(a.name, a.me, a.people, a.pending, a.text.isNotBlank()),
+                color = TerminalDim, style = MaterialTheme.typography.labelSmall)
         }
     }
 }

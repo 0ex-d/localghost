@@ -196,3 +196,56 @@ func TestBackfillWalksBack(t *testing.T) {
 		t.Fatalf("done marks: %v", rows.Vals)
 	}
 }
+
+// A coin priced through other currencies: SOL from a USDT market, a BTC market (through the
+// box's BTC) and a EUR market (through the ECB), each weighed by its volume; the minute keeps
+// how it was made, and the coin's page shows Coinbase's description and each market's part.
+func TestBlendThroughConversionPaths(t *testing.T) {
+	db := fresh(t)
+	at := time.Date(2026, 10, 2, 10, 0, 0, 0, time.UTC)
+	if err := tally.SetSymbols(db, []string{"SOL"}); err != nil {
+		t.Fatal(err)
+	}
+	coins := `{"data":[{"slug":"solana","symbol":"SOL","name":"Solana","listed":true,"rank":5,"latest":"200","market_cap":"1e11","volume_24h":"5e9","percent_change":0.02,"circulating_supply":"5e8",
+		"description":"A fast chain.","color":"#9945FF","resource_urls":[{"type":"website","link":"https://solana.com"}]}`
+	for i := 6; i <= 15; i++ { // a list of fewer than ten is not taken
+		coins += `,{"slug":"c` + itoa(i) + `","symbol":"C` + itoa(i) + `","name":"Coin","listed":true,"rank":` + itoa(i) + `,"latest":"10","market_cap":"1","volume_24h":"1","percent_change":0}`
+	}
+	coins += `]}`
+	batch := map[string]any{"fetchedAt": at.Unix(), "sources": []map[string]any{
+		{"id": "ecb", "status": 200, "body": ecbBody}, // 1.2 dollars a euro
+		{"id": "kraken:all", "status": 200, "body": `{"error":[],"result":{"XXBTZUSD":{"c":["100000","1"],"v":["1","100"]},"USDTZUSD":{"c":["1.0","1"],"v":["1","1e6"]},"SOLXBT":{"c":["0.002","1"],"v":["1","1000"]},"SOLEUR":{"c":["166.5","1"],"v":["1","1000"]}}}`},
+		{"id": "binance:all", "status": 200, "body": `[{"symbol":"SOLUSDT","lastPrice":"202","volume":"2000","closeTime":` + itoa(int(at.UnixMilli())) + `},{"symbol":"BTCUSDT","lastPrice":"100000","volume":"100","closeTime":` + itoa(int(at.UnixMilli())) + `}]`},
+		{"id": "coinbase-ranks", "status": 200, "body": coins},
+	}}
+	raw, _ := json.Marshal(batch)
+	res, err := tally.IngestRates(db, raw, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sol := res.Index["SOL"]
+	// 200 (through BTC) ×1000, 202 ×2000, 199.8 (through EUR) ×1000
+	want := (200.0*1000 + 202*2000 + 199.8*1000) / 4000
+	if math.Abs(sol.Price-want) > 0.01 || sol.Markets != 3 || sol.N != 2 || strings.Join(sol.Paths, ",") != "USDT,EUR,BTC" {
+		t.Fatalf("sol %+v want %.3f (failed %v)", sol, want, res.Failed)
+	}
+	snap, _ := hw.RatesNow(db)
+	if r := snap.Index["SOL"]; r.Markets != 3 || r.Paths != "USDT,EUR,BTC" {
+		t.Fatalf("snapshot row %+v", r)
+	}
+	d, err := hw.CoinNow(db, "sol", at.Add(30*time.Second))
+	if err != nil || d.Name != "Solana" || d.Description != "A fast chain." || d.Website != "https://solana.com" || d.Rank != 5 || d.Supply != 5e8 || d.Index == nil {
+		t.Fatalf("page %+v %v", d, err)
+	}
+	sum := 0.0
+	for _, l := range d.Markets {
+		sum += l.Weight
+	}
+	if len(d.Markets) != 3 || d.Markets[0].Exchange != "binance" || math.Abs(sum-1) > 1e-9 {
+		t.Fatalf("markets %+v", d.Markets)
+	}
+	sp, err := hw.Sparks(db, 0, at)
+	if err != nil || sp == nil {
+		t.Fatalf("sparks %v %v", sp, err)
+	}
+}

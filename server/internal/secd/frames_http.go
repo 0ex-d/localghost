@@ -638,9 +638,13 @@ func (s *Server) handleLocations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	secdLog.Debug("locations spooled", "fn", "handleLocations", "bytes", n)
+	out := map[string]any{"ok": true, "unreadable": unreadable}
+	if snap, ok := s.homeSnap(mounted); ok {
+		out["home"] = snap // home's numbers ride along (home.go)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "unreadable": unreadable})
+	_ = json.NewEncoder(w).Encode(out)
 }
 
 // errClosing: the volume is being locked; an upload still streaming stops here, its .part removed.

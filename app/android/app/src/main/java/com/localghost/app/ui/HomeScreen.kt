@@ -26,6 +26,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.localghost.app.net.BoxClient
+import com.localghost.app.net.HomeCache
+import com.localghost.app.net.HomeData
 import com.localghost.app.phrases.HomeBriefText
 import com.localghost.app.sync.BoxFetch
 import com.localghost.app.ui.theme.*
@@ -40,12 +42,17 @@ import kotlinx.coroutines.launch
  * an hour old. Read again every minute while it is open.
  */
 @Composable
-fun HomeScreen(onAsk: (String) -> Unit, onOpenNews: () -> Unit, onOpenStory: (Long) -> Unit, onOpenCrypto: () -> Unit) {
+fun HomeScreen(onAsk: (String) -> Unit, onOpenNews: () -> Unit, onOpenStory: (Long) -> Unit, onOpenCrypto: () -> Unit,
+               onOpenCoin: (String) -> Unit = {}, onOpenTarget: (String) -> Unit = {}) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
-    var news by remember { mutableStateOf<BoxClient.News?>(null) }
-    var rates by remember { mutableStateOf<BoxClient.Rates?>(null) }
-    var fast by remember { mutableStateOf<BoxClient.Fast?>(null) }
+    // the latest the phone kept (HomeCache): home opens on it, then reads the box
+    val kept: HomeData.Snap? = remember { HomeCache.snap(ctx) }
+    var news by remember { mutableStateOf<BoxClient.News?>(HomeCache.newsWith(HomeCache.news(ctx), kept)) }
+    var rates by remember { mutableStateOf<BoxClient.Rates?>(HomeCache.rates(ctx)) }
+    var fast by remember { mutableStateOf<BoxClient.Fast?>(HomeCache.fastOf(kept)) }
+    var snap by remember { mutableStateOf<HomeData.Snap?>(kept) }
+    var forYou by remember { mutableStateOf<HomeData.ForYou?>(HomeCache.forYou) }
     var failed by remember { mutableStateOf(false) }
     var refreshing by remember { mutableStateOf(false) }
     var fetching by remember { mutableStateOf(false) }
@@ -55,11 +62,19 @@ fun HomeScreen(onAsk: (String) -> Unit, onOpenNews: () -> Unit, onOpenStory: (Lo
     var nowS by remember { mutableStateOf(System.currentTimeMillis() / 1000) }
     LaunchedEffect(tick) {
         while (true) {
-            val r = BoxClient.rates(ctx)
-            val n = BoxClient.news(ctx, since = System.currentTimeMillis() / 1000 - 86_400)
+            // home's snapshot first (a few kilobytes: the prices, the brief, FOR YOU), then the rest
+            val h = BoxClient.home(ctx)
+            if (h != null) {
+                snap = h
+                HomeCache.fastOf(h)?.let { f -> if (f.at > (fast?.at ?: 0)) fast = f }
+                news = HomeCache.newsWith(news, h)
+                h.forYou?.let { forYou = it }
+            }
+            val r = BoxClient.rates(ctx, keep = true)
+            val n = BoxClient.news(ctx, since = System.currentTimeMillis() / 1000 - 86_400, keep = true)
             if (r != null) rates = r
-            if (n != null) news = n
-            failed = r == null && n == null
+            if (n != null) news = HomeCache.newsWith(n, snap)
+            failed = r == null && n == null && h == null
             nowS = System.currentTimeMillis() / 1000
             refreshing = false
             kotlinx.coroutines.delay(60_000)
@@ -110,7 +125,7 @@ fun HomeScreen(onAsk: (String) -> Unit, onOpenNews: () -> Unit, onOpenStory: (Lo
                     (if (fetching) " · fetching the feeds…" else ""),
                     color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
                 Spacer(Modifier.height(12.dp))
-                PricesCard(rates, fast, failed, onOpenCrypto)
+                PricesCard(rates, fast, HomeCache.marketOf(rates, snap), failed, onOpenCrypto, onOpenCoin)
                 Spacer(Modifier.height(20.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     SectionLabel("THE DAY'S NEWS")
@@ -161,6 +176,12 @@ fun HomeScreen(onAsk: (String) -> Unit, onOpenNews: () -> Unit, onOpenStory: (Lo
                         }
                     }
                 }
+                forYou?.let { f ->
+                    if (!f.empty) {
+                        Spacer(Modifier.height(20.dp))
+                        ForYouCard(f, stamp, onOpenStory, onOpenTarget)
+                    }
+                }
                 Spacer(Modifier.height(16.dp))
             }
         }
@@ -184,7 +205,8 @@ private fun BriefPoint(p: HomeText.Point, onTap: () -> Unit) {
  * exchanges under them, with CRYPTO50; a tap opens CRYPTO with the rest.
  */
 @Composable
-private fun PricesCard(rates: BoxClient.Rates?, fast: BoxClient.Fast?, failed: Boolean, onOpenCrypto: () -> Unit) {
+private fun PricesCard(rates: BoxClient.Rates?, fast: BoxClient.Fast?, market: BoxClient.Market?, failed: Boolean,
+                       onOpenCrypto: () -> Unit, onOpenCoin: (String) -> Unit) {
     // the age line counts on its own, every second
     var nowS by remember { mutableStateOf(System.currentTimeMillis() / 1000) }
     LaunchedEffect(Unit) {
@@ -206,10 +228,11 @@ private fun PricesCard(rates: BoxClient.Rates?, fast: BoxClient.Fast?, failed: B
         val pinned: List<HomeText.Coin> = HomeText.pinned(coins)
         if (pinned.isEmpty()) Text("no prices on the box yet", color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
         pinned.forEach { c ->
-            Row(verticalAlignment = Alignment.Bottom, modifier = Modifier.padding(vertical = 2.dp)) {
+            // a coin's row opens its page; the rest of the card opens CRYPTO
+            Row(verticalAlignment = Alignment.Bottom, modifier = Modifier.clickable { onOpenCoin(c.symbol) }.padding(vertical = 2.dp)) {
                 Text(c.symbol, color = TerminalGreen, style = MaterialTheme.typography.titleMedium, modifier = Modifier.width(56.dp))
                 Box(Modifier.weight(1f)) {
-                    TickingPrice(HomeText.money(c.usd), c.usd, GhostText, MaterialTheme.typography.titleLarge, fontSize = 22.sp)
+                    TickingPrice(HomeText.money(c.usd), c.usd, GhostText, MaterialTheme.typography.titleLarge, fontSize = 22.sp, arrow = true)
                 }
                 val ch = HomeText.change(c.change24)
                 Text(ch, color = if (ch.startsWith("-")) Warning else TerminalGreen, style = MaterialTheme.typography.titleSmall)
@@ -224,11 +247,55 @@ private fun PricesCard(rates: BoxClient.Rates?, fast: BoxClient.Fast?, failed: B
         if (line.isNotEmpty()) Text(line, color = TerminalDim, style = MaterialTheme.typography.labelSmall)
         Spacer(Modifier.height(6.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            val m = r?.market
+            val m = market
             Text(if (m != null && m.value > 0) "${m.code} " + "%.1f".format(java.util.Locale.US, m.value) + "  " + HomeText.change(m.dayChange) + " today" else "",
                 color = GhostTextDim, style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
             Text("prices ▸", color = TerminalGreen, style = MaterialTheme.typography.labelMedium)
         }
+    }
+}
+
+/**
+ * FOR YOU: places near where my trail last was, to what I photograph; this day in earlier years
+ * (its story, or the map on that day); the day's news that touches what I said about myself.
+ * Each row opens what it is about.
+ */
+@Composable
+private fun ForYouCard(f: HomeData.ForYou, nowS: Long, onOpenStory: (Long) -> Unit, onOpenTarget: (String) -> Unit) {
+    SectionLabel("FOR YOU")
+    if (f.places.isNotEmpty()) {
+        Spacer(Modifier.height(6.dp))
+        Text(HomeData.nearFrom(f.from, nowS), color = TerminalDim, style = MaterialTheme.typography.labelSmall)
+        f.places.forEach { p ->
+            ForYouRow(p.name + (if (p.new) "  · new" else ""), HomeData.placeLine(p), p.why) { onOpenTarget("memories:near") }
+        }
+    }
+    if (f.days.isNotEmpty()) {
+        Spacer(Modifier.height(6.dp))
+        Text("this day", color = TerminalDim, style = MaterialTheme.typography.labelSmall)
+        f.days.forEach { d ->
+            ForYouRow(HomeData.yearsAgo(d.yearsAgo) + (if (d.title.isNotBlank()) " · " + d.title else ""), HomeData.dayLine(d), d.lead) {
+                onOpenTarget(HomeData.dayTarget(d))
+            }
+        }
+    }
+    if (f.stories.isNotEmpty()) {
+        Spacer(Modifier.height(6.dp))
+        Text("from the news", color = TerminalDim, style = MaterialTheme.typography.labelSmall)
+        f.stories.forEach { s -> ForYouRow(s.title, s.why, s.lead) { onOpenStory(s.id) } }
+    }
+}
+
+@Composable
+private fun ForYouRow(title: String, line: String, more: String, onTap: () -> Unit) {
+    Row(Modifier.fillMaxWidth().clickable { onTap() }.padding(vertical = 6.dp), verticalAlignment = Alignment.Top) {
+        Text("•", color = TerminalGreen, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.width(16.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, color = GhostText, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            if (line.isNotBlank()) Text(line, color = TerminalDim, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (more.isNotBlank()) Text(more, color = GhostTextDim, style = MaterialTheme.typography.labelMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
+        Text(" ›", color = TerminalDim, style = MaterialTheme.typography.bodyMedium)
     }
 }
 
@@ -262,23 +329,24 @@ private fun AskBox(onAsk: (String) -> Unit) {
 }
 
 /**
- * CRYPTO , the coins behind home's two: CRYPTO50, then the fifty largest Coinbase lists, each at
- * the box's own price (BTC, ETH and SOL seconds old, the rest a minute old) where the box follows
- * it, with the day's change and the market cap (the shown price times Coinbase's circulating
- * supply). Pull down to read the box again.
+ * CRYPTO , the coins behind home's two: CRYPTO50, then the hundred largest Coinbase lists, each at
+ * the box's own price (BTC, ETH and SOL seconds old, the rest a minute old), blended from every
+ * market it trades in, with its week as a small line and the day's change; a tap opens the coin's
+ * page. Pull down to read the box again.
  */
 @Composable
-fun CryptoScreen() {
+fun CryptoScreen(onOpenCoin: (String) -> Unit = {}) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
-    var rates by remember { mutableStateOf<BoxClient.Rates?>(null) }
-    var fast by remember { mutableStateOf<BoxClient.Fast?>(null) }
+    // the last list the phone kept (HomeCache), at once; the box's a moment later
+    var rates by remember { mutableStateOf<BoxClient.Rates?>(HomeCache.rates(ctx)) }
+    var fast by remember { mutableStateOf<BoxClient.Fast?>(HomeCache.fastOf(HomeCache.snap(ctx))) }
     var failed by remember { mutableStateOf(false) }
     var refreshing by remember { mutableStateOf(false) }
     var tick by remember { mutableIntStateOf(0) }
     var nowS by remember { mutableStateOf(System.currentTimeMillis() / 1000) }
     LaunchedEffect(tick) {
         while (true) {
-            val r = BoxClient.rates(ctx)
+            val r = BoxClient.rates(ctx, keep = true)
             if (r != null) rates = r
             failed = r == null && rates == null
             refreshing = false
@@ -298,6 +366,9 @@ fun CryptoScreen() {
             nowS = System.currentTimeMillis() / 1000
         }
     }
+    // each coin's week, for its row's line (ten minutes old at most on the box)
+    var sparks by remember { mutableStateOf<Map<String, List<Double>>>(emptyMap()) }
+    LaunchedEffect(tick) { BoxClient.sparks(ctx)?.let { sparks = it } }
     Column(Modifier.fillMaxSize().padding(horizontal = 20.dp).padding(top = 16.dp)) {
         SectionLabel("CRYPTO PRICES")
         Spacer(Modifier.height(6.dp))
@@ -306,30 +377,25 @@ fun CryptoScreen() {
             val f = fast
             val live: Map<String, Pair<Double, Double?>> = HomeText.withFast(r?.index?.associate { ix -> ix.symbol to (ix.price to ix.change24) } ?: emptyMap(), f?.prices ?: emptyMap())
             val ranks: List<HomeText.Coin> = r?.ranks?.map { c -> HomeText.Coin(c.rank, c.symbol.uppercase(), c.name, c.priceUsd, c.change24, c.marketCap, c.supply) } ?: emptyList()
-            val rows: List<HomeText.Coin> = HomeText.merge(ranks, live)
+            val rows: List<HomeText.Coin> = HomeText.merge(ranks, live, n = 100)
             LazyColumn(Modifier.fillMaxSize()) {
                 when {
                     r == null && failed -> item { ErrorLine("the box did not answer , is it unlocked? pull down to try again") }
                     r == null -> item { LoadingRow() }
                     else -> {
-                        // when: BTC, ETH and SOL from the fast lane, the rest from the box's minute
-                        val minuteAt: Long = r.index.filter { it.symbol !in (f?.prices?.keys ?: emptySet()) }.maxOfOrNull { it.at } ?: 0L
+                        // one line on top: the market as a whole, and when the prices were made
                         val fastAt: Long = (f?.at ?: 0L) / 1000
+                        val minuteAt: Long = r.index.maxOfOrNull { it.at } ?: 0L
                         item {
+                            val m = r.market
                             Text(listOf(
-                                if (fastAt > 0) (f?.prices?.keys?.sorted()?.joinToString(", ") ?: "") + " " + HomeText.updated(fastAt, nowS) else "",
-                                if (minuteAt > 0) "the rest " + HomeText.updated(minuteAt, nowS) else "",
+                                if (m != null && m.value > 0) "${m.code} " + "%.1f".format(java.util.Locale.US, m.value) + " " + HomeText.change(m.dayChange) else "",
+                                HomeText.updated(maxOf(fastAt, minuteAt), nowS),
                             ).filter { it.isNotBlank() }.joinToString(" · "), color = TerminalDim, style = MaterialTheme.typography.labelSmall,
-                                modifier = Modifier.padding(bottom = 6.dp))
-                        }
-                        r.market?.takeIf { it.value > 0 }?.let { m ->
-                            item {
-                                Text("${m.code} " + "%.1f".format(java.util.Locale.US, m.value) + "  " + HomeText.change(m.dayChange) + " today · ${m.priced} of ${m.constituents} priced · weights of ${m.month}",
-                                    color = GhostText, style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(bottom = 8.dp))
-                            }
+                                modifier = Modifier.padding(bottom = 8.dp))
                         }
                         if (rows.isEmpty()) item { EmptyLine("no rank list on the box yet: Coinbase's is fetched hourly") }
-                        items(rows, key = { it.symbol + it.rank }) { c -> CoinLine(c) }
+                        items(rows, key = { it.symbol + it.rank }) { c -> CoinLine(c, sparks[c.symbol] ?: emptyList()) { onOpenCoin(c.symbol) } }
                     }
                 }
             }
@@ -337,16 +403,19 @@ fun CryptoScreen() {
     }
 }
 
+/** A coin's row: rank, symbol and name (with its cap), its week as a line, the price and the day's change. */
 @Composable
-private fun CoinLine(c: HomeText.Coin) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 5.dp), verticalAlignment = Alignment.CenterVertically) {
+private fun CoinLine(c: HomeText.Coin, week: List<Double>, onOpen: () -> Unit) {
+    Row(Modifier.fillMaxWidth().clickable { onOpen() }.padding(vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
         Text("${c.rank}", color = GhostTextDim, style = MaterialTheme.typography.labelSmall, modifier = Modifier.width(28.dp))
         Column(Modifier.weight(1f)) {
             Text(c.symbol, color = TerminalGreen, style = MaterialTheme.typography.titleSmall)
             Text(c.name + (if (c.cap > 0) " · " + HomeText.cap(c.cap) else ""), color = GhostTextDim,
                 style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
-        Column(horizontalAlignment = Alignment.End) {
+        Sparkline(CoinText.thin(week, 48), Modifier.width(56.dp).height(22.dp))
+        Spacer(Modifier.width(10.dp))
+        Column(horizontalAlignment = Alignment.End, modifier = Modifier.widthIn(min = 76.dp)) {
             TickingPrice(HomeText.money(c.usd), c.usd, GhostText, MaterialTheme.typography.bodyMedium)
             val ch = HomeText.change(c.change24)
             Text(ch, color = if (ch.startsWith("-")) Warning else TerminalGreen, style = MaterialTheme.typography.labelSmall)

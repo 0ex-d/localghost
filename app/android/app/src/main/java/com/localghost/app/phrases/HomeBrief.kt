@@ -38,10 +38,23 @@ object HomeBrief {
     suspend fun fetch(ctx: Context): Boolean {
         val app = ctx.applicationContext
         val now = System.currentTimeMillis() / 1000
-        val news = BoxClient.news(app, since = now - 86_400)
-        val rates = BoxClient.rates(app)
-        if (news == null && rates == null) return false
         val old = kept(app)
+        // home's snapshot (a few kilobytes) has what the lock screen shows: the day's most-told
+        // stories, BTC and ETH; the whole news and rates only from a box that has no snapshot
+        val snap = BoxClient.home(app)
+        if (snap != null && (snap.top.isNotEmpty() || snap.prices.isNotEmpty())) {
+            val cards = if (snap.top.isNotEmpty()) HomeBriefText.cards(snap.top.map { s ->
+                HomeBriefText.Story(s.id, s.title, s.lead, s.outlets, s.lastSeen, s.sources)
+            }, now) else old?.cards ?: emptyList()
+            val prices = snap.prices.map { (sym, p) -> HomeBriefText.Price(sym, p.price, p.change24, p.at) }
+            keep(app, Kept(now, cards, if (prices.isNotEmpty()) HomeBriefText.prices(prices) else old?.prices ?: "",
+                if (prices.isNotEmpty()) HomeBriefText.chip(prices) else old?.chip ?: ""))
+            if (PhraseState.lockScreenOn(app)) PhraseSurface.refresh(app)
+            return true
+        }
+        val news = BoxClient.news(app, since = now - 86_400, keep = true)
+        val rates = BoxClient.rates(app, keep = true)
+        if (news == null && rates == null) return false
         val cards = news?.let { n ->
             HomeBriefText.cards(n.stories.map { s ->
                 HomeBriefText.Story(s.id, s.title, s.summary, s.items.map { it.outlet }, s.lastSeen, s.sources)

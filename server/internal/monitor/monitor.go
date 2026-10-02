@@ -387,7 +387,7 @@ func venues(db *poltergres.ReadWrite, now time.Time) Section {
 		}
 	}
 	use := indexUse(db, now)
-	names := append([]string{"coinbase"}, rates.BatchExchanges...)
+	names := append([]string(nil), rates.BatchExchanges...) // Coinbase among them since its products list
 	sort.Strings(names)
 	answering := 0
 	var states []string

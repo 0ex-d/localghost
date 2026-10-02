@@ -18,13 +18,15 @@ import (
 )
 
 const (
-	HotRates = "hot:rates" // the /v1/rates doc
-	HotFast  = "hot:fast"  // BTC, ETH, SOL every five seconds, from every venue
-	HotNews  = "hot:news"  // the /v1/news doc, two days
+	HotRates = "hot:rates"  // the /v1/rates doc
+	HotFast  = "hot:fast"   // BTC, ETH, SOL every five seconds, from every venue
+	HotNews  = "hot:news"   // the /v1/news doc, two days
+	HotSpark = "hot:sparks" // a week of hourly closes per coin, for CRYPTO's rows
 
 	HotRatesTTL = 5 * time.Minute // tallyd rewrites it every minute
 	HotFastTTL  = time.Minute     // a fast price a minute old is not fast
 	HotNewsTTL  = 30 * time.Minute
+	HotSparkTTL = 10 * time.Minute
 	FastEvery   = 5 * time.Second
 	FastFresh   = 30 * time.Second // older than this, the minute's index stands
 	NewsHotDays = 2
@@ -35,11 +37,13 @@ var FastSymbols = []string{"BTC", "ETH", "SOL"}
 
 // FastPrice is one coin's index from the fast lane: the venues' last trades, volume-weighted.
 type FastPrice struct {
-	Price  float64  `json:"price"`
-	At     int64    `json:"at"` // unix ms, when the lane made it
-	N      int      `json:"n"`  // venues that went in
-	Used   []string `json:"used"`
-	Spread float64  `json:"spread"`
+	Price   float64  `json:"price"`
+	At      int64    `json:"at"` // unix ms, when the lane made it
+	N       int      `json:"n"`  // venues that went in
+	Used    []string `json:"used"`
+	Spread  float64  `json:"spread"`
+	Markets int      `json:"markets"`
+	Paths   []string `json:"paths"`
 }
 
 // Fast is the fast lane's last pass.
@@ -104,6 +108,7 @@ func ApplyFast(s *RatesSnapshot, f Fast, now time.Time) int {
 		r.Price, r.At, r.Fast = p.Price, p.At/1000, true
 		if p.N > 0 {
 			r.N, r.Used, r.Spread = p.N, strings.Join(p.Used, ","), p.Spread
+			r.Markets, r.Paths = p.Markets, strings.Join(p.Paths, ",")
 		}
 		s.Index[sym] = r
 		n++

@@ -393,6 +393,78 @@ func (s *Server) handleRates(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, d)
 }
 
+// handleCoinInfo , GET /v1/coins/info?symbol=BTC , one coin's page: what it is, where it stands
+// on the list, the box's price and how it was blended, market by market.
+func (s *Server) handleCoinInfo(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodGet {
+		s.appearsDown(w)
+		return
+	}
+	mounted, ok := s.mountedSlot()
+	if !ok {
+		s.appearsDown(w)
+		return
+	}
+	sym := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("symbol")))
+	if sym == "" || len(sym) > 12 {
+		http.Error(w, "symbol=BTC", http.StatusBadRequest)
+		return
+	}
+	db, err := s.notif.DB(mounted)
+	if err != nil {
+		s.appearsDown(w)
+		return
+	}
+	d, err := hw.CoinNow(db, sym, time.Now())
+	if err != nil {
+		secdLog.Warn("coin read failed", "fn", "handleCoinInfo", "err", err)
+		s.appearsDown(w)
+		return
+	}
+	writeJSON(w, d)
+}
+
+// sparksDoc is /v1/rates/sparks.
+type sparksDoc struct {
+	Hours  int                  `json:"hours"`
+	Sparks map[string][]float64 `json:"sparks"`
+}
+
+// handleRatesSparks , GET /v1/rates/sparks , a week of hourly closes for every coin, for CRYPTO's
+// rows; from Redis for ten minutes at a time.
+func (s *Server) handleRatesSparks(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodGet {
+		s.appearsDown(w)
+		return
+	}
+	mounted, ok := s.mountedSlot()
+	if !ok {
+		s.appearsDown(w)
+		return
+	}
+	rd, rerr := s.notif.Cache(mounted)
+	var d sparksDoc
+	if rerr == nil && hw.HotGet(rd, hw.HotSpark, &d) {
+		writeJSON(w, d)
+		return
+	}
+	db, err := s.notif.DB(mounted)
+	if err != nil {
+		s.appearsDown(w)
+		return
+	}
+	sp, err := hw.Sparks(db, 24*7, time.Now())
+	if err != nil {
+		s.appearsDown(w)
+		return
+	}
+	d = sparksDoc{Hours: 24 * 7, Sparks: sp}
+	if rerr == nil {
+		_ = hw.HotPut(rd, hw.HotSpark, d, hw.HotSparkTTL)
+	}
+	writeJSON(w, d)
+}
+
 // briefNowDoc is what "write the brief now" did: written, or why not, and the brief as it stands.
 type briefNowDoc struct {
 	OK           bool    `json:"ok"`

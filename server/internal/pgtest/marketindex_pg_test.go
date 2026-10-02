@@ -119,14 +119,21 @@ func TestMarketIndexAgainstPostgres(t *testing.T) {
 	if err != nil || len(hist) != 4 || hist[0].Day != "2026-10-01" {
 		t.Fatalf("history: %v %v", hist, err)
 	}
-	// the symbols followed: the fifty largest of the newest day, stablecoins and wrapped out, plus by hand
+	// the symbols priced: the hundred largest of the newest day, stablecoins too; the history
+	// walks: the fifty that can be constituents, stablecoins and wrapped out; both plus by hand
 	syms := tally.Symbols(db)
-	if len(syms) != 2 || syms[0] != "BTC" || syms[1] != "ETH" {
+	if len(syms) != 3 || syms[0] != "BTC" || syms[1] != "ETH" || syms[2] != "USDT" {
 		t.Fatalf("symbols: %v", syms)
 	}
+	if hs := tally.HistorySymbols(db); len(hs) != 2 || hs[0] != "BTC" || hs[1] != "ETH" {
+		t.Fatalf("history symbols: %v", hs)
+	}
 	_ = tally.SetSymbols(db, []string{"SOL"})
-	if syms := tally.Symbols(db); len(syms) != 3 || syms[2] != "SOL" {
+	if syms := tally.Symbols(db); len(syms) != 4 || syms[3] != "SOL" {
 		t.Fatalf("symbols with a manual one: %v", syms)
+	}
+	if hs := tally.HistorySymbols(db); len(hs) != 3 || hs[2] != "SOL" {
+		t.Fatalf("history symbols with a manual one: %v", hs)
 	}
 }
 

@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"errors"
-	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -72,27 +71,15 @@ func IsRankSource(id string) bool {
 	return false
 }
 
-// TickerSources is the prices, every minute: every batch venue's all-pairs ticker (one call
-// each) and Coinbase pair by pair for the ten largest symbols and the USDT leg.
+// TickerSources is the prices, every minute: every venue's all-pairs answer, one call each
+// (Coinbase's products list among them). symbols is not needed for the asking: each answer holds
+// every pair, and the ingest keeps the ones followed.
 func TickerSources(symbols []string) []Source {
+	_ = symbols
 	var out []Source
 	for _, ex := range BatchExchanges {
 		out = append(out, Source{ex + ":all", ex + ", every pair", BatchURL(ex), 1})
 	}
-	n := 0
-	for _, s := range symbols {
-		s = strings.ToUpper(strings.TrimSpace(s))
-		if s == "" || s == "USDT" || s == "USD" {
-			continue
-		}
-		m := Market{"coinbase", s, "USD"}
-		out = append(out, Source{m.ID(), "coinbase " + s + "/USD", m.TickerURL(), 1})
-		if n++; n >= CoinbaseTop {
-			break
-		}
-	}
-	m := Market{"coinbase", "USDT", "USD"}
-	out = append(out, Source{m.ID(), "coinbase USDT/USD", m.TickerURL(), 1})
 	return out
 }
 
@@ -176,88 +163,12 @@ type Quote struct {
 type Index struct {
 	Price   float64           `json:"price"`
 	N       int               `json:"n"`       // exchanges that went in
+	Markets int               `json:"markets"` // markets that went in (a venue can have several: BTC-USD, BTC-EUR)
+	Paths   []string          `json:"paths"`   // the quote currencies they were converted from (USD, USDT, BTC…)
 	Spread  float64           `json:"spread"`  // (highest used - lowest used) / price
 	Used    []string          `json:"used"`    // which
 	Dropped map[string]string `json:"dropped"` // which, and why
 	At      time.Time         `json:"at"`
-}
-
-const (
-	staleAfter = 15 * time.Minute
-	maxOff     = 0.02 // from the median
-)
-
-// MakeIndex is the method: quotes older than fifteen minutes go, then quotes more than 2% from the
-// median of the rest, and what is left is averaged weighted by volume (plain mean when no
-// exchange gives a volume). The spread is told so a thin or disagreeing market shows.
-func MakeIndex(quotes []Quote, now time.Time) (Index, error) {
-	ix := Index{Dropped: map[string]string{}, At: now}
-	var fresh []Quote
-	for _, q := range quotes {
-		switch {
-		case q.Price <= 0:
-			ix.Dropped[q.Exchange] = "no price"
-		case now.Sub(q.At) > staleAfter:
-			ix.Dropped[q.Exchange] = "stale (" + now.Sub(q.At).Truncate(time.Minute).String() + " old)"
-		default:
-			fresh = append(fresh, q)
-		}
-	}
-	if len(fresh) == 0 {
-		return ix, errors.New("no fresh quote")
-	}
-	prices := make([]float64, len(fresh))
-	for i, q := range fresh {
-		prices[i] = q.Price
-	}
-	sort.Float64s(prices)
-	median := prices[len(prices)/2]
-	if len(prices)%2 == 0 {
-		median = (prices[len(prices)/2-1] + prices[len(prices)/2]) / 2
-	}
-	var sumPV, sumV float64
-	var used []Quote
-	anyVolume := false
-	for _, q := range fresh {
-		if q.Volume > 0 && math.Abs(q.Price-median)/median <= maxOff {
-			anyVolume = true
-		}
-	}
-	for _, q := range fresh {
-		if math.Abs(q.Price-median)/median > maxOff {
-			ix.Dropped[q.Exchange] = "off by " + strconv.FormatFloat(100*math.Abs(q.Price-median)/median, 'f', 1, 64) + "% from the median"
-			continue
-		}
-		if anyVolume && q.Volume <= 0 {
-			// a venue that gives a price and no volume (Gemini's price feed) cannot be weighed
-			// against the ones that do; it is left out rather than counted for nothing
-			ix.Dropped[q.Exchange] = "no volume given"
-			continue
-		}
-		used = append(used, q)
-		sumPV += q.Price * q.Volume
-		sumV += q.Volume
-	}
-	if len(used) == 0 {
-		return ix, errors.New("every quote was off the median")
-	}
-	lo, hi := used[0].Price, used[0].Price
-	for _, q := range used {
-		ix.Used = append(ix.Used, q.Exchange)
-		lo, hi = math.Min(lo, q.Price), math.Max(hi, q.Price)
-	}
-	sort.Strings(ix.Used)
-	if sumV > 0 {
-		ix.Price = sumPV / sumV
-	} else {
-		for _, q := range used {
-			ix.Price += q.Price
-		}
-		ix.Price /= float64(len(used))
-	}
-	ix.N = len(used)
-	ix.Spread = (hi - lo) / ix.Price
-	return ix, nil
 }
 
 // --- the top 100 ---------------------------------------------------------------------------
@@ -306,6 +217,59 @@ func ParseCoins(source string, body []byte) ([]Coin, error) {
 		return finishCoins(out)
 	}
 	return nil, errors.New("unknown rank source " + source)
+}
+
+// CoinInfo is a coin as Coinbase's list describes it, for the coin's own page.
+type CoinInfo struct {
+	Symbol      string `json:"symbol"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Color       string `json:"color"`
+	Website     string `json:"website"`
+	WhitePaper  string `json:"whitepaper"`
+}
+
+// ParseCoinInfo reads the descriptions out of Coinbase's list (the same body as ParseCoins).
+func ParseCoinInfo(body []byte) []CoinInfo {
+	var obj struct {
+		Data []struct {
+			Symbol      string `json:"symbol"`
+			Name        string `json:"name"`
+			Description string `json:"description"`
+			Color       string `json:"color"`
+			Listed      *bool  `json:"listed"`
+			URLs        []struct {
+				Type string `json:"type"`
+				Link string `json:"link"`
+			} `json:"resource_urls"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(body, &obj) != nil {
+		return nil
+	}
+	var out []CoinInfo
+	for _, r := range obj.Data {
+		if r.Symbol == "" || (r.Listed != nil && !*r.Listed) {
+			continue
+		}
+		ci := CoinInfo{Symbol: strings.ToUpper(r.Symbol), Name: r.Name, Description: strings.TrimSpace(r.Description)}
+		if len(r.Color) == 7 && r.Color[0] == '#' {
+			ci.Color = r.Color
+		}
+		for _, u := range r.URLs {
+			if !strings.HasPrefix(u.Link, "https://") {
+				continue
+			}
+			switch u.Type {
+			case "website":
+				ci.Website = u.Link
+			case "white_paper":
+				ci.WhitePaper = u.Link
+			}
+		}
+		out = append(out, ci)
+	}
+	return out
 }
 
 // anyNum reads a number Coinbase sends as a string or as a number.

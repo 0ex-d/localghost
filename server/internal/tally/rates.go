@@ -65,10 +65,25 @@ func ParseRates(raw []byte) (RatesBatch, bool) {
 	return b, true
 }
 
-// Symbols is the list the box follows: the fifty largest by market cap on the newest day of the
-// rank list (stablecoins and wrapped coins out), then whatever was added by hand (settings
-// rates_symbols); BTC and ETH when there is no rank list yet.
+// Symbols is the list the box prices every minute: the hundred largest by market cap on the
+// newest day of Coinbase's rank list (stablecoins and wrapped coins too: each is on the list and
+// on CRYPTO), then whatever was added by hand (settings rates_symbols); BTC and ETH when there is
+// no rank list yet.
 func Symbols(db *poltergres.ReadWrite) []string {
+	return rankSymbols(db, PricedSize, false)
+}
+
+// HistorySymbols is the list whose thirty days of hours and week of minutes are walked back from
+// the venues: the fifty that can be CRYPTO50's constituents, and those added by hand. The others
+// build their series from the box's own minutes from the day they joined the list.
+func HistorySymbols(db *poltergres.ReadWrite) []string {
+	return rankSymbols(db, rates.MarketIndexSize, true)
+}
+
+// PricedSize is how many of the rank list the box prices.
+const PricedSize = 100
+
+func rankSymbols(db *poltergres.ReadWrite, n int, constituents bool) []string {
 	var out []string
 	seen := map[string]bool{}
 	add := func(s string) {
@@ -80,9 +95,9 @@ func Symbols(db *poltergres.ReadWrite) []string {
 	}
 	// the newest day of Coinbase's list; before its first, the newest day of any list
 	rows, err := db.Query(`SELECT symbol FROM coin_daily WHERE source = $1 AND day = (SELECT max(day) FROM coin_daily WHERE source = $1)
-		ORDER BY rank LIMIT 120`, rates.CoinbaseRanks)
+		ORDER BY rank LIMIT 160`, rates.CoinbaseRanks)
 	if err == nil && len(rows.Vals) == 0 {
-		rows, err = db.Query("SELECT symbol FROM coin_daily WHERE day = (SELECT max(day) FROM coin_daily) ORDER BY rank LIMIT 120")
+		rows, err = db.Query("SELECT symbol FROM coin_daily WHERE day = (SELECT max(day) FROM coin_daily) ORDER BY rank LIMIT 160")
 	}
 	if err == nil {
 		var coins []rates.Coin
@@ -91,8 +106,17 @@ func Symbols(db *poltergres.ReadWrite) []string {
 				coins = append(coins, rates.Coin{Rank: i + 1, Symbol: *v[0], PriceUSD: 1})
 			}
 		}
-		for _, s := range rates.SymbolsFromRanks(coins, rates.MarketIndexSize) {
-			add(s)
+		if constituents {
+			for _, s := range rates.SymbolsFromRanks(coins, n) {
+				add(s)
+			}
+		} else {
+			for _, c := range coins {
+				if len(out) >= n {
+					break
+				}
+				add(c.Symbol)
+			}
 		}
 	}
 	for _, s := range ManualSymbols(db) {
@@ -260,15 +284,11 @@ func IngestRates(db *poltergres.ReadWrite, raw []byte, now time.Time) (RatesResu
 				res.Failed[s.ID] = err.Error()
 				continue
 			}
-			for _, q := range qs {
-				if err := db.Exec(`INSERT INTO crypto_quotes (ts, exchange, base, quote, price, volume, quote_ts) VALUES ($1,$2,$3,$4,$5,$6,$7)
-					ON CONFLICT (ts, exchange, base, quote) DO UPDATE SET price = EXCLUDED.price, volume = EXCLUDED.volume, quote_ts = EXCLUDED.quote_ts`,
-					b.FetchedAt, q.Exchange, q.Base, q.QuoteCcy, q.Price, q.Volume, q.At.Unix()); err != nil {
-					return res, err
-				}
-				quotes = append(quotes, q)
-				res.Quotes++
+			if err := insertQuotes(db, b.FetchedAt, qs); err != nil {
+				return res, err
 			}
+			quotes = append(quotes, qs...)
+			res.Quotes += len(qs)
 			items[s.ID] = len(qs)
 		default:
 			m, ok := rates.ParseMarketID(s.ID)
@@ -291,14 +311,15 @@ func IngestRates(db *poltergres.ReadWrite, raw []byte, now time.Time) (RatesResu
 			items[s.ID] = 1
 		}
 	}
-	// the index per symbol: this batch's quotes, plus the newest fresh quote of a market that did not come
+	// the index per symbol, blended from every market (rates.Blend): this batch's quotes, plus the
+	// newest quote of a market that did not come, for as long as its weight has not run out
 	if len(quotes) > 0 {
 		have := map[string]bool{}
 		for _, q := range quotes {
 			have[q.Exchange+":"+q.Base+"-"+q.QuoteCcy] = true
 		}
 		rows, err := db.Query(`SELECT DISTINCT ON (exchange, base, quote) exchange, base, quote, price, volume, quote_ts FROM crypto_quotes
-			WHERE ts >= $1 AND ts < $2 ORDER BY exchange, base, quote, ts DESC`, b.FetchedAt-900, b.FetchedAt)
+			WHERE ts >= $1 AND ts < $2 ORDER BY exchange, base, quote, ts DESC`, b.FetchedAt-1500, b.FetchedAt)
 		if err == nil {
 			for _, v := range rows.Vals {
 				if len(v) < 6 || v[0] == nil || v[1] == nil || v[2] == nil || have[*v[0]+":"+*v[1]+"-"+*v[2]] {
@@ -310,26 +331,32 @@ func IngestRates(db *poltergres.ReadWrite, raw []byte, now time.Time) (RatesResu
 				quotes = append(quotes, rates.Quote{Exchange: *v[0], Base: *v[1], QuoteCcy: *v[2], Price: price, Volume: vol, At: time.Unix(qts, 0)})
 			}
 		}
-		usdt, _ := rates.USDTRate(quotes, fetched)
-		symbols := map[string]bool{}
-		for _, q := range quotes {
-			symbols[q.Base] = true
+		if want == nil {
+			want = map[string]bool{}
+			for _, sym := range Symbols(db) {
+				want[sym] = true
+			}
 		}
 		var names []string
-		for s := range symbols {
-			names = append(names, s)
+		for sym := range want {
+			names = append(names, sym)
 		}
-		sort.Strings(names)
-		for _, sym := range names {
-			ix, err := rates.MakeIndex(rates.InUSD(quotes, sym, usdt), fetched)
-			if err != nil {
-				res.Failed["index:"+sym] = err.Error()
-				continue
-			}
+		ixs, _, failed := rates.BlendAll(quotes, names, EURUSD(db), LastPrices(db, b.FetchedAt), fetched)
+		for sym, why := range failed {
+			res.Failed["index:"+sym] = why
+		}
+		var syms []string
+		for sym := range ixs {
+			syms = append(syms, sym)
+		}
+		sort.Strings(syms)
+		for _, sym := range syms {
+			ix := ixs[sym]
 			dropped, _ := json.Marshal(ix.Dropped)
-			if err := db.Exec(`INSERT INTO crypto_index (ts, symbol, price, n, spread, used, dropped) VALUES ($1,$2,$3,$4,$5,$6,$7)
-				ON CONFLICT (ts, symbol) DO UPDATE SET price = EXCLUDED.price, n = EXCLUDED.n, spread = EXCLUDED.spread, used = EXCLUDED.used, dropped = EXCLUDED.dropped`,
-				b.FetchedAt, sym, ix.Price, ix.N, ix.Spread, strings.Join(ix.Used, ","), string(dropped)); err != nil {
+			if err := db.Exec(`INSERT INTO crypto_index (ts, symbol, price, n, spread, used, dropped, markets, paths) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+				ON CONFLICT (ts, symbol) DO UPDATE SET price = EXCLUDED.price, n = EXCLUDED.n, spread = EXCLUDED.spread, used = EXCLUDED.used,
+				dropped = EXCLUDED.dropped, markets = EXCLUDED.markets, paths = EXCLUDED.paths`,
+				b.FetchedAt, sym, ix.Price, ix.N, ix.Spread, strings.Join(ix.Used, ","), string(dropped), ix.Markets, strings.Join(ix.Paths, ",")); err != nil {
 				return res, err
 			}
 			res.Index[sym] = ix
@@ -357,6 +384,15 @@ func IngestRates(db *poltergres.ReadWrite, raw []byte, now time.Time) (RatesResu
 		if err != nil {
 			res.Failed[src] = err.Error()
 			continue
+		}
+		// what each coin is, for its page: Coinbase's description, colour, site and white paper
+		for _, ci := range rates.ParseCoinInfo(body) {
+			if err := db.Exec(`INSERT INTO coin_info (symbol, name, description, color, website, whitepaper, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7)
+				ON CONFLICT (symbol) DO UPDATE SET name = EXCLUDED.name, description = EXCLUDED.description, color = EXCLUDED.color,
+				website = EXCLUDED.website, whitepaper = EXCLUDED.whitepaper, updated_at = EXCLUDED.updated_at`,
+				ci.Symbol, ci.Name, ci.Description, ci.Color, ci.Website, ci.WhitePaper, b.FetchedAt); err != nil {
+				return res, err
+			}
 		}
 		for _, c := range coins {
 			if err := db.Exec(`INSERT INTO coin_ranks (ts, rank, coin_id, symbol, name, price_usd, market_cap, volume_24h, change_24h, source, supply)
@@ -436,6 +472,59 @@ func rebuildDailyIndex(db *poltergres.ReadWrite, symbol, day string) (int, error
 	return n, db.Exec("INSERT INTO crypto_daily_index (day, symbol, close, n) VALUES ($1,$2,$3,$4) ON CONFLICT (day, symbol) DO UPDATE SET close = EXCLUDED.close, n = EXCLUDED.n", day, symbol, price, n)
 }
 
+// insertQuotes writes a batch of quotes, two hundred rows a statement.
+func insertQuotes(db *poltergres.ReadWrite, ts int64, qs []rates.Quote) error {
+	const per = 200
+	for i := 0; i < len(qs); i += per {
+		end := i + per
+		if end > len(qs) {
+			end = len(qs)
+		}
+		var sb strings.Builder
+		args := make([]any, 0, (end-i)*7)
+		sb.WriteString("INSERT INTO crypto_quotes (ts, exchange, base, quote, price, volume, quote_ts) VALUES ")
+		for j, q := range qs[i:end] {
+			if j > 0 {
+				sb.WriteString(",")
+			}
+			n := len(args)
+			fmt.Fprintf(&sb, "($%d,$%d,$%d,$%d,$%d,$%d,$%d)", n+1, n+2, n+3, n+4, n+5, n+6, n+7)
+			args = append(args, ts, q.Exchange, q.Base, q.QuoteCcy, q.Price, q.Volume, q.At.Unix())
+		}
+		sb.WriteString(" ON CONFLICT (ts, exchange, base, quote) DO UPDATE SET price = EXCLUDED.price, volume = EXCLUDED.volume, quote_ts = EXCLUDED.quote_ts")
+		if err := db.Exec(sb.String(), args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// EURUSD is the ECB's dollars per euro on its newest day (0 when the box has no table yet).
+func EURUSD(db *poltergres.ReadWrite) float64 {
+	rows, err := db.Query("SELECT rate FROM fx_rates WHERE code = 'USD' ORDER BY day DESC LIMIT 1")
+	if err != nil || len(rows.Vals) != 1 || rows.Vals[0][0] == nil {
+		return 0
+	}
+	v, _ := strconv.ParseFloat(*rows.Vals[0][0], 64)
+	return v
+}
+
+// LastPrices is each coin's newest index price from the last half hour before ts: the reference
+// the blend's outlier rule measures against.
+func LastPrices(db *poltergres.ReadWrite, ts int64) map[string]float64 {
+	out := map[string]float64{}
+	rows, err := db.Query(`SELECT DISTINCT ON (symbol) symbol, price FROM crypto_index WHERE ts >= $1 AND ts < $2 ORDER BY symbol, ts DESC`, ts-1800, ts)
+	if err != nil {
+		return out
+	}
+	for _, v := range rows.Vals {
+		if len(v) == 2 && v[0] != nil && v[1] != nil {
+			out[*v[0]], _ = strconv.ParseFloat(*v[1], 64)
+		}
+	}
+	return out
+}
+
 // DailyClose is the box's daily USD close for a symbol on a day, from the venues' closes directly
 // (so the USDT leg can be read before its own index row exists).
 func DailyClose(db *poltergres.ReadWrite, symbol, day string) (float64, int) {
@@ -454,10 +543,12 @@ func DailyClose(db *poltergres.ReadWrite, symbol, day string) (float64, int) {
 	return rates.DailyIndex(closes, symbol, 1)
 }
 
-// MarketsSeen is every (venue, base, quote) quoted in the last two days: the pairs the venues trade
-// for the symbols followed, which is what the daily candles are fetched for.
+// MarketsSeen is every USD and USDT (venue, base, quote) quoted in the last two days: the pairs the
+// venues trade for the symbols followed, which is what the daily candles are fetched for.
 func MarketsSeen(db *poltergres.ReadWrite, now time.Time) []rates.Market {
-	rows, err := db.Query("SELECT DISTINCT exchange, base, quote FROM crypto_quotes WHERE ts >= $1 ORDER BY base, exchange, quote", now.Add(-48*time.Hour).Unix())
+	// the candles fold USD and USDT markets (DailyIndex, FoldBar); the other quote currencies
+	// convert in the live blend only
+	rows, err := db.Query("SELECT DISTINCT exchange, base, quote FROM crypto_quotes WHERE ts >= $1 AND quote IN ('USD','USDT') ORDER BY base, exchange, quote", now.Add(-48*time.Hour).Unix())
 	if err != nil {
 		return nil
 	}

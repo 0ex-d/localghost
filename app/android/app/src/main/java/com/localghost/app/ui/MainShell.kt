@@ -40,6 +40,7 @@ enum class Dest(val label: String, val glyph: String) {
     MEMORIES("MEMORIES", "◇"),
     NEWS("NEWS", "¶"),
     CRYPTO("CRYPTO", "₿"),
+    COIN("COIN", "◈"),
     NOTIFICATIONS("NOTIFICATIONS", "△"),
     HARNESS("BOX STATUS", "◉"),
     SYNC("SYNC", "⇅"),
@@ -129,6 +130,10 @@ fun MainShell(
     var dest by rememberSaveable { mutableStateOf(Dest.HOME) }
     // the story a point of home's brief opens in NEWS (0: none)
     var newsFocus by rememberSaveable { mutableLongStateOf(0L) }
+    // the coin whose page is open, and where it was opened from (‹ and back go there)
+    var coinSym by rememberSaveable { mutableStateOf("BTC") }
+    var coinFrom by rememberSaveable { mutableStateOf(Dest.CRYPTO) }
+    fun openCoin(sym: String, from: Dest) { coinSym = sym; coinFrom = from; dest = Dest.COIN }
     // what a notification opens: a day on MAP, a memory (its id) or "near" in MEMORIES ("" none)
     var mapDay by rememberSaveable { mutableStateOf("") }
     var memFocus by rememberSaveable { mutableStateOf("") }
@@ -171,7 +176,11 @@ fun MainShell(
     LaunchedEffect(orientation) { drawerState.close() }
 
     BackHandler(enabled = drawerState.isOpen || dest != Dest.HOME) {
-        if (drawerState.isOpen) close() else dest = Dest.HOME
+        when {
+            drawerState.isOpen -> close()
+            dest == Dest.COIN -> dest = coinFrom
+            else -> dest = Dest.HOME
+        }
     }
 
     ModalNavigationDrawer(
@@ -194,8 +203,12 @@ fun MainShell(
             Column(Modifier.fillMaxSize()
                 .padding(top = pad.calculateTopPadding())
                 .padding(top = 4.dp)) {
-                TopBar(title = dest.label, onMenu = { open() },
-                    onHome = if (dest != Dest.HOME) ({ dest = Dest.HOME }) else null,
+                TopBar(title = if (dest == Dest.COIN) coinSym else dest.label, onMenu = { open() },
+                    onHome = when (dest) {
+                        Dest.HOME -> null
+                        Dest.COIN -> ({ dest = coinFrom })
+                        else -> ({ dest = Dest.HOME })
+                    },
                     onNewChat = if (dest == Dest.CHAT) onNewConversation else null,
                     chatToggles = dest == Dest.CHAT, incognito = incognito, onToggleIncognito = onToggleIncognito)
 
@@ -209,8 +222,11 @@ fun MainShell(
                             onAsk = { q -> onNewConversation(); onSend(q); dest = Dest.CHAT },
                             onOpenNews = { newsFocus = 0L; dest = Dest.NEWS },
                             onOpenStory = { id -> newsFocus = id; dest = Dest.NEWS },
-                            onOpenCrypto = { dest = Dest.CRYPTO })
-                        Dest.CRYPTO -> CryptoScreen()
+                            onOpenCrypto = { dest = Dest.CRYPTO },
+                            onOpenCoin = { sym -> openCoin(sym, Dest.HOME) },
+                            onOpenTarget = { link -> openTarget(NotifLink.resolve(link, "", "")) })
+                        Dest.CRYPTO -> CryptoScreen(onOpenCoin = { sym -> openCoin(sym, Dest.CRYPTO) })
+                        Dest.COIN -> CoinScreen(coinSym)
                         Dest.CHAT -> ChatScreen(messages, streaming, localModeActive, pendingAttachments,
                             onSend, onStopChat, { showAddSheet = true }, onClearAttachment,
                             brainLabel, brainIsBox, phoneModels, onPickBox, onPickPhoneModel,

@@ -727,6 +727,10 @@ func newsLoop(ctx context.Context, mount, runDir string, produce func(hw.Notific
 		} else if wrote {
 			lg.Info("news brief written", "fn", "newsLoop")
 		}
+		// what the top coins are, read up and written for their pages (coindesc.go)
+		if _, err := coinDescPass(ctx, db, oc, client, now, lg); err != nil {
+			lg.Warn("coin descriptions failed", "fn", "newsLoop", "err", err)
+		}
 		if kind, day, due := digestDue(db, now); due {
 			n, err := postDigest(db, now, kind, day, produce, lg)
 			if err != nil {

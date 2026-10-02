@@ -4504,3 +4504,96 @@ and the phone only.
 
 Tested: `TestNotificationLinkAndWeek`, `TestRemovedFeaturesDropped` (migration 4), app
 `NotifLinkTest`.
+
+## The box's price: a blend of every market, the top 100, coin pages, a nicer roll; memories about me and my people
+
+- The price (`rates.Blend`, `internal/rates/blend.go`): a coin's dollar price from every market it
+  trades in, each market's last price converted through its quote currency (USD as it is; USDT,
+  USDC, EUR, BTC, ETH through the box's own price of that currency, blended first, the euro from
+  the ECB), weighted by the market's 24-hour volume in the coin and a time penalty (1 under 60 s,
+  falling in a straight line to 0.001 at 1,500 s); with more than two markets one past A × the last
+  price (or under it / A) is left out, A 1.05 with 15 markets or more, 1.10 with 10 to 14, 1.15
+  with fewer. A stablecoin is priced from USD and USDT markets only. `BlendAll` works the
+  conversion currencies out first (USDT, USDC, BTC, ETH), then every other coin. The minute and the
+  five-second lane both blend; `crypto_index` keeps the markets and the currencies each price came
+  through (`markets`, `paths`). The old median-and-2% method is gone (`MakeIndex`, `InUSD`,
+  `USDTRate`).
+- The venues give every pair in one answer each, Coinbase's products list
+  (`api.coinbase.com/api/v3/brokerage/market/products?product_type=SPOT`) among them, in place of
+  its pair-by-pair tickers: seven calls a minute. The pairs kept are the followed coins and the
+  conversion currencies in USD, USDT, USDC, EUR, BTC or ETH (Kraken's XETHXXBT and SOLXBT,
+  Bitfinex's UDC, Binance's SOLBTC read too). Quotes go in two hundred rows a statement. The
+  candles stay on USD and USDT markets.
+- The top 100: `tally.Symbols` is the hundred largest on Coinbase's list, stablecoins and wrapped
+  coins too, priced every minute; `tally.HistorySymbols` is the fifty that can be CRYPTO50's, whose
+  hours and minutes are walked back from the venues (the others build theirs from the box's own
+  minutes from the day they joined).
+- A coin's page: `coin_info` keeps Coinbase's description, colour, site and white paper (from the
+  rank list, hourly); `GET /v1/coins/info?symbol=` gives them with the list's rank, cap, supply and
+  volume, the box's price and the blend right now, market by market (price, dollars, volume, age,
+  share, or why left out); `GET /v1/rates/sparks` a week of hourly closes per coin (Redis, ten
+  minutes). The app's COIN page: the price rolling (five seconds for BTC, ETH and SOL), the chart
+  over 1D, 1W, 1M, 1Y or all (a finger on it reads a point), the figures, what the coin is, and
+  where the price comes from with each market's share. CRYPTO lists the hundred with a week's line
+  per row and opens a coin on a tap; home's BTC and ETH rows open theirs. CRYPTO's header is one line.
+- The roll: only the digits that changed roll, the rightmost first, each a beat after, landing
+  with a small overshoot; each glows green or amber and fades; an arrow says which way.
+- Memories about me and my people: a note in MEMORIES (`GET/POST /v1/about`, settings `about_me`);
+  synthd reads it when it changes (`aboutPass`) and keeps facts about me (kind `me`) and one memory
+  per person (kind `person`), and the name it gives (`owner_name`). The distiller writes in the
+  first person ("I…", "My…", never "the user"), and a fact about one of my people joins that
+  person's memory (`PERSON | name | fact`, `notePerson`). MEMORIES has chips by kind: me, people,
+  days, outings, distilled, written by me.
+- LocalGhost knows its name: every chat question starts from "You are LocalGhost… When I say
+  LocalGhost, the ghost or the box, I mean you", the name and the note (clipped); the context and
+  the web findings are introduced in the first person.
+
+Tested: `TestTimePenalty`, `TestBlendWeighsVolumeAndFreshness`, `TestBlendStableOnlyFromDollars`,
+`TestBlendAllConvertsInOrder`, `TestBatchKeepsTheConversionPairs`, `TestParseCoinInfo`,
+`TestFastAsks`, `TestFastIndexAcrossVenues`, `TestBlendThroughConversionPaths` (Postgres: SOL
+through USDT, EUR and BTC, the coin page and its markets), `TestMarketIndexAgainstPostgres` (100
+priced, 50 walked), `TestParseAbout`, `TestIdentityAndDistillPrompt`, `TestNotePerson`; app
+`CoinTextTest`.
+
+## Coins read up and written by the box, memories by name, home kept on the phone, FOR YOU
+
+- What a coin is, written by the box (`cmd/ghost.synthd/coindesc.go`): for each of the top hundred,
+  two a slow pass on the GPU, it reads Wikipedia's summary of the coin's article (found through
+  Wikipedia's search, kept only when it names the coin and is about a cryptocurrency), the coin's
+  own site (its description and paragraphs; an address with a name only, never a bare or local
+  one) and Coinbase's text, and the model writes three or four plain sentences from those: no
+  price, no forecast, no advice, every number one the sources give, the coin named. Kept in
+  `coin_info` (`written`, `written_at`, `written_from`); written again after ninety days, a try that
+  read too little tried again after three. `/v1/coins/info` carries them; the COIN page shows the
+  box's text with "written by your box from Wikipedia, Coinbase and solana.com", Coinbase's line
+  until then. `ghost-cli ghost.synthd news` says "N of 100 coins written".
+- Memories by name: once the box knows the name (the note's `NAME`), the note's memories and the
+  distilled ones are written in the third person ("Vlad prefers…", "Cristina is Vlad's partner…"),
+  so a search for a name finds them; a slip ("the user", "I am", "my", "me") is mended to the
+  name. Without a name, the first person as before. `hw.AboutHash` carries a version
+  (`v2-names`), so the note is made into memories again at synthd's next pass; `namePass` writes
+  the older first-person distilled and people memories again with the name, eight at a time, three
+  batches a pass, on the GPU, a line kept only when it names the person and adds no number (never
+  one edited by hand). Chats start from "I am Vlad; the memories you are given say Vlad where they
+  mean me". Day and outing memories still speak to "you".
+- Home rides along: the notifications poll and the trail's upload answer with `home`
+  (`hw.HomeSnap`: BTC, ETH and SOL with the day's change, the fast lane over the minute, CRYPTO50,
+  the brief and its stories, the day's six most-told), read from Redis (Postgres on a miss); `GET
+  /v1/home` gives the same. The phone keeps the snapshot and the last `/v1/rates` and `/v1/news` it
+  read (`HomeCache`, files under the app's own storage), so HOME, CRYPTO and the lock screen open on
+  the latest at once; the lock screen's quarter-hour refresh reads `/v1/home` (a few kilobytes)
+  instead of the whole news and rates.
+- FOR YOU on home (`hw.ForYouNow`, Redis `hot:foryou` for twenty minutes or until the trail moves a
+  kilometre): places within 10 km of the trail's newest point (six hours at most) ranked by what
+  the person photographs, the new ones first; this date in earlier years (the day story, else the
+  outing, else the day's photos and where), opening the memory or the map on that day; the day's
+  stories that share words with the `me` memories and the distilled titles ("you mention
+  blockchain"), the brief's own left out. FOR YOU stays in the phone's memory, never on its
+  storage.
+
+Tested: `TestMakeHomeSnap`, `TestAboutHashCarriesTheVersion`, `TestInterestTerms`,
+`TestPickStories`, `TestForYouStillFresh`, `TestForYouNow` (Postgres: the days by the local date,
+the stories), `TestParseAbout`, `TestNamed`, `TestNamePromptAndParse`,
+`TestIdentityAndDistillPrompt`, `TestPickWikiTitle`, `TestParseWikiSummary`, `TestSiteText`,
+`TestPublicSite`, `TestCoinDescPromptAndGrounding`, `TestCoinsToWrite` (Postgres); app
+`HomeDataTest`, `CoinTextTest`.

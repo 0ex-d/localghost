@@ -467,7 +467,7 @@ Three plugins is enough to validate the interface, the archive layout, the narra
 
 ## Implementation notes
 
-Written in Go. Plugins are Go packages compiled into the daemon binary. Runtime dependencies are Postgres and the local LLM runtime for narrative generation. Redis holds two copies the phone reads first (hw/hot.go): /v1/rates as it stands, rewritten every minute, and BTC, ETH and SOL from Coinbase's ticker every five seconds (the fast lane, cmd/ghost.tallyd/hot.go). Both are apparitions: gone on a restart, rebuilt from Postgres or the next pass. Events still flow through ghost.noted's Redis, not tallyd's.
+Written in Go. Plugins are Go packages compiled into the daemon binary. Runtime dependencies are Postgres and the local LLM runtime for narrative generation. Redis holds two copies the phone reads first (hw/hot.go): /v1/rates as it stands, rewritten every minute, and BTC, ETH and SOL from every exchange every five seconds (the fast lane, cmd/ghost.tallyd/hot.go). Every coin of the hundred is blended from all its markets (internal/rates/blend.go): volume and freshness weighted, priced in USD, USDT, USDC, EUR, BTC or ETH and converted through the box's own price of that currency. Both are apparitions: gone on a restart, rebuilt from Postgres or the next pass. Events still flow through ghost.noted's Redis, not tallyd's.
 
 Three goroutine groups, matching the other ingestion daemons. Sync workers handle filesystem watches and push endpoints. Parse workers run plugin parse functions on queued sources. Narrator workers run plugin detect+narrate+push functions on queued notable events.
 

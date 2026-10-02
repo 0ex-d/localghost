@@ -331,3 +331,64 @@ func TestBriefNowSaysWhy(t *testing.T) {
 		t.Fatalf("forced, past the age check: %v %q", wrote, why)
 	}
 }
+
+// A fact about one of my people joins their memory; the same fact twice is kept once.
+func TestNotePerson(t *testing.T) {
+	db := pgFresh(t, "lgtest_synthd_person")
+	if err := notePerson(db, "Cristina", "My partner loves the sea.", "chat:1", 1, 1000); err != nil {
+		t.Fatal(err)
+	}
+	if err := notePerson(db, "cristina", "She is learning Greek.", "chat:2", 2, 2000); err != nil {
+		t.Fatal(err)
+	}
+	_ = notePerson(db, "Cristina", "She is learning Greek.", "chat:3", 3, 3000)
+	rows, _ := db.Query("SELECT title, body, kind FROM memories WHERE kind = 'person'")
+	if len(rows.Vals) != 1 || *rows.Vals[0][1] != "My partner loves the sea. She is learning Greek." || *rows.Vals[0][0] != "Cristina" {
+		t.Fatalf("%v", rows.Vals)
+	}
+	if n := peopleNames(db); len(n) != 1 || n[0] != "Cristina" {
+		t.Fatal(n)
+	}
+}
+
+// The coins to write: the top of the newest list, never written or due again; a try is not tried
+// again for three days, a text kept for ninety; the coin page reads what was written.
+func TestCoinsToWrite(t *testing.T) {
+	db := pgFresh(t, "lgtest_synthd_coins")
+	now := time.Unix(1_790_000_000, 0)
+	for i, sym := range []string{"BTC", "ETH", "SOL", "XRP"} {
+		if err := db.Exec("INSERT INTO coin_ranks (ts, rank, coin_id, symbol, name) VALUES ($1,$2,$3,$3,$4)", now.Unix()-3600, i+1, sym, sym+" coin"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = db.Exec("INSERT INTO coin_ranks (ts, rank, coin_id, symbol, name) VALUES ($1,1,'OLD','OLD','old list')", now.Unix()-90000)
+	if err := db.Exec("INSERT INTO coin_info (symbol, name, description, website) VALUES ('BTC','Bitcoin','The first.','https://bitcoin.org')"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := coinsToWrite(db, now)
+	if err != nil || len(got) != 2 || got[0] != [4]string{"BTC", "Bitcoin", "The first.", "https://bitcoin.org"} || got[1][0] != "ETH" || got[1][1] != "ETH coin" {
+		t.Fatalf("%v %v", got, err)
+	}
+	if err := saveCoinText(db, "BTC", "Bitcoin", "Bitcoin is a cryptocurrency.", "Wikipedia, Coinbase", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := markCoinTried(db, "ETH", "ETH coin", now); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := coinsToWrite(db, now); len(got) != 2 || got[0][0] != "SOL" || got[1][0] != "XRP" {
+		t.Fatalf("written and tried are left: %v", got)
+	}
+	if got, _ := coinsToWrite(db, now.Add(4*24*time.Hour)); len(got) != 2 || got[0][0] != "ETH" {
+		t.Fatalf("a try again after three days: %v", got)
+	}
+	if got, _ := coinsToWrite(db, now.Add(91*24*time.Hour)); len(got) != 2 || got[0][0] != "BTC" {
+		t.Fatalf("a text again after ninety: %v", got)
+	}
+	rows, _ := db.Query("SELECT description, written, written_from FROM coin_info WHERE symbol = 'BTC'")
+	if len(rows.Vals) != 1 || *rows.Vals[0][0] != "The first." || *rows.Vals[0][1] != "Bitcoin is a cryptocurrency." || *rows.Vals[0][2] != "Wikipedia, Coinbase" {
+		t.Fatalf("%v", rows.Vals)
+	}
+	if s := coinDescStatus(db); s != "1 of 4 coins written" {
+		t.Fatal(s)
+	}
+}

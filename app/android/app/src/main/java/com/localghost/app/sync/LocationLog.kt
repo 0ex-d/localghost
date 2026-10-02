@@ -429,7 +429,10 @@ object LocationLog {
             val body = JSONObject().put("source", src).put("points", arr)
             if (sealed.length() > 0) body.put("sealed", sealed)
             val code = try {
-                BoxHttp.postJsonCode(ctx, "/v1/locations", body)
+                val (c, answer) = BoxHttp.postJsonCodeBody(ctx, "/v1/locations", body)
+                // home's numbers ride along on the answer (HomeCache)
+                answer?.optJSONObject("home")?.let { com.localghost.app.net.HomeCache.putSnap(ctx, it) }
+                c
             } catch (e: Exception) {
                 android.util.Log.w("LocalGhost", "location flush failed: ${e.message}")
                 noteSend(ctx, "not sent: the box did not answer (${e.javaClass.simpleName})")

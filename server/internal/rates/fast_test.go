@@ -63,14 +63,14 @@ func TestFastIndexAcrossVenues(t *testing.T) {
 		}
 		quotes = append(quotes, qs...)
 	}
-	ix, err := FastIndex(quotes, "BTC", 0.999, now)
+	ix, err := FastIndex(quotes, "BTC", 0.999, 0, now)
 	if err != nil || ix.N != 4 || ix.Price < 99_900 || ix.Price > 100_100 {
 		t.Fatalf("%+v %v", ix, err)
 	}
 	if strings.Join(ix.Used, ",") != "binance,bitfinex,coinbase,kraken" {
 		t.Fatal(ix.Used)
 	}
-	if eth, err := FastIndex(quotes, "ETH", 0.999, now); err != nil || eth.N != 3 {
+	if eth, err := FastIndex(quotes, "ETH", 0.999, 0, now); err != nil || eth.N != 3 {
 		t.Fatalf("%+v %v", eth, err)
 	}
 }

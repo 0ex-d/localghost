@@ -15,7 +15,9 @@ type IndexRow struct {
 	Used      string  `json:"used"`
 	Change24  float64 `json:"change24"`       // per cent against 24 hours before, from the hourly series
 	HasChange bool    `json:"hasChange"`      // false until the series reaches a day back
-	Fast      bool    `json:"fast,omitempty"` // the price is Coinbase's last trade, seconds old (hot.go)
+	Fast      bool    `json:"fast,omitempty"` // the price is the fast lane's, seconds old (hot.go)
+	Markets   int     `json:"markets"`        // markets blended (a venue can have several)
+	Paths     string  `json:"paths"`          // the quote currencies converted from: "USD,USDT,BTC"
 }
 
 // RatesSnapshot is the box's market numbers as they stand: the ECB table of the newest day, the
@@ -78,13 +80,13 @@ func RatesNow(c Querier) (RatesSnapshot, error) {
 			s.FX[*v[1]] = r
 		}
 	}
-	rows, err = c.Query(`SELECT DISTINCT ON (symbol) symbol, ts, price, n, spread, used FROM crypto_index
+	rows, err = c.Query(`SELECT DISTINCT ON (symbol) symbol, ts, price, n, spread, used, markets, paths FROM crypto_index
 		WHERE ts >= (SELECT coalesce(max(ts), 0) - 86400 FROM crypto_index) ORDER BY symbol, ts DESC`)
 	if err != nil {
 		return s, err
 	}
 	for _, v := range rows.Vals {
-		if len(v) < 6 || v[0] == nil {
+		if len(v) < 8 || v[0] == nil {
 			continue
 		}
 		var r IndexRow
@@ -93,6 +95,8 @@ func RatesNow(c Querier) (RatesSnapshot, error) {
 		r.N, _ = strconv.Atoi(deref(v[3]))
 		r.Spread, _ = strconv.ParseFloat(deref(v[4]), 64)
 		r.Used = deref(v[5])
+		r.Markets, _ = strconv.Atoi(deref(v[6]))
+		r.Paths = deref(v[7])
 		s.Index[*v[0]] = r
 	}
 	// the change over 24 hours, from the hourly series

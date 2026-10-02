@@ -5,7 +5,8 @@ package rates
 // per pair where it does not (Coinbase, Bitstamp, OKX's single ticker; its all-pairs answer is
 // hundreds of instruments). Gemini is not asked: its feed gives no volume, so the index leaves it
 // out anyway. The USDT/USD leg is not asked either: it moves in the fourth decimal, and the
-// minute's rate folds Binance's and OKX's USDT prices into dollars.
+// minute's rate folds Binance's and OKX's USDT prices into dollars. Each coin is blended the
+// minute's way (Blend).
 
 import (
 	"net/url"
@@ -76,11 +77,12 @@ func ParseFast(a FastAsk, body []byte, want map[string]bool, fetched time.Time) 
 	return []Quote{q}, nil
 }
 
-// FastIndex is a symbol's price from the fast lane's quotes, made the minute's way (MakeIndex),
-// USDT prices folded into dollars at usdt.
-func FastIndex(quotes []Quote, symbol string, usdt float64, now time.Time) (Index, error) {
+// FastIndex is a symbol's price from the fast lane's quotes, blended the minute's way (Blend),
+// USDT prices converted at usdt, outliers against prev (the coin's last price, 0 for none).
+func FastIndex(quotes []Quote, symbol string, usdt, prev float64, now time.Time) (Index, error) {
 	if usdt <= 0 {
 		usdt = 1
 	}
-	return MakeIndex(InUSD(quotes, symbol, usdt), now)
+	ix, _, err := Blend(quotes, symbol, map[string]float64{"USD": 1, "USDT": usdt}, prev, now)
+	return ix, err
 }

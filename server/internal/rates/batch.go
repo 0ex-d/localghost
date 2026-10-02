@@ -13,12 +13,16 @@ import (
 	"time"
 )
 
-// BatchExchanges are the venues asked for everything at once.
-var BatchExchanges = []string{"binance", "okx", "kraken", "bitfinex", "bitstamp", "gemini"}
+// BatchExchanges are the venues asked for everything at once. Coinbase's every product comes in
+// one call too (Advanced Trade's public products list: price and 24-hour volume per pair), in
+// place of the eleven pair-by-pair tickers it used to take.
+var BatchExchanges = []string{"binance", "okx", "kraken", "bitfinex", "bitstamp", "gemini", "coinbase"}
 
 // BatchURL is the venue's all-pairs ticker call.
 func BatchURL(exchange string) string {
 	switch exchange {
+	case "coinbase":
+		return "https://api.coinbase.com/api/v3/brokerage/market/products?product_type=SPOT"
 	case "binance": // MINI: the price, the volume and the close time, a third of the full answer
 		return "https://api.binance.com/api/v3/ticker/24hr?type=MINI"
 	case "okx":
@@ -35,12 +39,10 @@ func BatchURL(exchange string) string {
 	return ""
 }
 
-// CoinbaseTop is how many of the largest symbols Coinbase is asked for one by one.
-const CoinbaseTop = 10
-
-// ParseBatch reads a venue's all-pairs answer and keeps the pairs for the symbols wanted (USD and
-// USDT quotes), plus the USDT/USD leg. fetched is when it was fetched; a venue that stamps its
-// quotes keeps its own time.
+// ParseBatch reads a venue's all-pairs answer and keeps the pairs for the symbols wanted in any
+// currency a price can be converted from (ConvQuotes: USD, USDT, USDC, EUR, BTC, ETH), plus the
+// conversion legs themselves (USDT, USDC, BTC and ETH in those). fetched is when it was fetched;
+// a venue that stamps its quotes keeps its own time.
 func ParseBatch(exchange string, body []byte, want map[string]bool, fetched time.Time) ([]Quote, error) {
 	num := func(v any) float64 {
 		switch x := v.(type) {
@@ -53,13 +55,10 @@ func ParseBatch(exchange string, body []byte, want map[string]bool, fetched time
 		return 0
 	}
 	keep := func(base, quote string) bool {
-		if base == "" || (quote != "USD" && quote != "USDT") {
+		if base == "" || base == quote || !IsConvQuote(quote) {
 			return false
 		}
-		if base == "USDT" {
-			return quote == "USD"
-		}
-		return want[base]
+		return want[base] || IsConvQuote(base)
 	}
 	var out []Quote
 	add := func(base, quote string, price, vol float64, at time.Time) {
@@ -68,6 +67,24 @@ func ParseBatch(exchange string, body []byte, want map[string]bool, fetched time
 		}
 	}
 	switch exchange {
+	case "coinbase": // {products:[{base_currency_id, quote_currency_id, price, volume_24h, status, trading_disabled}]}
+		var obj struct {
+			Products []map[string]any `json:"products"`
+		}
+		if err := json.Unmarshal(body, &obj); err != nil {
+			return nil, err
+		}
+		for _, r := range obj.Products {
+			if off, _ := r["trading_disabled"].(bool); off {
+				continue
+			}
+			if st, _ := r["status"].(string); st != "" && st != "online" {
+				continue
+			}
+			base, _ := r["base_currency_id"].(string)
+			quote, _ := r["quote_currency_id"].(string)
+			add(strings.ToUpper(base), strings.ToUpper(quote), num(r["price"]), num(r["volume_24h"]), fetched)
+		}
 	case "binance": // [{symbol:"BTCUSDT", lastPrice, volume, closeTime}]
 		var rows []map[string]any
 		if err := json.Unmarshal(body, &rows); err != nil {
@@ -181,10 +198,11 @@ func (e exchangeError) Error() string { return string(e) }
 func errUnknownExchange(ex string) error { return exchangeError("unknown exchange " + ex) }
 func errNoPairs(ex string) error         { return exchangeError(ex + ": no pair in the answer") }
 
-// splitSuffix reads "SOLUSDT" into SOL/USDT and "SOLUSD" into SOL/USD (the longer quote first).
+// splitSuffix reads "SOLUSDT" into SOL/USDT, "SOLUSD" into SOL/USD, "ETHBTC" into ETH/BTC (the
+// longer quote first).
 func splitSuffix(sym, prefer string) (base, quote string) {
 	sym = strings.ToUpper(sym)
-	for _, q := range []string{"USDT", "USD"} {
+	for _, q := range []string{"USDT", "USDC", "USD", "EUR", "BTC", "ETH"} {
 		if prefer == "USD" && q == "USDT" {
 			continue // Gemini pairs are USD; "USDTUSD" is the stablecoin's own pair
 		}
@@ -198,19 +216,22 @@ func splitSuffix(sym, prefer string) (base, quote string) {
 // krakenAssets are Kraken's own spellings for a few old coins.
 var krakenAssets = map[string]string{"XBT": "BTC", "XDG": "DOGE", "XXBT": "BTC", "XETH": "ETH", "XXDG": "DOGE", "XXRP": "XRP", "XLTC": "LTC", "XXLM": "XLM", "XXMR": "XMR", "XETC": "ETC", "XZEC": "ZEC", "XMLN": "MLN", "XREP": "REP"}
 
-// KrakenPair reads a Kraken result key ("XXBTZUSD", "SOLUSD", "USDTZUSD") into base and quote
-// ("" when it is not a USD or USDT pair).
+// krakenQuotes are Kraken's quote spellings, longest first ("XETHXXBT" is ETH/BTC, "XXBTZEUR"
+// BTC/EUR, "SOLETH" SOL/ETH).
+var krakenQuotes = []struct{ suffix, quote string }{
+	{"ZUSD", "USD"}, {"ZEUR", "EUR"}, {"XXBT", "BTC"}, {"XETH", "ETH"}, {"USDT", "USDT"}, {"USDC", "USDC"},
+	{"XBT", "BTC"}, {"USD", "USD"}, {"EUR", "EUR"}, {"ETH", "ETH"},
+}
+
+// KrakenPair reads a Kraken result key ("XXBTZUSD", "SOLUSD", "USDTZUSD", "XETHXXBT") into base and
+// quote ("" when the quote is not one a price converts from).
 func KrakenPair(key string) (base, quote string) {
 	key = strings.ToUpper(key)
-	switch {
-	case strings.HasSuffix(key, "ZUSD"):
-		base, quote = key[:len(key)-4], "USD"
-	case strings.HasSuffix(key, "USDT"):
-		base, quote = key[:len(key)-4], "USDT"
-	case strings.HasSuffix(key, "USD"):
-		base, quote = key[:len(key)-3], "USD"
-	default:
-		return "", ""
+	for _, q := range krakenQuotes {
+		if strings.HasSuffix(key, q.suffix) && len(key) > len(q.suffix) {
+			base, quote = key[:len(key)-len(q.suffix)], q.quote
+			break
+		}
 	}
 	if base == "" {
 		return "", ""
@@ -221,8 +242,8 @@ func KrakenPair(key string) (base, quote string) {
 	return base, quote
 }
 
-// bitfinexPair reads "tBTCUSD", "tSOLUST", "tUSTUSD" (UST is Bitfinex's USDT; a colon separates
-// long names, "tMATIC:USD").
+// bitfinexPair reads "tBTCUSD", "tSOLUST", "tUSTUSD", "tETHBTC" (UST is Bitfinex's USDT, UDC its
+// USDC; a colon separates long names, "tMATIC:USD").
 func bitfinexPair(sym string) (base, quote string) {
 	if !strings.HasPrefix(sym, "t") {
 		return "", ""
@@ -231,20 +252,22 @@ func bitfinexPair(sym string) (base, quote string) {
 	if b, q, ok := strings.Cut(s, ":"); ok {
 		base, quote = b, q
 	} else {
-		for _, q := range []string{"UST", "USD"} {
+		for _, q := range []string{"UST", "UDC", "USD", "EUR", "BTC", "ETH"} {
 			if strings.HasSuffix(s, q) && len(s) > len(q) {
 				base, quote = s[:len(s)-len(q)], q
 				break
 			}
 		}
 	}
-	if quote == "UST" {
-		quote = "USDT"
+	// Bitfinex's own names: UST is USDT, UDC is USDC
+	fix := map[string]string{"UST": "USDT", "UDC": "USDC"}
+	if f, ok := fix[quote]; ok {
+		quote = f
 	}
-	if base == "UST" {
-		base = "USDT"
+	if f, ok := fix[base]; ok {
+		base = f
 	}
-	if quote != "USD" && quote != "USDT" {
+	if !IsConvQuote(quote) {
 		return "", ""
 	}
 	return base, quote

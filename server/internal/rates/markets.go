@@ -478,45 +478,6 @@ func filteredMean(vals []float64) (float64, int) {
 	return sum / float64(n), n
 }
 
-// USDTRate is the dollar price of one USDT from the fresh USDT/USD quotes: their median, or 1
-// (and false) when none is fresh.
-func USDTRate(quotes []Quote, now time.Time) (float64, bool) {
-	var ps []float64
-	for _, q := range quotes {
-		if q.Base == "USDT" && q.QuoteCcy == "USD" && q.Price > 0 && now.Sub(q.At) <= staleAfter {
-			ps = append(ps, q.Price)
-		}
-	}
-	if len(ps) == 0 {
-		return 1, false
-	}
-	sort.Float64s(ps)
-	if len(ps)%2 == 1 {
-		return ps[len(ps)/2], true
-	}
-	return (ps[len(ps)/2-1] + ps[len(ps)/2]) / 2, true
-}
-
-// InUSD folds a symbol's quotes into dollars: a USDT-quoted price times the USDT/USD rate.
-func InUSD(quotes []Quote, symbol string, usdt float64) []Quote {
-	var out []Quote
-	for _, q := range quotes {
-		if q.Base != symbol {
-			continue
-		}
-		switch q.QuoteCcy {
-		case "USD":
-			out = append(out, q)
-		case "USDT":
-			c := q
-			c.Price = q.Price * usdt
-			c.QuoteCcy = "USD"
-			out = append(out, c)
-		}
-	}
-	return out
-}
-
 // DailyIndex is one day's USD close for a symbol from the venues' closes: the median, USDT closes
 // folded with the day's USDT/USD close (1 when the day has none).
 func DailyIndex(closes map[Market]float64, symbol string, usdtClose float64) (float64, int) {

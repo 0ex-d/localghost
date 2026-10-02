@@ -74,7 +74,11 @@ func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 		s.appearsDown(w)
 		return
 	}
-	writeJSON(w, map[string]any{"available": true, "notifications": batch})
+	out := map[string]any{"available": true, "notifications": batch}
+	if snap, ok := s.homeSnap(mounted); ok {
+		out["home"] = snap // home's numbers ride along (home.go)
+	}
+	writeJSON(w, out)
 }
 
 // appearsDown emits a bare 502; nginx proxy_intercept_errors + error_page maps it to the one fixed

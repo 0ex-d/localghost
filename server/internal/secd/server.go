@@ -285,6 +285,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/news/brief", s.handleNewsBrief)              // the day's brief written now (home's button)
 	mux.HandleFunc("/v1/rates", s.handleRates)                       // the ECB table, the index per symbol, the rank list
 	mux.HandleFunc("/v1/rates/fast", s.handleRatesFast)              // BTC, ETH, SOL every five seconds, from Redis
+	mux.HandleFunc("/v1/rates/sparks", s.handleRatesSparks)          // a week of hourly closes per coin, for CRYPTO
+	mux.HandleFunc("/v1/coins/info", s.handleCoinInfo)               // one coin's page
+	mux.HandleFunc("/v1/home", s.handleHome)                         // home's numbers, the brief and FOR YOU
+	mux.HandleFunc("/v1/about", s.handleAbout)                       // the note about me and my people
 	mux.HandleFunc("/v1/rates/history", s.handleRatesHistory)        // a symbol's daily closes or a currency's daily rate
 	mux.HandleFunc("/v1/rates/series", s.handleRatesSeries)          // every minute for a week, every hour for thirty days
 	mux.HandleFunc("/v1/feeds/status", s.handleFeedsStatus)          // how each feed is doing, for Box Status

@@ -423,6 +423,8 @@ func main() {
 			}
 			input = block + "\n\nUsing the context above only where it is actually relevant (say which source when you use one), " + ask + "\n" + q.Prompt
 		}
+		// who the box is and who is asking: "LocalGhost" in a question is the box itself
+		input = chatIdentity(mount) + "\n\n" + input
 		// Persist the question FIRST (incognito conversations never touch the tables), then the
 		// answer's row, so the answer is the box's from here on (answers.go): the chat id goes to
 		// the phone in the first event, and the generation no longer dies with the connection.
@@ -707,6 +709,7 @@ func main() {
 			if block := formatContext(items); block != "" {
 				input = block + "\n\nUsing the context above only where it is actually relevant, answer:\n" + q.Prompt
 			}
+			input = chatIdentity(mount) + "\n\n" + input
 			resp, err := oc.Infer(oracle.Request{
 				Capability: "chat",
 				Class:      oracle.ClassLocalSmall,
@@ -923,6 +926,9 @@ func main() {
 				return ctlsock.Response{OK: false, Err: err.Error()}, nil
 			}
 			out["news"] = st
+			if c := coinDescStatus(db); c != "" {
+				out["coins"] = c // the coin pages' descriptions (coindesc.go)
+			}
 			data, _ := json.Marshal(out)
 			return ctlsock.Response{OK: true, Data: data}, nil
 		})
@@ -1103,7 +1109,7 @@ func formatContext(items []ctxItem) string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("Context from the user's personal archive (retrieved automatically, may be irrelevant):")
+	b.WriteString("Context from my archive (found automatically, may be irrelevant):")
 	wrote := false
 	for _, it := range items {
 		if it.Source == "sample" {
@@ -1346,7 +1352,7 @@ func formatWeb(hits []webHit) string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("\n\nFound on the web by the user's phone for this question (this box has no internet; these are the only outside facts available). Cite by number, e.g. [2], and by site name, whenever you use one; prefer a dated figure to an undated page; say when the findings do not settle the question.")
+	b.WriteString("\n\nFound on the web by my phone for this question (this box has no internet; these are the only outside facts available). Cite by number, e.g. [2], and by site name, whenever you use one; prefer a dated figure to an undated page; say when the findings do not settle the question.")
 	for _, h := range hits {
 		if h.Kind == "note" {
 			b.WriteString(" Some pages were read by the phone's own small model and come as its NOTES with a verbatim QUOTE from the page: trust the quote over the notes where they differ, and treat a note nothing else supports with care.")
@@ -1489,6 +1495,17 @@ func distillLoop(ctx context.Context, mount, runDir string, lg *slog.Logger) {
 			db = poltergres.NewReadWrite(hw.SocketForMount(mount), cfg.Postgres.Port,
 				cfg.Postgres.RWUser, cfg.Postgres.RWPass, cfg.Postgres.Name)
 		}
+		// the note about me and my people, when it changed: before the journal, so the names it
+		// gives are known when the entries are read
+		if an, aerr := aboutPass(db, oc, lg); aerr != nil {
+			lg.Warn("about note pass failed", "fn", "distillLoop", "err", aerr)
+		} else if an > 0 {
+			lg.Info("about note made into memories", "fn", "distillLoop", "memories", an)
+		}
+		// the memories made before the box knew the name, written again with it
+		if _, nerr := namePass(db, oc, lg); nerr != nil {
+			lg.Warn("name pass failed", "fn", "distillLoop", "err", nerr)
+		}
 		n, err := distillPass(db, oc, lg)
 		if err != nil {
 			lg.Warn("distill pass failed, will reconnect next tick", "fn", "distillLoop", "err", err)
@@ -1556,6 +1573,7 @@ func distillPass(db *poltergres.ReadWrite, oc *oracle.Client, lg *slog.Logger) (
 		return 0, err
 	}
 	written := 0
+	owner, people := setting(db, ownerKey), peopleNames(db)
 	for _, v := range rows.Vals {
 		if len(v) < 5 || v[0] == nil || v[2] == nil {
 			continue
@@ -1571,9 +1589,7 @@ func distillPass(db *poltergres.ReadWrite, oc *oracle.Client, lg *slog.Logger) (
 		resp, ierr := oc.Infer(oracle.Request{
 			Capability: "summarize",
 			Priority:   oracle.PriorityBackground,
-			Input: "From this journal entry, extract up to 3 durable facts, preferences, plans, or events about the USER worth remembering long-term. " +
-				"One per line, format exactly: TITLE | one-sentence body. Only genuinely durable things , a single routine photo or a pleasantry is usually NOTHING. " +
-				"If nothing is worth remembering, reply with exactly: NONE\n\n" + title + "\n\n" + body,
+			Input:      distillPrompt(owner, people, title, body),
 		})
 		if ierr != nil {
 			lg.Warn("distill inference failed, entry left for a later pass", "fn", "distillPass", "ref", ref, "err", ierr)
@@ -1589,12 +1605,20 @@ func distillPass(db *poltergres.ReadWrite, oc *oracle.Client, lg *slog.Logger) (
 			if line == "" || strings.EqualFold(line, "NONE") {
 				continue
 			}
+			// one of my people: their own memory, one per person, the facts added to it
+			if p := strings.SplitN(line, "|", 3); len(p) == 3 && strings.EqualFold(strings.TrimSpace(p[0]), "PERSON") {
+				if err := notePerson(db, strings.TrimSpace(p[1]), named(strings.TrimSpace(p[2]), owner), ref, srcChat, now); err != nil {
+					return written, err
+				}
+				written++
+				continue
+			}
 			parts := strings.SplitN(line, "|", 2)
 			if len(parts) != 2 {
 				continue
 			}
-			t := strings.TrimSpace(parts[0])
-			b := strings.TrimSpace(parts[1])
+			t := named(strings.TrimSpace(parts[0]), owner)
+			b := named(strings.TrimSpace(parts[1]), owner)
 			if t == "" || b == "" || len(t) > 120 || len(b) > 500 {
 				continue
 			}

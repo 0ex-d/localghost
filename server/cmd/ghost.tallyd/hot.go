@@ -100,7 +100,7 @@ func (f *fastState) snapshot() map[string]any {
 
 // fastLoop asks every venue that weighs in the index for the fast coins every five seconds, the
 // venues side by side (each venue's calls one after the other), makes each coin's index the
-// minute's way and puts it in Redis. A coin no venue answered for keeps its last price until it
+// minute's way (rates.Blend) and puts it in Redis. A coin no venue answered for keeps its last price until it
 // is too old to use (hw.FastFresh). A minute of the lane is one fetch-log line per venue.
 func fastLoop(ctx context.Context, h *hotRedis, fs *fastState, lg *slog.Logger) {
 	client := egress.NewKeepAlive(2)
@@ -206,11 +206,15 @@ func fastLoop(ctx context.Context, h *hotRedis, fs *fastState, lg *slog.Logger) 
 			made := 0
 			stamp := time.Now()
 			for _, sym := range hw.FastSymbols {
-				ix, err := rates.FastIndex(quotes, sym, usdt, stamp)
+				prev := last.Prices[sym].Price
+				if prev <= 0 {
+					prev = doc.Index[sym].Price
+				}
+				ix, err := rates.FastIndex(quotes, sym, usdt, prev, stamp)
 				if err != nil {
 					continue
 				}
-				last.Prices[sym] = hw.FastPrice{Price: ix.Price, At: stamp.UnixMilli(), N: ix.N, Used: ix.Used, Spread: ix.Spread}
+				last.Prices[sym] = hw.FastPrice{Price: ix.Price, At: stamp.UnixMilli(), N: ix.N, Used: ix.Used, Spread: ix.Spread, Markets: ix.Markets, Paths: ix.Paths}
 				made++
 			}
 			if made == 0 {

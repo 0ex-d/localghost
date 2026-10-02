@@ -668,6 +668,7 @@ object BoxClient {
         if (now - NotifyState.lastPostedAt(ctx) < CADENCE_MS) return emptyList()
         return try {
             val r = BoxHttp.getJson(ctx, "/v1/notifications")
+            HomeCache.putSnap(ctx, r.optJSONObject("home")) // home's numbers ride along
             val a = r.optJSONArray("notifications") ?: return emptyList()
             val out = (0 until a.length()).mapNotNull { i ->
                 val o = a.optJSONObject(i) ?: return@mapNotNull null
@@ -1214,11 +1215,19 @@ object BoxClient {
     data class News(val stories: List<NewsStory>, val lastFetch: Long, val lastDigest: Long, val brief: String = "", val briefAt: Long = 0,
                     val briefStories: List<Long> = emptyList())
 
-    /** The stories since a time (/v1/news); null when unreachable. */
-    suspend fun news(ctx: Context, since: Long = 0): News? = try {
+    /** The stories since a time (/v1/news); null when unreachable. [keep]: home's read, kept on
+     *  the phone so home opens on it next time (HomeCache). */
+    suspend fun news(ctx: Context, since: Long = 0, keep: Boolean = false): News? = try {
         val r = BoxHttp.getJson(ctx, "/v1/news" + (if (since > 0) "?since=$since" else ""))
+        val n = newsFrom(r)
+        if (keep && r.has("stories")) HomeCache.putNews(ctx, r)
+        n
+    } catch (_: Exception) { null }
+
+    /** /v1/news's answer read (also the copy HomeCache keeps). */
+    fun newsFrom(r: org.json.JSONObject): News {
         val a = r.optJSONArray("stories") ?: org.json.JSONArray()
-        News((0 until a.length()).mapNotNull { i ->
+        return News((0 until a.length()).mapNotNull { i ->
             val o = a.optJSONObject(i) ?: return@mapNotNull null
             val ia = o.optJSONArray("items") ?: org.json.JSONArray()
             NewsStory(o.optLong("id"), o.optString("title"), o.optString("summary"), o.optInt("sources"),
@@ -1229,19 +1238,29 @@ object BoxClient {
                 })
         }, r.optLong("lastFetch"), r.optLong("lastDigest"), r.optString("brief"), r.optLong("briefAt"),
             r.optJSONArray("briefStories")?.let { b -> (0 until b.length()).map { b.optLong(it) } } ?: emptyList())
-    } catch (_: Exception) { null }
+    }
 
     /** [supply]: Coinbase's circulating supply, so the cap can follow the box's own price. */
     data class CoinRow(val rank: Int, val symbol: String, val name: String, val priceUsd: Double, val marketCap: Double, val change24: Double, val supply: Double = 0.0)
     /** The box's USD price of one symbol and how it was made. */
-    data class IndexRow(val symbol: String, val price: Double, val at: Long, val n: Int, val spread: Double, val used: String, val change24: Double? = null)
+    data class IndexRow(val symbol: String, val price: Double, val at: Long, val n: Int, val spread: Double, val used: String, val change24: Double? = null,
+                        /** markets blended (a venue can have several) and the currencies they were converted from */
+                        val markets: Int = 0, val paths: String = "")
     /** The market index: one number for crypto as a whole (the fifty largest, weighted by last month's volume). */
     data class Market(val code: String, val value: Double, val dayChange: Double, val constituents: Int, val priced: Int, val month: String)
     data class Rates(val fxDay: String, val fx: Map<String, Double>, val index: List<IndexRow>, val btcUsd: Double, val btcAt: Long, val btcN: Int, val btcSpread: Double, val btcUsed: String, val ranksAt: Long, val ranks: List<CoinRow>, val ranksSource: String, val days: Int, val fxDays: Int, val market: Market?)
 
-    /** The box's market numbers (/v1/rates); null when unreachable. */
-    suspend fun rates(ctx: Context): Rates? = try {
+    /** The box's market numbers (/v1/rates); null when unreachable. [keep]: kept on the phone for
+     *  home and CRYPTO to open on (HomeCache). */
+    suspend fun rates(ctx: Context, keep: Boolean = false): Rates? = try {
         val r = BoxHttp.getJson(ctx, "/v1/rates")
+        val out = ratesFrom(r)
+        if (keep && r.has("index")) HomeCache.putRates(ctx, r)
+        out
+    } catch (_: Exception) { null }
+
+    /** /v1/rates's answer read (also the copy HomeCache keeps). */
+    fun ratesFrom(r: org.json.JSONObject): Rates {
         val fx = HashMap<String, Double>()
         r.optJSONObject("fx")?.let { o -> o.keys().forEach { k -> fx[k] = o.optDouble(k) } }
         val ra = r.optJSONArray("ranks") ?: org.json.JSONArray()
@@ -1250,17 +1269,23 @@ object BoxClient {
             o.keys().forEach { sym ->
                 val row = o.optJSONObject(sym) ?: return@forEach
                 index.add(IndexRow(sym, row.optDouble("price", 0.0), row.optLong("at"), row.optInt("n"), row.optDouble("spread", 0.0), row.optString("used"),
-                    if (row.optBoolean("hasChange")) row.optDouble("change24", 0.0) else null))
+                    if (row.optBoolean("hasChange")) row.optDouble("change24", 0.0) else null, row.optInt("markets"), row.optString("paths")))
             }
         }
         index.sortBy { it.symbol }
-        Rates(r.optString("fxDay"), fx, index, r.optDouble("btcUsd", 0.0), r.optLong("btcAt"), r.optInt("btcN"), r.optDouble("btcSpread", 0.0), r.optString("btcUsed"),
+        return Rates(r.optString("fxDay"), fx, index, r.optDouble("btcUsd", 0.0), r.optLong("btcAt"), r.optInt("btcN"), r.optDouble("btcSpread", 0.0), r.optString("btcUsed"),
             r.optLong("ranksAt"), (0 until ra.length()).mapNotNull { i ->
                 val o = ra.optJSONObject(i) ?: return@mapNotNull null
                 CoinRow(o.optInt("rank"), o.optString("symbol"), o.optString("name"), o.optDouble("priceUsd", 0.0), o.optDouble("marketCap", 0.0), o.optDouble("change24", 0.0),
                     o.optDouble("supply", 0.0))
             }, r.optString("ranksSource"), r.optInt("days"), r.optInt("fxDays"),
             r.optJSONObject("market")?.let { m -> Market(m.optString("code"), m.optDouble("value", 0.0), m.optDouble("dayChange", 0.0), m.optInt("constituents"), m.optInt("priced"), m.optString("month")) })
+    }
+
+    /** Home as it stands (/v1/home): the prices, CRYPTO50, the brief, the top stories and FOR YOU;
+     *  kept (HomeCache). Null when unreachable. */
+    suspend fun home(ctx: Context): HomeData.Snap? = try {
+        HomeCache.putSnap(ctx, BoxHttp.getJson(ctx, "/v1/home"))
     } catch (_: Exception) { null }
 
     /** The fast lane's last pass: when (unix ms; 0 when quiet), and each coin's price, 24-hour
@@ -1284,6 +1309,88 @@ object BoxClient {
             }
         }
         Fast(r.optLong("at"), prices, venues)
+    } catch (_: Exception) { null }
+
+    /** One market's part in a coin's price: its price in the quote currency and in dollars, its
+     *  24-hour volume in the coin, how old, its share of the price, or why it was left out. */
+    data class CoinMarket(val exchange: String, val quote: String, val price: Double, val usd: Double, val volume: Double,
+                          val ageS: Long, val weight: Double, val out: String)
+    /** A coin's page (/v1/coins/info). */
+    data class CoinPage(val symbol: String, val name: String, val rank: Int, val description: String, val color: String,
+                        val website: String, val whitepaper: String, val listPrice: Double, val marketCap: Double, val supply: Double,
+                        val volume24: Double, val change24: Double, val index: IndexRow?, val markets: List<CoinMarket>,
+                        /** what the box wrote about it from what it read, when, and from which sources ("Wikipedia, Coinbase, solana.com") */
+                        val written: String = "", val writtenFrom: String = "", val writtenAt: Long = 0)
+
+    suspend fun coinPage(ctx: Context, symbol: String): CoinPage? = try {
+        val r = BoxHttp.getJson(ctx, "/v1/coins/info?symbol=" + java.net.URLEncoder.encode(symbol, "UTF-8"))
+        val ix = r.optJSONObject("index")?.let { o ->
+            IndexRow(symbol, o.optDouble("price", 0.0), o.optLong("at"), o.optInt("n"), o.optDouble("spread", 0.0), o.optString("used"),
+                if (o.optBoolean("hasChange")) o.optDouble("change24", 0.0) else null, o.optInt("markets"), o.optString("paths"))
+        }
+        val ma = r.optJSONArray("markets") ?: org.json.JSONArray()
+        CoinPage(r.optString("symbol", symbol), r.optString("name", symbol), r.optInt("rank"), r.optString("description"), r.optString("color"),
+            r.optString("website"), r.optString("whitepaper"), r.optDouble("listPrice", 0.0), r.optDouble("marketCap", 0.0),
+            r.optDouble("supply", 0.0), r.optDouble("volume24", 0.0), r.optDouble("change24", 0.0), ix,
+            (0 until ma.length()).mapNotNull { i ->
+                val o = ma.optJSONObject(i) ?: return@mapNotNull null
+                CoinMarket(o.optString("exchange"), o.optString("quote"), o.optDouble("price", 0.0), o.optDouble("usd", 0.0),
+                    o.optDouble("volume", 0.0), o.optLong("ageS"), o.optDouble("weight", 0.0), o.optString("out"))
+            }, r.optString("written"), r.optString("writtenFrom"), r.optLong("writtenAt"))
+    } catch (_: Exception) { null }
+
+    /** One point of a price series: when (unix s) and the close in dollars. */
+    data class PricePoint(val t: Long, val close: Double)
+
+    /** A coin's price every minute (res "1m", up to a week) or hour ("1h", up to thirty days), oldest first. */
+    suspend fun priceSeries(ctx: Context, code: String, res: String, hours: Int): List<PricePoint>? = try {
+        val r = BoxHttp.getJson(ctx, "/v1/rates/series?code=" + java.net.URLEncoder.encode(code, "UTF-8") + "&res=$res&hours=$hours")
+        val a = r.optJSONArray("points") ?: org.json.JSONArray()
+        (0 until a.length()).mapNotNull { i ->
+            val o = a.optJSONObject(i) ?: return@mapNotNull null
+            val c = o.optDouble("c", 0.0)
+            if (c > 0) PricePoint(o.optLong("ts"), c) else null
+        }
+    } catch (_: Exception) { null }
+
+    /** A coin's daily closes, oldest first (the box's daily index, back through the years). */
+    suspend fun priceDays(ctx: Context, code: String, days: Int): List<PricePoint>? = try {
+        val r = BoxHttp.getJson(ctx, "/v1/rates/history?code=" + java.net.URLEncoder.encode(code, "UTF-8") + "&days=$days")
+        val a = r.optJSONArray("days") ?: org.json.JSONArray()
+        val fmt = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }
+        (0 until a.length()).mapNotNull { i ->
+            val o = a.optJSONObject(i) ?: return@mapNotNull null
+            val c = o.optDouble("close", 0.0)
+            val t = runCatching { fmt.parse(o.optString("day"))!!.time / 1000 }.getOrNull() ?: return@mapNotNull null
+            if (c > 0) PricePoint(t, c) else null
+        }.sortedBy { it.t }
+    } catch (_: Exception) { null }
+
+    /** A week of hourly closes for every coin, for CRYPTO's rows (/v1/rates/sparks). */
+    suspend fun sparks(ctx: Context): Map<String, List<Double>>? = try {
+        val r = BoxHttp.getJson(ctx, "/v1/rates/sparks")
+        val out = HashMap<String, List<Double>>()
+        r.optJSONObject("sparks")?.let { o ->
+            o.keys().forEach { k ->
+                val a = o.optJSONArray(k) ?: return@forEach
+                out[k] = (0 until a.length()).map { a.optDouble(it, 0.0) }.filter { it > 0 }
+            }
+        }
+        out
+    } catch (_: Exception) { null }
+
+    /** The note about me and my people (/v1/about): what it says, the name it gives, and how many
+     *  memories the box made from it; pending while the box has not read this version. */
+    data class About(val text: String, val updatedAt: Long, val name: String, val me: Int, val people: Int, val pending: Boolean)
+
+    suspend fun about(ctx: Context): About? = try {
+        val r = BoxHttp.getJson(ctx, "/v1/about")
+        About(r.optString("text"), r.optLong("updatedAt"), r.optString("name"), r.optInt("me"), r.optInt("people"), r.optBoolean("pending"))
+    } catch (_: Exception) { null }
+
+    suspend fun saveAbout(ctx: Context, text: String): About? = try {
+        val r = BoxHttp.postJson(ctx, "/v1/about", org.json.JSONObject().put("text", text))
+        About(r.optString("text"), r.optLong("updatedAt"), r.optString("name"), r.optInt("me"), r.optInt("people"), r.optBoolean("pending"))
     } catch (_: Exception) { null }
 
     /** What "write the brief now" did: written, or why not, and the brief as it stands. */

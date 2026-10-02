@@ -215,6 +215,26 @@ object BoxHttp {
         }
     }
 
+    /** POST a JSON body and return the HTTP status and, on a 2xx, the answer's JSON (null when it
+     *  has none or is not JSON): the locations upload, whose 202 carries home's numbers. Throws on
+     *  a transport failure, as postJsonCode. */
+    suspend fun postJsonCodeBody(ctx: Context, path: String, body: JSONObject): Pair<Int, JSONObject?> = withContext(Dispatchers.IO) {
+        val conn = open(ctx, path, "POST")
+        conn.doOutput = true
+        conn.setRequestProperty("Content-Type", "application/json")
+        try {
+            conn.outputStream.use { it.write(body.toString().toByteArray()) }
+            val code = conn.responseCode
+            val json = if (code in 200..299) runCatching {
+                val text = conn.inputStream.use { s -> String(s.readNBytes(512 * 1024)) }
+                if (text.isBlank()) null else JSONObject(text)
+            }.getOrNull() else null
+            code to json
+        } finally {
+            conn.disconnect()
+        }
+    }
+
     /** POST a JSON body, returning the parsed JSON response. On Dispatchers.IO (see getJson). */
     suspend fun postJson(ctx: Context, path: String, body: JSONObject, readTimeoutMs: Int = 30_000): JSONObject = withContext(Dispatchers.IO) {
         val conn = open(ctx, path, "POST")

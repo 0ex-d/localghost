@@ -367,8 +367,27 @@ var schemaRegistry = []SchemaTable{
 		{"spread", "DOUBLE PRECISION", true, "0"},
 		{"used", "TEXT", true, "''"},
 		{"dropped", "TEXT", true, "''"},
+		{"markets", "INTEGER", true, "0"}, // markets blended (a venue can have several)
+		{"paths", "TEXT", true, "''"},     // the quote currencies converted from: USD,USDT,BTC…
 	}, Indexes: []string{
 		"CREATE INDEX IF NOT EXISTS crypto_index_symbol ON crypto_index (symbol, ts DESC)",
+	}},
+	// a coin as Coinbase's list describes it: what it is, its colour, its site and white paper
+	// (rewritten with the list every hour), for the coin's own page
+	{Name: "coin_info", PK: "symbol", Cols: []SchemaCol{
+		{"symbol", "TEXT", true, ""},
+		{"name", "TEXT", true, "''"},
+		{"description", "TEXT", true, "''"},
+		{"color", "TEXT", true, "''"},
+		{"website", "TEXT", true, "''"},
+		{"whitepaper", "TEXT", true, "''"},
+		{"updated_at", "BIGINT", true, "0"},
+		// what the box wrote about the coin from what it read (synthd coindesc.go): the text, when,
+		// and from which sources ("Wikipedia, Coinbase, solana.com"); written_at alone marks a try
+		// that found too little, tried again after three days
+		{"written", "TEXT", true, "''"},
+		{"written_at", "BIGINT", true, "0"},
+		{"written_from", "TEXT", true, "''"},
 	}},
 	// the days: each venue's daily candle as it keeps it, and the box's daily USD close per symbol
 	// (the venues' closes, USDT folded with the day's USDT/USD close), built back through the years

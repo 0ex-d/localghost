@@ -72,28 +72,24 @@ func TestMarketsAndURLs(t *testing.T) {
 	if u := (Market{"coinbase", "BTC", "USD"}).CandlesURL(from, from.AddDate(0, 0, 10)); !strings.Contains(u, "granularity=86400&start=2026-01-01T00:00:00Z") {
 		t.Fatal(u)
 	}
-	// twelve symbols: the phone's three (the ECB twice and Coinbase's rank list), then six batch
-	// venues once each and Coinbase for the ten largest and USDT, every minute
+	// the phone's three (the ECB twice and Coinbase's rank list), then every venue's all-pairs
+	// answer once a minute, Coinbase's products list among them
 	syms := []string{"BTC", "ETH", "SOL", "XRP", "BNB", "DOGE", "ADA", "TRX", "AVAX", "LINK", "TON", "DOT"}
 	ph := PhoneSources()
 	if len(ph) != 3 || ph[0].ID != "ecb" || ph[2].ID != CoinbaseRanks || !strings.HasPrefix(ph[2].URL, "https://www.coinbase.com/") {
 		t.Fatalf("phone sources: %v", ph)
 	}
 	tk := TickerSources(syms)
-	if tk[0].ID != "binance:all" || tk[5].ID != "gemini:all" || tk[6].ID != "coinbase:BTC-USD" || tk[len(tk)-1].ID != "coinbase:USDT-USD" {
+	if len(tk) != 7 || tk[0].ID != "binance:all" || tk[6].ID != "coinbase:all" || !strings.Contains(tk[6].URL, "brokerage/market/products") {
 		t.Fatalf("tickers: %v", tk)
 	}
-	cb := 0
 	for _, s := range tk {
-		if strings.HasPrefix(s.ID, "coinbase:") {
-			cb++
-		}
 		if s.Every != 1 {
 			t.Fatalf("a ticker every %d min", s.Every)
 		}
 	}
-	if cb != CoinbaseTop+1 || len(tk) != 6+CoinbaseTop+1 || len(Sources(syms, from)) != 3+len(tk) {
-		t.Fatalf("coinbase %d, tickers %d", cb, len(tk))
+	if len(Sources(syms, from)) != 3+len(tk) {
+		t.Fatalf("sources %d", len(Sources(syms, from)))
 	}
 	if u := (Market{"binance", "BTC", "USDT"}).HourlyURL(from, from.Add(time.Hour)); !strings.Contains(u, "interval=1h") {
 		t.Fatal(u)
@@ -161,52 +157,6 @@ func TestParseCandles(t *testing.T) {
 	}
 	if _, err := ParseCandles(Market{"coinbase", "BTC", "USD"}, []byte(`{"message":"NotFound"}`)); err == nil {
 		t.Fatal("an error body passed")
-	}
-}
-
-func TestIndexMethodAndUSDT(t *testing.T) {
-	now := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
-	qs := []Quote{
-		{"coinbase", "BTC", "USD", 65000, 10000, now.Add(-time.Minute)},
-		{"kraken", "BTC", "USD", 65100, 2000, now},
-		{"bitstamp", "BTC", "USD", 64950, 2000, now.Add(-2 * time.Minute)},
-		{"gemini", "BTC", "USD", 70000, 800, now},                 // 7.7% off the median: out
-		{"stale", "BTC", "USD", 65020, 5000, now.Add(-time.Hour)}, // an hour old: out
-		{"binance", "BTC", "USDT", 65065, 4000, now},              // in USDT: folded at 0.999
-		{"coinbase", "USDT", "USD", 0.9990, 1e6, now},
-		{"kraken", "USDT", "USD", 0.9992, 1e6, now},
-		{"bitstamp", "USDT", "USD", 0.9988, 1e6, now.Add(-time.Hour)}, // stale: not in the USDT rate
-	}
-	usdt, ok := USDTRate(qs, now)
-	if !ok || math.Abs(usdt-0.9991) > 1e-9 {
-		t.Fatalf("usdt: %v %v", usdt, ok)
-	}
-	btc := InUSD(qs, "BTC", usdt)
-	if len(btc) != 6 {
-		t.Fatalf("btc quotes: %d", len(btc))
-	}
-	ix, err := MakeIndex(btc, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	binanceUSD := 65065 * usdt
-	want := (65000*10000 + 65100*2000 + 64950*2000 + binanceUSD*4000) / 18000.0
-	if ix.N != 4 || math.Abs(ix.Price-want) > 0.01 {
-		t.Fatalf("index: %+v (want %.2f)", ix, want)
-	}
-	if ix.Dropped["gemini"] == "" || ix.Dropped["stale"] == "" || len(ix.Used) != 4 || ix.Used[0] != "binance" {
-		t.Fatalf("dropped/used: %+v", ix)
-	}
-	if r, ok := USDTRate(nil, now); ok || r != 1 {
-		t.Fatal("no usdt legs: 1 and false")
-	}
-	// no volumes anywhere: a plain mean
-	plain, _ := MakeIndex([]Quote{{"a", "X", "USD", 100, 0, now}, {"b", "X", "USD", 102, 0, now}}, now)
-	if plain.Price != 101 || plain.N != 2 {
-		t.Fatalf("plain: %+v", plain)
-	}
-	if _, err := MakeIndex([]Quote{{"a", "X", "USD", 100, 1, now.Add(-time.Hour)}}, now); err == nil {
-		t.Fatal("stale alone passed")
 	}
 }
 

@@ -6,6 +6,8 @@ import (
 )
 
 func TestParseBatchSixVenues(t *testing.T) {
+	// each venue keeps the followed coins and the conversion currencies (USDT, USDC, BTC, ETH) in
+	// any currency the box converts from (USD, USDT, USDC, EUR, BTC, ETH); not TRY, not GBP
 	fetched := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
 	want := map[string]bool{"BTC": true, "SOL": true, "DOGE": true}
 	cases := []struct {
@@ -13,12 +15,12 @@ func TestParseBatchSixVenues(t *testing.T) {
 		body string
 		n    int // quotes kept
 	}{
-		{"binance", `[{"symbol":"BTCUSDT","lastPrice":"65000","volume":"1000","closeTime":1790848800000},{"symbol":"SOLUSDT","lastPrice":"150","volume":"5000","closeTime":1790848800000},{"symbol":"BTCEUR","lastPrice":"60000","volume":"1"},{"symbol":"ADAUSDT","lastPrice":"0.4","volume":"1"},{"symbol":"USDTTRY","lastPrice":"40","volume":"1"}]`, 2},
-		{"okx", `{"code":"0","data":[{"instId":"BTC-USDT","last":"65010","vol24h":"900","ts":"1790848800000"},{"instId":"DOGE-USDT","last":"0.12","vol24h":"1e6","ts":"1790848800000"},{"instId":"BTC-USDC","last":"1","vol24h":"1","ts":"1"},{"instId":"ETH-USDT","last":"3500","vol24h":"1","ts":"1"}]}`, 2},
-		{"kraken", `{"error":[],"result":{"XXBTZUSD":{"c":["65020","1"],"v":["10","800"]},"SOLUSD":{"c":["151","1"],"v":["1","4000"]},"XXDGZUSD":{"c":["0.121","1"],"v":["1","2e6"]},"USDTZUSD":{"c":["0.9991","1"],"v":["1","1e6"]},"XETHZUSD":{"c":["3500","1"],"v":["1","1"]},"XXBTZEUR":{"c":["60000","1"],"v":["1","1"]}}}`, 4},
-		{"bitfinex", `[["tBTCUSD",64990,1,65010,1,120,0.0018,65005,3200,65500,64000],["tSOLUSD",149,1,151,1,1,0.01,150.5,20000,155,145],["tUSTUSD",0.999,1,1.0,1,0,0,0.9992,5e6,1,0.99],["tETHUSD",1,1,1,1,1,1,3500,1,1,1],["fUSD",0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]]`, 3},
-		{"bitstamp", `[{"pair":"BTC/USD","last":"64950","volume":"2000","timestamp":"1790848800"},{"pair":"SOL/USD","last":"150.2","volume":"3000","timestamp":"1790848800"},{"pair":"USDT/USD","last":"0.9990","volume":"1e6","timestamp":"1790848800"},{"pair":"BTC/EUR","last":"60000","volume":"1","timestamp":"1"}]`, 3},
-		{"gemini", `[{"pair":"BTCUSD","price":"65050","percentChange24h":"0.01"},{"pair":"SOLUSD","price":"150.1","percentChange24h":"0"},{"pair":"BTCGBP","price":"50000","percentChange24h":"0"},{"pair":"ETHUSD","price":"3500","percentChange24h":"0"}]`, 2},
+		{"binance", `[{"symbol":"BTCUSDT","lastPrice":"65000","volume":"1000","closeTime":1790848800000},{"symbol":"SOLUSDT","lastPrice":"150","volume":"5000","closeTime":1790848800000},{"symbol":"BTCEUR","lastPrice":"60000","volume":"1"},{"symbol":"ADAUSDT","lastPrice":"0.4","volume":"1"},{"symbol":"USDTTRY","lastPrice":"40","volume":"1"}]`, 3},
+		{"okx", `{"code":"0","data":[{"instId":"BTC-USDT","last":"65010","vol24h":"900","ts":"1790848800000"},{"instId":"DOGE-USDT","last":"0.12","vol24h":"1e6","ts":"1790848800000"},{"instId":"BTC-USDC","last":"1","vol24h":"1","ts":"1"},{"instId":"ETH-USDT","last":"3500","vol24h":"1","ts":"1"}]}`, 4},
+		{"kraken", `{"error":[],"result":{"XXBTZUSD":{"c":["65020","1"],"v":["10","800"]},"SOLUSD":{"c":["151","1"],"v":["1","4000"]},"XXDGZUSD":{"c":["0.121","1"],"v":["1","2e6"]},"USDTZUSD":{"c":["0.9991","1"],"v":["1","1e6"]},"XETHZUSD":{"c":["3500","1"],"v":["1","1"]},"XXBTZEUR":{"c":["60000","1"],"v":["1","1"]}}}`, 6},
+		{"bitfinex", `[["tBTCUSD",64990,1,65010,1,120,0.0018,65005,3200,65500,64000],["tSOLUSD",149,1,151,1,1,0.01,150.5,20000,155,145],["tUSTUSD",0.999,1,1.0,1,0,0,0.9992,5e6,1,0.99],["tETHUSD",1,1,1,1,1,1,3500,1,1,1],["fUSD",0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]]`, 4},
+		{"bitstamp", `[{"pair":"BTC/USD","last":"64950","volume":"2000","timestamp":"1790848800"},{"pair":"SOL/USD","last":"150.2","volume":"3000","timestamp":"1790848800"},{"pair":"USDT/USD","last":"0.9990","volume":"1e6","timestamp":"1790848800"},{"pair":"BTC/EUR","last":"60000","volume":"1","timestamp":"1"}]`, 4},
+		{"gemini", `[{"pair":"BTCUSD","price":"65050","percentChange24h":"0.01"},{"pair":"SOLUSD","price":"150.1","percentChange24h":"0"},{"pair":"BTCGBP","price":"50000","percentChange24h":"0"},{"pair":"ETHUSD","price":"3500","percentChange24h":"0"}]`, 3},
 	}
 	for _, c := range cases {
 		qs, err := ParseBatch(c.ex, []byte(c.body), want, fetched)
@@ -26,7 +28,8 @@ func TestParseBatchSixVenues(t *testing.T) {
 			t.Fatalf("%s: %d quotes %v: %+v", c.ex, len(qs), err, qs)
 		}
 		for _, q := range qs {
-			if q.Exchange != c.ex || q.Price <= 0 || (q.QuoteCcy != "USD" && q.QuoteCcy != "USDT") || (!want[q.Base] && q.Base != "USDT") {
+			// a followed coin or a conversion currency, priced in one the box converts from
+			if q.Exchange != c.ex || q.Price <= 0 || !IsConvQuote(q.QuoteCcy) || (!want[q.Base] && !IsConvQuote(q.Base)) {
 				t.Fatalf("%s: %+v", c.ex, q)
 			}
 		}
@@ -47,7 +50,8 @@ func TestParseBatchSixVenues(t *testing.T) {
 func TestKrakenAndBitfinexPairs(t *testing.T) {
 	for key, want := range map[string][2]string{
 		"XXBTZUSD": {"BTC", "USD"}, "XETHZUSD": {"ETH", "USD"}, "SOLUSD": {"SOL", "USD"}, "USDTZUSD": {"USDT", "USD"},
-		"XXDGZUSD": {"DOGE", "USD"}, "SOLUSDT": {"SOL", "USDT"}, "XXBTZEUR": {"", ""}, "": {"", ""},
+		"XXDGZUSD": {"DOGE", "USD"}, "SOLUSDT": {"SOL", "USDT"}, "XXBTZEUR": {"BTC", "EUR"}, "XETHXXBT": {"ETH", "BTC"},
+		"SOLXBT": {"SOL", "BTC"}, "SOLGBP": {"", ""}, "": {"", ""},
 	} {
 		b, q := KrakenPair(key)
 		if b != want[0] || q != want[1] {
@@ -55,7 +59,7 @@ func TestKrakenAndBitfinexPairs(t *testing.T) {
 		}
 	}
 	for sym, want := range map[string][2]string{
-		"tBTCUSD": {"BTC", "USD"}, "tSOLUST": {"SOL", "USDT"}, "tUSTUSD": {"USDT", "USD"}, "tMATIC:USD": {"MATIC", "USD"}, "tBTCEUR": {"", ""}, "fUSD": {"", ""},
+		"tBTCUSD": {"BTC", "USD"}, "tSOLUST": {"SOL", "USDT"}, "tUSTUSD": {"USDT", "USD"}, "tMATIC:USD": {"MATIC", "USD"}, "tBTCEUR": {"BTC", "EUR"}, "tBTCUDC": {"BTC", "USDC"}, "tBTCGBP": {"", ""}, "fUSD": {"", ""},
 	} {
 		b, q := bitfinexPair(sym)
 		if b != want[0] || q != want[1] {

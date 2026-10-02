@@ -119,6 +119,13 @@ type looseList struct {
 	Notifications []map[string]any `json:"notifications"`
 }
 
+// pollDoc is the notifications poll: the batch, and home as it stands (home.go, /v1/home).
+type pollDoc struct {
+	Available     *bool            `json:"available,omitempty"`
+	Notifications []map[string]any `json:"notifications"`
+	Home          *hw.HomeSnap     `json:"home,omitempty"`
+}
+
 type modelDoc struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
@@ -211,7 +218,7 @@ func (s *Server) routes() []route {
 		{Method: "GET", Path: "/v1/status", Summary: "Per-service supervisor status for the Ghost Status screen.",
 			Auth: true, Response: statusDoc{}, Handler: s.handleStatus},
 		{Method: "GET", Path: "/v1/notifications", Summary: "Poll pending notifications for the mounted account.",
-			Auth: true, Response: looseList{}, Handler: s.handleNotifications},
+			Auth: true, Response: pollDoc{}, Handler: s.handleNotifications},
 		{Method: "GET", Path: "/v1/notifications/mute", Summary: "Current notification mutes per scope.",
 			Auth: true, Response: muteStatusDoc{}, Handler: s.handleMute},
 		{Method: "POST", Path: "/v1/notifications/mute", Summary: "Set or clear a notification mute for a scope.",
@@ -242,6 +249,16 @@ func (s *Server) routes() []route {
 			Auth: true, Response: briefNowDoc{}, Handler: s.handleNewsBrief},
 		{Method: "GET", Path: "/v1/rates", Summary: "The box's market numbers: the ECB table of the newest day, the USD index per symbol and its making, the top 100 coins, and the market index (the fifty largest, weighted by last month's volume).",
 			Auth: true, Response: hw.RatesDoc{}, Handler: s.handleRates},
+		{Method: "GET", Path: "/v1/about", Summary: "The note about me and my people, the name it gives, and how many memories the box made from it (pending while synthd has not read this version).",
+			Auth: true, Response: aboutDoc{}, Handler: s.handleAbout},
+		{Method: "POST", Path: "/v1/about", Summary: "Writes the note about me and my people ({text}, 8,000 characters at most); synthd makes memories from it at its next pass: facts about me, and one per person.",
+			Auth: true, Request: looseList{}, Response: aboutDoc{}, Handler: s.handleAbout},
+		{Method: "GET", Path: "/v1/rates/sparks", Summary: "A week of hourly closes for every coin the box prices (oldest first), for CRYPTO's rows; from Redis for ten minutes at a time.",
+			Auth: true, Response: sparksDoc{}, Handler: s.handleRatesSparks},
+		{Method: "GET", Path: "/v1/coins/info", Summary: "One coin's page (?symbol=BTC): Coinbase's description, colour, site and white paper; rank, market cap, supply and 24-hour volume from the list; the box's price and how it is blended right now, market by market (price, dollars, volume, age, weight, or why left out).",
+			Auth: true, Response: hw.CoinDoc{}, Handler: s.handleCoinInfo},
+		{Method: "GET", Path: "/v1/home", Summary: "Home as it stands: BTC, ETH and SOL with the day's change, CRYPTO50, the brief and the day's most-told stories, and FOR YOU (places near the trail to the person's taste, this date in earlier years, the day's stories touching what they said about themselves). The notifications poll and the trail's upload carry the same as \"home\".",
+			Auth: true, Response: hw.HomeSnap{}, Handler: s.handleHome},
 		{Method: "GET", Path: "/v1/rates/fast", Summary: "BTC, ETH and SOL as of the last five seconds (Coinbase's last trade over the box's index), each with its 24-hour change; from Redis only.",
 			Auth: true, Response: fastDoc{}, Handler: s.handleRatesFast},
 		{Method: "GET", Path: "/v1/rates/series", Summary: "A symbol's or the market index's price every minute (res=1m, the last week) or every hour (res=1h, the last thirty days): ?code=BTC|CRYPTO50&res=1m|1h&hours=N, oldest first.",

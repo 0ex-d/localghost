@@ -2,8 +2,8 @@ package main
 
 // THE BOX READS THE MARKETS EVERY MINUTE. The tickers are the box's own, whatever the phone is on:
 // a minute series cannot come from a phone Android wakes every quarter hour at best, so the seven
-// venues are asked by the box itself once a minute (six all-pairs calls and Coinbase pair by
-// pair, seventeen requests), and each minute's index per symbol and the market index's value go
+// venues are asked by the box itself once a minute (seven all-pairs calls, Coinbase's products
+// list among them), and each minute's index per symbol and the market index's value go
 // into the minute series. The ECB and the rank lists stay the phone's while it is on Wi-Fi (they
 // move hourly or daily); on mobile data, or in silence, the box fetches those too, from where the
 // marks say it left off. The days and the history are the box's own: the ECB's table back to 1999
@@ -16,7 +16,6 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
@@ -124,11 +123,13 @@ func ratesFetchLoop(ctx context.Context, mount string, rs *ratesState, fs *fetch
 			purged = true
 		}
 		proxy, why := hw.PhoneNetFrom(db).Proxy(now)
-		syms := tally.Symbols(db)
+		// priced every minute: the hundred largest; walked back through the venues' hours and
+		// minutes: the fifty that can be CRYPTO50's
+		syms := tally.HistorySymbols(db)
 		marks := tally.Marks(db)
 		var rows []egress.Fetched
 		get := func(id, url string) bool {
-			f, err := client.Get(ctx, id, url)
+			f, err := client.GetCapped(ctx, id, url, 8<<20) // an all-pairs answer runs to a megabyte or two
 			if err != nil {
 				return false // the context ended
 			}
@@ -136,21 +137,12 @@ func ratesFetchLoop(ctx context.Context, mount string, rs *ratesState, fs *fetch
 			time.Sleep(fetchGap)
 			return true
 		}
-		// 1. the tickers, every minute, the box's own (Coinbase is not asked for a pair it said
-		// it does not list, for a week)
-		absent := coinbaseAbsent(db, now)
-		cbSyms := make([]string, 0, len(syms))
-		for _, sym := range syms {
-			if !absent[sym] {
-				cbSyms = append(cbSyms, sym)
-			}
-		}
-		for _, src := range rates.TickerSources(cbSyms) {
+		// 1. the tickers, every minute, the box's own: every venue's every pair, one call each
+		for _, src := range rates.TickerSources(nil) {
 			if !get(src.ID, src.URL) {
 				return
 			}
 		}
-		noteCoinbaseAbsent(db, absent, rows, now)
 		// 2. the ECB and the rank lists: the phone's while it is on Wi-Fi
 		if !proxy || forced {
 			for _, src := range rates.PhoneSources() {
@@ -343,57 +335,6 @@ func refoldWhenWhole(db *poltergres.ReadWrite, res string, syms []string, seen [
 		_ = db.Exec("INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", key, itoa(int(now.Unix())))
 		lg.Info("market index made over the history", "fn", "refoldWhenWhole", "res", res, "points", n)
 	}
-}
-
-// coinbaseAbsent is the symbols Coinbase said it does not list (a 404 for the pair), each for a
-// week from when it said so: asking every minute for a pair that is not there only fills the log
-// with failures. A listing that comes later is picked up when the week is out.
-func coinbaseAbsent(db *poltergres.ReadWrite, now time.Time) map[string]bool {
-	out := map[string]bool{}
-	for sym, at := range readAbsent(db) {
-		if now.Unix()-at < 7*86400 {
-			out[sym] = true
-		}
-	}
-	return out
-}
-
-func readAbsent(db *poltergres.ReadWrite) map[string]int64 {
-	m := map[string]int64{}
-	rows, err := db.Query("SELECT value FROM settings WHERE key = 'coinbase_absent'")
-	if err == nil && len(rows.Vals) == 1 && rows.Vals[0][0] != nil {
-		_ = json.Unmarshal([]byte(*rows.Vals[0][0]), &m)
-	}
-	return m
-}
-
-// noteCoinbaseAbsent keeps the pairs Coinbase answered 404 for this minute.
-func noteCoinbaseAbsent(db *poltergres.ReadWrite, absent map[string]bool, rows []egress.Fetched, now time.Time) {
-	var gone []string
-	for _, f := range rows {
-		if f.Status != 404 || !strings.HasPrefix(f.ID, "coinbase:") {
-			continue
-		}
-		m, ok := rates.ParseMarketID(f.ID)
-		if !ok || m.Base == "USDT" || absent[m.Base] {
-			continue
-		}
-		gone = append(gone, m.Base)
-	}
-	if len(gone) == 0 {
-		return
-	}
-	all := readAbsent(db)
-	for sym, at := range all {
-		if now.Unix()-at >= 7*86400 {
-			delete(all, sym)
-		}
-	}
-	for _, sym := range gone {
-		all[sym] = now.Unix()
-	}
-	b, _ := json.Marshal(all)
-	_ = db.Exec("INSERT INTO settings (key, value) VALUES ('coinbase_absent', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", string(b))
 }
 
 func itoa(n int) string {
