@@ -4677,3 +4677,38 @@ moved tag refused). App: `DayTextTest`, `NotifLinkTest` (the page), `ReleaseInfo
   folder inside the repository rather than assuming it is the repository.
 - The notes (`releases/0.0.1.md`) say what the release holds and how a box and a phone are
   installed from it.
+
+## A release carries the app: the cut stops without it, and the keystore you have is registered in one line
+
+- A cut of wisp on the box came out without the APK: `cut_release.sh` found no SDK or no
+  keystore, said so in one line among the build's output and went on, so the release looked
+  complete and was not. Now the cut checks the app's tools before it tags or builds anything and
+  stops with the reason (no SDK, no keystore, no java) unless `--no-apk` is passed on purpose;
+  an app build that fails is a failed cut too, with the server set left in `release/<version>/server`
+  for the eye and the tag pinned, so the cut is run again once fixed and gives the same bytes.
+- The SDK is found more widely: `ANDROID_HOME`, `ANDROID_SDK_ROOT`, `~/.localghost_android_env`,
+  `sdk.dir` in the checkout's `app/android/local.properties` (what gradle used for `installDebug`),
+  then `~/android-sdk`, `~/Android/Sdk`, `/opt/android-sdk`. The first line of the cut prints
+  which SDK, build-tools and keystore it is using.
+- The keystore needs no configuration when it is `~/localghost-release.jks` (where the box's is):
+  the cut takes it, apksigner asks for its password on the terminal and signs with its only key
+  (`--ks-key-alias` is passed only when `LG_KEY_ALIAS` is set; apksigner needs it only for a
+  keystore with several keys). `~/.config/localghost/release.env` names another file, the alias,
+  the password (`LG_KEYSTORE_PASS`, then nothing is asked) and `LG_KEY_PASS` for a key whose
+  password differs from the store's (Android Studio allows that).
+- `tools/app_keystore.sh --use <file.jks> [--alias <alias>] [--store-pass]` writes that
+  release.env for a keystore that already exists: it opens it with the password typed, takes its
+  only key as the alias or checks the one given (and lists the keys when there are several or the
+  alias is not there); without `--use` it makes a new PKCS12 keystore (RSA 4096, a hundred years)
+  and refuses to overwrite one.
+- `SHA256SUMS` no longer lists the `.asc` signatures (a GPG signature carries its time, so it is
+  never the same twice; the sums now are, when the build is: the recut in the scratch repo gives
+  an identical SHA256SUMS with the app in it).
+- Two Kotlin warnings the box's build printed are cleared (`UnlockClock.kt` a `!!` on a non-null
+  value, `QrScanScreen.kt` a `.toFloat()` on a Float). The three AGP "Project object as a
+  dependency notation" deprecations are the Android Gradle plugin's own, for a newer AGP.
+- Tested: cut_release.sh in the scratch repo (no SDK: stops before tagging; SDK from
+  local.properties and no keystore: stops; `~/localghost-release.jks` found with no release.env,
+  SDK from `~/android-sdk`: the full cut with the APK, APP.txt, the signatures; a recut identical;
+  a wrong versionName refused), app_keystore.sh --use with one key (alias taken), two keys (asks
+  for --alias, lists them), a wrong alias, a wrong password.

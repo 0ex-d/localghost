@@ -461,20 +461,28 @@ mirror's set `server`):
 
 Run it as the user whose gpg holds the site key (info@localghost.ai), so the sums and the APK
 get their signatures; without the key it says so and signs nothing. The app is built in the same
-cut, from the tag's tree, when the Android SDK is on the machine (`ANDROID_HOME`, or the
-`~/.localghost_android_env` that `app/android/tools/debian_setup.sh` writes) and the app's
-keystore is named in `~/.config/localghost/release.env`:
+cut, from the tag's tree, with the Android SDK on the machine (found through `ANDROID_HOME` or
+`ANDROID_SDK_ROOT`, the `~/.localghost_android_env` that `app/android/tools/debian_setup.sh`
+writes, `sdk.dir` in `app/android/local.properties`, or `~/android-sdk`) and the app's keystore:
+`~/localghost-release.jks` when it is there (apksigner asks for its password on the terminal, and
+takes its only key without an alias), else what `~/.config/localghost/release.env` names, which
+`tools/app_keystore.sh` writes:
 
-    LG_KEYSTORE=/home/coder/.config/localghost/localghost-release.jks
-    LG_KEY_ALIAS=localghost
-    LG_KEYSTORE_PASS=…        # optional; apksigner asks on the terminal without it
+    ./tools/app_keystore.sh --use ~/keys/other.jks [--alias <key>] [--store-pass]   # a keystore you have
+    ./tools/app_keystore.sh                                                         # or a new one, made once
 
-A keystore is made once and kept for good (every later release must be signed by the same key,
-or phones refuse the update): `keytool -genkeypair -v -keystore ~/.config/localghost/localghost-release.jks
--alias localghost -keyalg RSA -keysize 4096 -validity 36500`, and a copy somewhere safe. Without
-an SDK or a keystore the cut says so and leaves the app out; `--apk <file>` hands in one built
-elsewhere at the same commit, `--no-apk` leaves it out on purpose. The APK is checked against
-the release's version (aapt2) and signed by the site key beside it.
+    # what it writes (mode 600):
+    LG_KEYSTORE=/home/coder/keys/other.jks
+    LG_KEY_ALIAS=localghost      # the keystore's only key, or the --alias given
+    LG_KEYSTORE_PASS=…           # with --store-pass; apksigner asks on the terminal without it
+    LG_KEY_PASS=…                # only when the key's password differs from the store's
+
+The keystore is the app's identity for good (every later release must be signed by the same key,
+or phones refuse the update): keep a copy somewhere safe. A release carries the app, so the cut
+checks the SDK and the keystore before it tags or builds anything and stops with the reason when
+either is missing; `--apk <file>` hands in an APK built elsewhere at the same commit, `--no-apk`
+cuts without the app on purpose. The APK is checked against the release's version (aapt2) and
+signed by the site key beside it.
 
 A release is its name (`tools/release.names`: 0.0.1 is wisp), its notes (`releases/0.0.1.md`:
 what it does, what is in it, how it works) and its pin (`releases/pins.txt`: the commit it was

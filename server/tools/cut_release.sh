@@ -8,16 +8,21 @@
 # ONE RELEASE for the whole of LocalGhost, release/<version>/:
 #   server/   the mirror's server set (the bundle, RELEASE.txt, NOTES.md, NOTICE.txt, TERMS-MIT.txt):
 #             what a box takes from the phone (tools/release_build.sh, reproducible)
-#   app/      the Android app, localghost-app-<version>.apk, built here from the tag's tree when the
-#             Android SDK is on this machine (ANDROID_HOME, or ~/.localghost_android_env from
-#             app/android/tools/debian_setup.sh) and signed with the app's keystore (LG_KEYSTORE and
-#             LG_KEY_ALIAS, kept in ~/.config/localghost/release.env; LG_KEYSTORE_PASS too, or apksigner
-#             asks); else handed in with --apk from a machine that built it at the same commit. With
-#             its GPG signature when the site key is in this user's gpg (info@localghost.ai), and
-#             APP.txt (its hash, commit, version and signing certificate). --no-apk leaves it out
+#   app/      the Android app, localghost-app-<version>.apk, built here from the tag's tree with the
+#             Android SDK on this machine (ANDROID_HOME or ANDROID_SDK_ROOT, ~/.localghost_android_env
+#             from app/android/tools/debian_setup.sh, sdk.dir in app/android/local.properties, or the
+#             usual places) and signed with the app's keystore (~/localghost-release.jks, or
+#             LG_KEYSTORE and LG_KEY_ALIAS in ~/.config/localghost/release.env, which
+#             tools/app_keystore.sh writes; LG_KEYSTORE_PASS too, or apksigner asks; the alias is
+#             needed only when the keystore holds more than one key); else handed in with --apk
+#             from a machine that built it at the same commit. With its GPG signature when the site key is in this user's gpg
+#             (info@localghost.ai), and APP.txt (its hash, commit, version and signing certificate).
+#             No SDK or no keystore stops the cut before it builds anything: a release carries the
+#             app. --no-apk cuts one without it, on purpose.
 #   source/   localghost-<version>-source.tar.gz, git archive of the tag: the whole tree, which is
 #             also how a box is set up (server/tools/setup.sh, see server/tools/README.md)
-#   SHA256SUMS over all of it, and SHA256SUMS.asc when the site key is here
+#   SHA256SUMS over all of it (the .asc signatures beside it, not in it), and SHA256SUMS.asc when the
+#             site key is here
 # The GitHub release v<version> carries every file; the mirror's server set takes server/.
 #
 # A release is three things committed with the code, so cutting it twice gives the same files:
@@ -69,6 +74,58 @@ PREFIX="$(git rev-parse --show-prefix)"
 GO="${GO:-$(command -v go 2>/dev/null || true)}"
 [ -x "${GO:-/nonexistent}" ] || GO=/usr/local/go/bin/go
 [ -x "$GO" ] || { echo "no go on PATH and none at /usr/local/go/bin/go" >&2; exit 2; }
+TOP="$(git rev-parse --show-toplevel)"
+
+# THE APP'S TOOLS, checked before anything is tagged or built: the SDK and the keystore.
+BT=""
+find_sdk() { # sets ANDROID_HOME from the first place that has one
+    [ -n "${ANDROID_HOME:-}" ] || ANDROID_HOME="${ANDROID_SDK_ROOT:-}"
+    if [ -z "$ANDROID_HOME" ] && [ -f "$HOME/.localghost_android_env" ]; then
+        . "$HOME/.localghost_android_env"
+    fi
+    if [ -z "${ANDROID_HOME:-}" ] && [ -f "$TOP/app/android/local.properties" ]; then
+        # what gradle used in this checkout (sdk.dir, with its escaped colons and backslashes)
+        ANDROID_HOME="$(sed -n 's/^sdk\.dir=//p' "$TOP/app/android/local.properties" | head -1 | sed 's/\\:/:/g; s/\\\\/\//g; s/\r$//')"
+    fi
+    if [ -z "${ANDROID_HOME:-}" ] || [ ! -d "$ANDROID_HOME/build-tools" ]; then
+        for d in "$HOME/android-sdk" "$HOME/Android/Sdk" /opt/android-sdk /usr/lib/android-sdk; do
+            [ -d "$d/build-tools" ] && { ANDROID_HOME="$d"; break; }
+        done
+    fi
+    [ -n "${ANDROID_HOME:-}" ] && [ -d "$ANDROID_HOME/build-tools" ] || return 1
+    export ANDROID_HOME
+    BT="$(ls -d "$ANDROID_HOME"/build-tools/*/ 2>/dev/null | sort -V | tail -1)"
+    BT="${BT%/}"
+    [ -x "$BT/apksigner" ] && [ -x "$BT/zipalign" ]
+}
+app_tools() { # the SDK and the keystore, or the reason there is no app
+    [ -f "$HOME/.config/localghost/release.env" ] && . "$HOME/.config/localghost/release.env"
+    [ -z "${LG_KEYSTORE_PASS:-}" ] || export LG_KEYSTORE_PASS
+    [ -z "${LG_KEY_PASS:-}" ] || export LG_KEY_PASS
+    if ! find_sdk; then
+        echo "no Android SDK with build-tools found (looked at ANDROID_HOME, ANDROID_SDK_ROOT, ~/.localghost_android_env, app/android/local.properties sdk.dir, ~/android-sdk, ~/Android/Sdk, /opt/android-sdk)." >&2
+        echo "  app/android/tools/debian_setup.sh installs one; or put ANDROID_HOME=<sdk> in ~/.config/localghost/release.env" >&2
+        return 1
+    fi
+    # the keystore: named in release.env, else the usual file in the home folder
+    if [ -z "${LG_KEYSTORE:-}" ]; then
+        for k in "$HOME/localghost-release.jks" "$HOME/.config/localghost/localghost-release.jks"; do
+            [ -s "$k" ] && { LG_KEYSTORE="$k"; break; }
+        done
+    fi
+    if [ -z "${LG_KEYSTORE:-}" ] || [ ! -s "$LG_KEYSTORE" ]; then
+        echo "no keystore for the app: none at ~/localghost-release.jks or ~/.config/localghost/localghost-release.jks and no LG_KEYSTORE=<file.jks> in ~/.config/localghost/release.env (tools/app_keystore.sh --use <file.jks> writes it; without --use it makes a new keystore)." >&2
+        return 1
+    fi
+    export LG_KEYSTORE
+    # the alias: LG_KEY_ALIAS, or the keystore's only key (apksigner takes it without an alias)
+    [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ] || command -v java >/dev/null 2>&1 ||
+        { echo "no java for gradle (JAVA_HOME, or java on PATH; a JDK 17 or newer)" >&2; return 1; }
+    echo "app: SDK $ANDROID_HOME, build-tools $(basename "$BT"), keystore $LG_KEYSTORE (${LG_KEY_ALIAS:-its only key}${LG_KEYSTORE_PASS:+, password from release.env})"
+}
+if [ -z "$NOAPK" ] && [ -z "$APK" ]; then
+    app_tools || { echo "the release carries the app, so nothing is cut. Fix the above and run again, or --no-apk for a cut without it (on purpose)." >&2; exit 1; }
+fi
 
 say() { printf '\n== %s ==\n' "$*"; }
 
@@ -118,25 +175,9 @@ sign() { # sign <file>: <file>.asc when the key is in this user's gpg, said once
         nosign=1
     fi
 }
-# THE APP. Built here from the tag's tree when the Android SDK is on this machine, else handed in.
+# THE APP. Built here from the tag's tree with the SDK found above, else handed in.
 APPOUT="$OUT/app/localghost-app-$VERSION.apk"
-BT=""
 build_apk() {
-    [ -f "$HOME/.config/localghost/release.env" ] && . "$HOME/.config/localghost/release.env"
-    if [ -z "${ANDROID_HOME:-}" ] && [ -f "$HOME/.localghost_android_env" ]; then
-        . "$HOME/.localghost_android_env"
-    fi
-    if [ -z "${ANDROID_HOME:-}" ] || [ ! -d "$ANDROID_HOME" ]; then
-        echo "no Android SDK on this machine (ANDROID_HOME; app/android/tools/debian_setup.sh installs one): the app is not built here, --apk hands one in"
-        return 1
-    fi
-    if [ -z "${LG_KEYSTORE:-}" ] || [ ! -s "$LG_KEYSTORE" ] || [ -z "${LG_KEY_ALIAS:-}" ]; then
-        echo "no keystore for the app: put LG_KEYSTORE=<file.jks> and LG_KEY_ALIAS=<alias> in ~/.config/localghost/release.env (keytool -genkeypair makes one; it is the app's identity, keep it)"
-        return 1
-    fi
-    BT="$(ls -d "$ANDROID_HOME"/build-tools/*/ 2>/dev/null | sort -V | tail -1)"
-    BT="${BT%/}"
-    [ -x "$BT/apksigner" ] && [ -x "$BT/zipalign" ] || { echo "no build-tools under $ANDROID_HOME"; return 1; }
     APPDIR="$W/src/app/android"
     [ -x "$APPDIR/gradlew" ] || { echo "no app/android/gradlew in the tag"; return 1; }
     # the public build: no box baked in; the SDK; the pinned llama.cpp tarball where the box has it
@@ -145,6 +186,7 @@ build_apk() {
         echo "NAS_BASE_URL="
         echo "DEVICE_TOKEN="
         [ -n "${LG_LLAMA_TARBALL:-}" ] && echo "llamaTarball=$LG_LLAMA_TARBALL"
+        true
     } > "$APPDIR/local.properties"
     echo "building the app (gradle assembleRelease; the phone's model runtime takes a few minutes the first time)"
     ( cd "$APPDIR" && ./gradlew --no-daemon -q assembleRelease ) || { echo "the app's build failed (above)"; return 1; }
@@ -152,8 +194,12 @@ build_apk() {
     [ -s "$UNSIGNED" ] || { echo "no APK came out of the build"; return 1; }
     mkdir -p "$OUT/app"
     "$BT/zipalign" -f 4 "$UNSIGNED" "$W/aligned.apk"
-    "$BT/apksigner" sign --ks "$LG_KEYSTORE" --ks-key-alias "$LG_KEY_ALIAS" ${LG_KEYSTORE_PASS:+--ks-pass env:LG_KEYSTORE_PASS} \
-        --out "$APPOUT" "$W/aligned.apk" || { echo "signing the app failed"; return 1; }
+    SIGNARGS=(--ks "$LG_KEYSTORE")
+    [ -z "${LG_KEY_ALIAS:-}" ] || SIGNARGS+=(--ks-key-alias "$LG_KEY_ALIAS")
+    [ -z "${LG_KEYSTORE_PASS:-}" ] || SIGNARGS+=(--ks-pass env:LG_KEYSTORE_PASS)
+    [ -z "${LG_KEY_PASS:-}" ] || SIGNARGS+=(--key-pass env:LG_KEY_PASS)
+    [ -n "${LG_KEYSTORE_PASS:-}" ] || echo "apksigner asks for the keystore's password now (LG_KEYSTORE_PASS in ~/.config/localghost/release.env stops the asking)"
+    "$BT/apksigner" sign "${SIGNARGS[@]}" --out "$APPOUT" "$W/aligned.apk" || { echo "signing the app failed"; return 1; }
     rm -f "$W/aligned.apk"
     echo "the app built and signed: $APPOUT"
 }
@@ -163,13 +209,13 @@ if [ -z "$NOAPK" ]; then
         cp "$APK" "$APPOUT"
         [ -s "$APK.asc" ] && cp "$APK.asc" "$APPOUT.asc"
     else
-        build_apk || true
+        build_apk || { echo "no app, so no release: the server set is in $OUT/server, the cut is not complete. Fix the above and run the cut again (the tag $TAG is pinned, the same bytes come out), or --no-apk on purpose." >&2; exit 1; }
     fi
 fi
 if [ -s "$APPOUT" ]; then
     [ -s "$APPOUT.asc" ] || sign "$APPOUT"
     # what the APK says of itself, when the build tools are here to ask
-    [ -n "$BT" ] || { BT="$(ls -d "${ANDROID_HOME:-/nonexistent}"/build-tools/*/ 2>/dev/null | sort -V | tail -1)"; BT="${BT%/}"; }
+    [ -n "$BT" ] || find_sdk || true
     CERT=""; VN=""; VC=""
     if [ -n "$BT" ] && [ -x "$BT/apksigner" ]; then
         CERT="$("$BT/apksigner" verify --print-certs "$APPOUT" 2>/dev/null | grep -i 'certificate SHA-256' | head -1 | awk '{print $NF}')"
@@ -199,11 +245,13 @@ fi
 ( cd "$W/src" && git archive --format=tar.gz --prefix="localghost-$VERSION/" -o "$OUT/source/localghost-$VERSION-source.tar.gz" "$TAG" )
 # the sums over everything, signed
 cd "$OUT"
-find . -type f ! -name SHA256SUMS ! -name SHA256SUMS.asc | sed 's|^\./||' | LC_ALL=C sort | xargs sha256sum > SHA256SUMS
+# the sums over the files, not over the signatures (a GPG signature carries its time, so it is never
+# the same twice; the sums are, when the build is)
+find . -type f ! -name SHA256SUMS ! -name '*.asc' | sed 's|^\./||' | LC_ALL=C sort | xargs sha256sum > SHA256SUMS
 sign SHA256SUMS
 say "$NAME $VERSION ($COMMIT) in $OUT"
 cat SHA256SUMS
-[ -s "$APPOUT" ] || echo "(no app in this cut: the server set and the source are complete without it; the app is built here with the SDK and a keystore, or handed in with --apk)"
+[ -s "$APPOUT" ] || echo "(no app in this cut, --no-apk: the server set and the source are here; a release with the app is cut with the SDK and a keystore on this machine, or --apk)"
 echo
 echo "next:"
 echo "  git push origin $TAG"
