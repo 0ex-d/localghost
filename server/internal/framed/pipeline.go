@@ -202,7 +202,11 @@ func (p *Pipeline) OnArchived(fn func(archivePath, renderPath string, takenAt in
 //	1  the 64KiB head, JPEG-only EXIF, no video metadata, videos never captioned
 //	2  256KiB head, truncation-tolerant EXIF with zone offsets, moov GPS for clips, previews as
 //	   the caption source, videos captioned from their frame grab
-const PipelineVersion = 2
+//	3  HEIF stills told from clips by every brand in their ftyp box (a phone's HEIC with an
+//	   unfamiliar major brand was filed as an MP4 video); a frame's kind, type and file name follow
+//	   the sniff on re-derive, and its journal line with them; a still Go cannot decode (HEIC) gets
+//	   its previews through ffmpeg at archive time, and is never set aside as damaged for that
+const PipelineVersion = 3
 
 // WithPlaceResolver installs the reverse geocoder function (the DB-backed store resolver).
 func (p *Pipeline) WithPlaceResolver(fn func(lat, lon float64) geo.Place) { p.resolvePlace = fn }
@@ -404,13 +408,13 @@ func (p *Pipeline) processOne(path string) (string, error) {
 		kindStr = "photo"
 		if tooLarge != "" {
 			p.log.Info("photo archived without preview", "fn", "processOne", "hash", hash, "why", tooLarge)
-		} else if cfgFmt == "jpeg" || cfgFmt == "png" || cfgFmt == "gif" {
+		} else {
+			// Go decodes JPEG, PNG and GIF; a WebP, HEIC or AVIF goes through ffmpeg inside
+			// makePreviews, and a still no decoder on the box reads is archived without a preview,
+			// not set aside: only a damaged file of a format the box does read is "unreadable"
 			var why string
 			prevPath, thumbPath, why = p.makePreviews(raw, archPath, hash, meta.Orientation)
 			unreadable = why
-		} else {
-			p.log.Info("photo archived without preview (decoder does not handle this still format)",
-				"fn", "processOne", "hash", hash, "mime", sniff.MIME)
 		}
 	case KindVideo:
 		kindStr = "video"
@@ -513,6 +517,16 @@ func (p *Pipeline) makePreviews(raw []byte, src, hash string, orientation int) (
 			ffErr = ferr
 		}
 		if err != nil {
+			if errors.Is(err, image.ErrFormat) {
+				// not damaged: a format Go has no decoder for (HEIC, AVIF) on a box whose ffmpeg
+				// has none either, or no ffmpeg; the original stays in the archive, previewless
+				why := "no decoder on the box for this still format"
+				if ffErr != nil {
+					why += " (ffmpeg: " + FFmpegWhy(ffErr) + ")"
+				}
+				p.log.Info("no preview", "fn", "makePreviews", "hash", hash, "why", why)
+				return "", "", ""
+			}
 			why := "damaged: " + strings.TrimPrefix(err.Error(), "invalid JPEG format: ")
 			if ffErr != nil {
 				why += "; ffmpeg cannot read it either (" + FFmpegWhy(ffErr) + ")"
@@ -968,6 +982,17 @@ func (p *Pipeline) derive(path string, forcePreviews bool) (Frame, bool, error) 
 	_ = f.Close()
 	head = head[:n]
 	sn := Sniff(head)
+	if sn.Kind != KindUnknown && sn.Ext != ext {
+		// the sniff got better since this file was filed (a HEIC archived as .mp4): the name
+		// follows the content, so the extension says what the bytes are, as for every other frame
+		renamed := filepath.Join(filepath.Dir(path), hash+sn.Ext)
+		if rerr := os.Rename(path, renamed); rerr != nil {
+			p.log.Warn("archive file keeps its old extension", "fn", "derive", "path", path, "ext", sn.Ext, "err", rerr)
+		} else {
+			p.log.Info("archive file renamed to what it is", "fn", "derive", "hash", hash, "was", ext, "now", sn.Ext)
+			path, ext = renamed, sn.Ext
+		}
+	}
 	meta := exif.Parse(head)
 	taken := meta.TakenAt
 	takenSrc := "exif"
@@ -1061,24 +1086,30 @@ func (p *Pipeline) derive(path string, forcePreviews bool) (Frame, bool, error) 
 		Bytes: fi.Size(), Source: "reprocess", ReceivedAt: time.Now().UTC().Unix(),
 		Kind: kindStr, MIME: sn.MIME, TakenSrc: takenSrc,
 	}
+	if err := p.store.InsertFrame(frame); err != nil {
+		return frame, previewed, fmt.Errorf("frame record: %w", err)
+	}
 	// The JOURNAL ENTRY, framed's line in the shared ingestion diary synthd distills from. Written
 	// with what framed knows at archive time (kind, when, where); captions and tags arrive later
 	// through other daemons and enrich the memory at distillation, not the entry. InsertJournal is
-	// idempotent on the hash, so a re-derive never writes a second line.
+	// idempotent on the hash, so a re-derive never writes a second line; it replaces one whose
+	// kind was wrong, with the time the row kept (the phone's hint at archive time ranks above
+	// the archive path's midnight a re-derive falls back to).
 	{
-		when := time.Unix(frame.TakenAt, 0).UTC().Format("Mon Jan 2 2006, 15:04")
+		at := frame.TakenAt
+		if ts, ok := p.store.FrameTakenAt(frame.Hash); ok {
+			at = ts
+		}
+		when := time.Unix(at, 0).UTC().Format("Mon Jan 2 2006, 15:04")
 		title := frame.Kind + " archived , " + when
 		body := "A " + frame.Kind + " from " + when + "."
 		if frame.Place != "" {
 			body = "A " + frame.Kind + " taken at " + frame.Place + " on " + when + "."
 			title = frame.Kind + " at " + frame.Place
 		}
-		if jerr := p.store.InsertJournal(frame.Hash, frame.TakenAt, title, body); jerr != nil {
+		if jerr := p.store.InsertJournal(frame.Hash, at, title, body); jerr != nil {
 			p.log.Warn("journal entry failed", "fn", "derive", "hash", frame.Hash, "err", jerr)
 		}
-	}
-	if err := p.store.InsertFrame(frame); err != nil {
-		return frame, previewed, fmt.Errorf("frame record: %w", err)
 	}
 	p.work.Add("re-derived", 1) // the stock-take's and reprocess's pass over an archived file
 	return frame, previewed, nil

@@ -68,7 +68,9 @@ func (s *Store) Ping() error { return s.db.Ping() }
 // MONOTONICALLY: a fact replaces an absence, a stronger source replaces a weaker one, and nothing
 // a person or an earlier ingest knew is ever overwritten by "unknown". The old clause backfilled
 // place only, which meant a frame archived without GPS stayed off the map forever, however many
-// times reprocess re-read its coordinates.
+// times reprocess re-read its coordinates. The kind, the type and the archive path are the one
+// exception to "never replace a fact": they are read from the bytes by the current sniff, which is
+// the authority (a HEIC the old sniff called a video is a photo, and is renamed to .heic).
 func (s *Store) InsertFrame(f Frame) error {
 	return s.db.Exec(
 		`INSERT INTO frames (hash, taken_at, lat, lon, has_gps, archive_path, preview_path, thumb_path, bytes, source, received_at, kind, mime, taken_src, place, device, pipe_ver)
@@ -83,16 +85,18 @@ func (s *Store) InsertFrame(f Frame) error {
 		   taken_src = CASE WHEN `+takenRank("EXCLUDED")+` > `+takenRank("frames")+` THEN EXCLUDED.taken_src ELSE frames.taken_src END,
 		   preview_path = CASE WHEN frames.preview_path = '' AND EXCLUDED.preview_path <> '' THEN EXCLUDED.preview_path ELSE frames.preview_path END,
 		   thumb_path = CASE WHEN frames.thumb_path = '' AND EXCLUDED.thumb_path <> '' THEN EXCLUDED.thumb_path ELSE frames.thumb_path END,
-		   kind = CASE WHEN frames.kind = 'unknown' AND EXCLUDED.kind <> 'unknown' THEN EXCLUDED.kind ELSE frames.kind END,
-		   mime = CASE WHEN frames.mime = '' AND EXCLUDED.mime <> '' THEN EXCLUDED.mime ELSE frames.mime END,
+		   kind = CASE WHEN EXCLUDED.kind <> 'unknown' THEN EXCLUDED.kind ELSE frames.kind END,
+		   mime = CASE WHEN EXCLUDED.mime <> '' THEN EXCLUDED.mime ELSE frames.mime END,
+		   archive_path = CASE WHEN EXCLUDED.archive_path <> '' THEN EXCLUDED.archive_path ELSE frames.archive_path END,
 		   device = CASE WHEN frames.device = '' AND EXCLUDED.device <> '' THEN EXCLUDED.device ELSE frames.device END
 		 WHERE (frames.place = '' AND EXCLUDED.place <> '')
 		    OR (NOT frames.has_gps AND EXCLUDED.has_gps)
 		    OR (`+takenRank("EXCLUDED")+` > `+takenRank("frames")+`)
 		    OR (frames.preview_path = '' AND EXCLUDED.preview_path <> '')
 		    OR (frames.thumb_path = '' AND EXCLUDED.thumb_path <> '')
-		    OR (frames.kind = 'unknown' AND EXCLUDED.kind <> 'unknown')
-		    OR (frames.mime = '' AND EXCLUDED.mime <> '')
+		    OR (frames.kind <> EXCLUDED.kind AND EXCLUDED.kind <> 'unknown')
+		    OR (frames.mime <> EXCLUDED.mime AND EXCLUDED.mime <> '')
+		    OR (frames.archive_path <> EXCLUDED.archive_path AND EXCLUDED.archive_path <> '')
 		    OR (frames.device = '' AND EXCLUDED.device <> '')
 		    OR (frames.pipe_ver < EXCLUDED.pipe_ver)`,
 		f.Hash, f.TakenAt, f.Lat, f.Lon, f.HasGPS,
@@ -171,6 +175,16 @@ func (s *Store) HasFrame(hash string) (bool, error) {
 		return false, err
 	}
 	return len(rows.Vals) > 0, nil
+}
+
+// FrameTakenAt is the taken time the row converged to (false when there is no row).
+func (s *Store) FrameTakenAt(hash string) (int64, bool) {
+	rows, err := s.db.Query("SELECT taken_at FROM frames WHERE hash = $1", hash)
+	if err != nil || len(rows.Vals) == 0 || len(rows.Vals[0]) == 0 || rows.Vals[0][0] == nil {
+		return 0, false
+	}
+	ts, perr := strconv.ParseInt(*rows.Vals[0][0], 10, 64)
+	return ts, perr == nil
 }
 
 // InsertPoints records a batch of location samples. Each row is parameterized; a multi-row VALUES with
@@ -841,10 +855,14 @@ func haversineKm(lat1, lon1, lat2, lon2 float64) float64 {
 }
 
 // InsertJournal writes framed's journal entry for one frame , the ingestion diary ghost.synthd
-// distills memories from. Idempotent by (source, ref): reprocess re-writes every entry as a no-op.
+// distills memories from. Idempotent by (source, ref): reprocess re-writes every entry as a no-op,
+// except when the frame's kind changed ("video archived" for what is a photo): the line's first
+// word is the kind, and a line whose kind is wrong is replaced, place and all.
 func (s *Store) InsertJournal(hash string, ts int64, title, body string) error {
 	return s.db.Exec(
-		"INSERT INTO journal_entries (source, ref, ts, title, body, created_at) VALUES ('ghost.framed', $1, $2, $3, $4, $5) ON CONFLICT (source, ref) DO NOTHING",
+		`INSERT INTO journal_entries (source, ref, ts, title, body, created_at) VALUES ('ghost.framed', $1, $2, $3, $4, $5)
+		 ON CONFLICT (source, ref) DO UPDATE SET title = EXCLUDED.title, body = EXCLUDED.body
+		 WHERE split_part(journal_entries.title, ' ', 1) <> split_part(EXCLUDED.title, ' ', 1)`,
 		hash, ts, title, body, time.Now().UnixMilli())
 }
 

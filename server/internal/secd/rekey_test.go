@@ -169,3 +169,67 @@ func TestDeviceKeyRotation(t *testing.T) {
 		t.Fatalf("retired file: %v %q", fi.Mode(), b)
 	}
 }
+
+// A phone retired by its device key (the 16-hex name every listing shows) is refused on every
+// route, the PIN entry included, while the box is locked; a bad key is refused; the list reads
+// back after a restart.
+func TestRetireByDeviceKey(t *testing.T) {
+	caDir := t.TempDir()
+	ca, caKey := testCA(t, caDir)
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	der, err := issueDeviceCert(ca, caKey, "lent-phone", &key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(Config{StateDir: t.TempDir(), CaDir: caDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdr := escapedPEM(der)
+	call := func(path string) *httptest.ResponseRecorder {
+		rr := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", path, nil)
+		req.Header.Set("X-Client-Cert", hdr)
+		s.Handler().ServeHTTP(rr, req)
+		return rr
+	}
+	if rr := call("/v1/health"); rr.Code != 200 {
+		t.Fatalf("before: %d", rr.Code)
+	}
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Header.Set("X-Client-Cert", hdr)
+	devKey := deviceKey(req)
+	if len(devKey) != 16 {
+		t.Fatalf("device key %q", devKey)
+	}
+	for _, bad := range []string{"", "abc", "zz12345678901234", strings.Repeat("a", 20)} {
+		if err := s.Retire(bad); err == nil {
+			t.Fatalf("retired %q", bad)
+		}
+	}
+	if err := s.Retire(strings.ToUpper(devKey)); err != nil {
+		t.Fatal(err)
+	}
+	if rr := call("/v1/health"); rr.Code == 200 {
+		t.Fatal("still reaches the box")
+	}
+	if v := s.Devices(); !v.Locked || v.Retired != 1 {
+		t.Fatalf("devices view: %+v", v)
+	}
+	s2, _ := New(Config{StateDir: s.cfg.StateDir, CaDir: caDir})
+	rr := httptest.NewRecorder()
+	s2.Handler().ServeHTTP(rr, req)
+	if rr.Code == 200 {
+		t.Fatal("forgotten across a restart")
+	}
+	// another phone is untouched
+	key2, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	der2, _ := issueDeviceCert(ca, caKey, "my-phone", &key2.PublicKey)
+	rr = httptest.NewRecorder()
+	req2 := httptest.NewRequest("GET", "/v1/health", nil)
+	req2.Header.Set("X-Client-Cert", escapedPEM(der2))
+	s2.Handler().ServeHTTP(rr, req2)
+	if rr.Code != 200 {
+		t.Fatalf("the other phone: %d", rr.Code)
+	}
+}

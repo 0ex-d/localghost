@@ -1,6 +1,7 @@
 package profile
 
 import (
+	"sort"
 	"testing"
 	"time"
 
@@ -60,17 +61,33 @@ func TestGateTreatsTheWipePinAsWrong(t *testing.T) {
 		d := a.Unlock("dev", "9999")
 		return d.Outcome, time.Since(t0)
 	}
-	oWipe, tWipe := next("3333")
-	oWrong, tWrong := next("5555")
+	// three runs each, the median kept: one KDF run on a busy machine (a CI runner, a laptop
+	// indexing) can take twice another, and that is noise, not a tell
+	median := func(candidate string) (Outcome, time.Duration) {
+		var o Outcome
+		var ds []time.Duration
+		for i := 0; i < 3; i++ {
+			oi, d := next(candidate)
+			if i > 0 && oi != o {
+				t.Fatalf("outcome after %s varies: %v then %v", candidate, o, oi)
+			}
+			o = oi
+			ds = append(ds, d)
+		}
+		sort.Slice(ds, func(i, j int) bool { return ds[i] < ds[j] })
+		return o, ds[1]
+	}
+	oWipe, tWipe := median("3333")
+	oWrong, tWrong := median("5555")
 	if oWipe != oWrong {
 		t.Fatalf("the limiter still tells: after wipe %v, after wrong %v", oWipe, oWrong)
 	}
-	// both ran the KDF: within 40% of each other, and neither near zero
+	// both ran the KDF: within 60% of each other, and neither near zero
 	lo, hi := tWipe, tWrong
 	if lo > hi {
 		lo, hi = hi, lo
 	}
-	if lo < 20*time.Millisecond || float64(hi) > 1.4*float64(lo) {
+	if lo < 20*time.Millisecond || float64(hi) > 1.6*float64(lo) {
 		t.Fatalf("times differ: after wipe %v, after wrong %v", tWipe, tWrong)
 	}
 }

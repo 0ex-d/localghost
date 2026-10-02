@@ -4716,3 +4716,97 @@ moved tag refused). App: `DayTextTest`, `NotifLinkTest` (the page), `ReleaseInfo
   SDK from `~/android-sdk`: the full cut with the APK, APP.txt, the signatures; a recut identical;
   a wrong versionName refused), app_keystore.sh --use with one key (alias taken), two keys (asks
   for --alias, lists them), a wrong alias, a wrong password.
+
+## Photos filed as videos: HEIF stills told from clips by all their brands, and the archive put right by itself
+
+- A day of October 2024 showed "84 videos", a play glyph on every thumbnail, and a story quoting
+  "video archived , Wed Oct 2 2024, 11:48" six times; every one of them a photo. The sniff read
+  only the ftyp box's major brand and knew a handful of HEIF brands (heic, heix, hevc, heim,
+  heis, mif1, msf1); a phone's HEIC with any other major brand (hevx for a 10-bit or HDR still,
+  heif, a brand the camera maker chose) fell to the default, "an MP4 video". The thumbnails were
+  there because ffmpeg's frame grab reads a HEIC as happily as a clip.
+- `framed.Sniff` now reads every brand in the ftyp box: an image brand anywhere (ISO 23008-12
+  requires mif1 among a HEIF image's compatible brands, whatever the major brand) makes it a
+  still, .heic or .avif; a clip's brands (isom, mp42, avc1, qt, 3gp) never include one. With no
+  brand to decide by, the box after ftyp decides: a HEIF's meta, a clip's moov or mdat. Truncated
+  heads and oversized size fields are read as far as the bytes go.
+- The archive puts itself right: `PipelineVersion` is 3, so the stock-take at framed's next start
+  re-derives every frame. On re-derive the file is renamed to what it is (`<hash>.heic` in place
+  of `.mp4`), the row's kind, mime and archive_path follow the sniff (the one exception to
+  InsertFrame's "never replace a fact": the sniff is read from the bytes by the current code and
+  is the authority), and the journal line is replaced when its kind word is wrong ("video
+  archived …" becomes "photo archived …", with the time the row kept, not the midnight a re-derive
+  falls back to); a line whose kind is right is left alone even when a place would now read
+  differently. The previews made from the frame grab stay (same picture). The day's story is
+  rebuilt by synthd when its facts' signature changes (the backfill reaches it; "write now" on the
+  DAY page does it at once).
+- Stills Go cannot decode (HEIC, AVIF, WebP) now get their previews through ffmpeg at archive time
+  too, as reprocess already did, rather than "archived without preview"; and a still no decoder
+  on the box reads is left in the archive previewless, never set aside as damaged (that was the
+  reprocess path's fate for a HEIC on a box without ffmpeg's decoder).
+- searchd keys a frame by the hash in its file name, so the rename changes nothing there; the
+  path search.originals recorded at ingest is only ever inserted, never opened.
+- Tested: `TestSniffStillsAndClips` (sixteen heads: JPEG, PNG, WebP, HEIC by major brand, by a
+  compatible brand, hevx, a motion-photo sequence, AVIF, unknown brands with a meta box, phone
+  MP4, mdat-first MP4, 3GP, QuickTime, WebM, TIFF, too short), `TestSniffTruncatedFtyp` (every
+  head length from 12 bytes, an oversized size field, isom major with mif1 compatible),
+  `TestRederiveTurnsAMisfiledHEICBackIntoAPhoto` (Postgres: a .mp4 HEIF with a "video archived"
+  journal line re-derived: renamed, row converged to photo/image/heic/v3, journal rewritten with
+  the row's time; a second re-derive and a place-only rewording leave it alone; a real clip keeps
+  its name). 47 packages ok, vet clean.
+
+## The repo as it looks from outside: the README says what is built, CI, a Mac build, a phone retired by its key
+
+Anchor Terminal's review of the repo (anchorterminal.com/tools/localghost) listed what a reader
+finds: no CI, tests that do not compile where they tried them, a README, CONTRIBUTING and
+SECURITY.md still saying "Phase 0, first commit incoming" against 69,000 lines of Go and a cut
+release, an open pull request from July, no per-device revocation. Most of it was true. This round:
+
+- **README.md, CONTRIBUTING.md, SECURITY.md** rewritten to what is built: the two parts, the
+  daemons that exist, what leaves the box (the list from the release notes, with "if you find a
+  request this section does not name, that is a bug, and a security report"), the vault and the
+  PINs as they are (one PIN, a wipe PIN; the decoy volume and the duress flow named as the design
+  the vault is built towards, not what wisp ships), how to get it, how to work on it, where it is
+  going. The site key's fingerprint in SECURITY.md (DCE9 A3D1 4EB4 6197 1DD5 F393 706E 4194 F08A
+  09A0, the same key that signs the mirror and the releases); the scope lists the daemons that
+  exist; `docs/SECURITY.md`, which never existed, is no longer linked. The Anchor Terminal badge,
+  a CI badge and a release badge at the top.
+- **CI** (`.github/workflows/ci.yml`): `go build`, `go vet`, every Go test against the runner's
+  own Postgres over its socket (as on a box; `createuser -s runner`, peer auth), a macOS
+  cross-compile (`GOOS=darwin go vet ./...`), and the app's JVM tests (`:app:testDebugUnitTest`,
+  JDK 21 as the box's setup installs). The app job has not run under gradle here (no SDK in this
+  session); run it on the box once before pushing the workflow.
+- **The tree builds on a Mac.** Pull request #3 (0ex-d, July) and issue #2 said the tests fail on
+  macOS over `Pdeathsig`, a Linux-only field. Fixed on main with build tags rather than the PR's
+  branch (it no longer applies): `procs.ChildAttr()` (`attr_linux.go` with Pdeathsig,
+  `attr_other.go` with the process group alone) at both spawn sites (searchd's embedder, oracled's
+  llama-server); `harden.NoDump` (prctl) and its test Linux-only with a no-op beside it;
+  `gpu.readKernelLog` (syslog(2)) split the same way; `secd.devOf` given a non-Linux and a Windows
+  counterpart. `GOOS=darwin go vet ./...` is clean; Windows is not a target (roadtiles mmaps).
+- **A phone retired by its key.** The retired list and the rekey flow existed (a rekey retires the
+  QR's certificate), but nothing let a person retire one particular phone. Now `ghost-cli
+  ghost.secd devices` lists the enrolled phones by device key (the 16-hex name every listing
+  shows) and `ghost-cli ghost.secd retire id=<key>` puts the key on the retired list on the OS
+  disk, so it holds while the box is locked; the front door matches a retired key against the
+  first 16 of every certificate id. `POST /v1/devices/retire {"device":"<key>"}` does the same
+  from a phone, never for itself. No un-retire: a fresh QR enrols the phone as a new device. The
+  app's DEVICES screen does not have the button yet.
+- **The flaky timing test** (`TestGateTreatsTheWipePinAsWrong`) takes the median of three KDF runs
+  each side and allows 60% between them, so a busy runner's one slow run is not a tell.
+- **The app's rotation tests** asserted that the first candidate grid is the true size; the
+  sampler's design says the decoder is the judge, and at 5, 10 and 15 degrees a finder-shaped
+  coincidence in the data ranked a wrong triple first (37, then 57 modules). The tests now assert
+  the true grid is among the candidates the decoder gets, and the synthetic data fill is hashed
+  rather than a lattice (a lattice at 10 degrees reads as a timing pattern at the wrong pitch).
+  206 JVM tests pass, none ignored.
+- **The cut's GitHub upload** leaves the server set's own SHA256SUMS home: GitHub flattens the
+  folders, two files of one name collide and the upload stopped at the second, which is why the
+  v0.0.1 release on GitHub lacked SHA256SUMS(.asc), APP.txt and the source archive.
+- Not done, and said in the README's "where it is going": the box CA key into the vault, shorter
+  device certificates renewed by the phone, an offline release key. Also open: an API an agent
+  could call (the box answers only enrolled devices by design; a laptop can be enrolled like a
+  phone with `ghost-ctl enroll`, and a stdio MCP server over the OpenAPI the box already serves
+  would be the honest shape of it), which is a product decision.
+- Tested: 47 packages ok, vet clean on Linux and darwin; `TestRetireByDeviceKey` (a phone retired
+  by its upper-cased key is refused on every route, survives a restart, bad keys refused, a
+  sibling untouched); the JVM suite.

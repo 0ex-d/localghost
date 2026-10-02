@@ -82,6 +82,25 @@ func main() {
 		data, _ := json.Marshal(srv.Edge())
 		return ctlsock.Response{OK: true, Data: data}, nil
 	})
+	// devices: the enrolled phones and what each has done; retire id=<key>: one of them refused
+	// from now on (the list is on the OS disk, so this works while the box is locked)
+	cli.Handle("devices", func(json.RawMessage) (ctlsock.Response, error) {
+		data, _ := json.Marshal(srv.Devices())
+		return ctlsock.Response{OK: true, Data: data}, nil
+	})
+	cli.Handle("retire", func(args json.RawMessage) (ctlsock.Response, error) {
+		var a struct {
+			ID string `json:"id"`
+		}
+		_ = json.Unmarshal(args, &a)
+		if a.ID == "" {
+			return ctlsock.Response{OK: false, Text: "retire id=<device key, 16 hex, from `devices`>"}, nil
+		}
+		if err := srv.Retire(a.ID); err != nil {
+			return ctlsock.Response{OK: false, Text: err.Error()}, nil
+		}
+		return ctlsock.Response{OK: true, Text: "retired " + a.ID + ": every certificate it presents is answered as if the box were down; a fresh QR enrols the phone again as a new device"}, nil
+	})
 	// halt: the MAINTENANCE stop , everything down, volume stays mounted, resume by PIN unlock.
 	// Same opaque reply contract as off (a "wrong PIN" reply would make this socket a PIN oracle);
 	// confirm the halt with `status`. Do not unlock from the phone until the maintenance is done.

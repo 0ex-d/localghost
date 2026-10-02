@@ -263,12 +263,16 @@ cat SHA256SUMS
 echo
 echo "next:"
 echo "  git push origin $TAG"
-FILES="$(cd "$OUT" && find . -type f | sed "s|^\./|$OUT/|" | LC_ALL=C sort | tr '\n' ' ')"
+# GitHub flattens the folders: every asset is its file name, so two files of one name collide and
+# the upload stops at the second. The server set's own SHA256SUMS (release_build.sh writes it for
+# the mirror) says nothing the release's SHA256SUMS does not, so it stays home; every other name
+# is unique across server/, app/ and source/.
+FILES="$(cd "$OUT" && find . -type f ! -path './server/SHA256SUMS' | sed "s|^\./|$OUT/|" | LC_ALL=C sort | tr '\n' ' ')"
 if command -v gh >/dev/null 2>&1; then
     echo "  gh release create $TAG --title \"$NAME $VERSION\" --notes-file $HERE/$NOTES $FILES"
 else
     echo "  the GitHub release, from a machine with gh (sudo apt install gh puts it on this one):"
-    echo "    gh release create $TAG --title \"$NAME $VERSION\" --notes-file $NOTES \$(find release/$VERSION -type f)"
+    echo "    gh release create $TAG --title \"$NAME $VERSION\" --notes-file $NOTES \$(find release/$VERSION -type f ! -path '*/server/SHA256SUMS')"
     echo "  or in the browser: https://github.com/LocalGhostDao/localghost/releases/new?tag=$TAG"
     echo "    title \"$NAME $VERSION\", the notes from $NOTES, every file under $OUT attached"
 fi

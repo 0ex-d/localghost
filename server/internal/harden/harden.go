@@ -1,3 +1,5 @@
+//go:build linux
+
 // Package harden holds the few process-level settings every LocalGhost daemon makes first.
 package harden
 

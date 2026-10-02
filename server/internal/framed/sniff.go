@@ -1,6 +1,9 @@
 package framed
 
-import "bytes"
+import (
+	"bytes"
+	"encoding/binary"
+)
 
 // MediaKind is what a spooled file actually is, decided by its CONTENT, not its name. Uploads arrive
 // as <nanos>-<rand> with no extension (secd deliberately never inspects bytes), so framed sniffs the
@@ -22,9 +25,9 @@ type SniffResult struct {
 }
 
 // Sniff identifies a media file from its leading bytes. It recognises the formats a phone camera
-// actually produces , JPEG, PNG, HEIF/HEIC, WebP, GIF for stills; MP4, QuickTime MOV, and the common
-// ISO-BMFF brands plus WebM/Matroska for video , and falls back to KindUnknown/.bin for anything else
-// so nothing is ever silently mis-archived.
+// actually produces , JPEG, PNG, HEIF/HEIC/AVIF, WebP, GIF for stills; MP4, QuickTime MOV, and the
+// common ISO-BMFF brands plus WebM/Matroska for video , and falls back to KindUnknown/.bin for
+// anything else so nothing is ever silently mis-archived.
 func Sniff(b []byte) SniffResult {
 	if len(b) < 12 {
 		return SniffResult{KindUnknown, ".bin", ""}
@@ -42,21 +45,9 @@ func Sniff(b []byte) SniffResult {
 		return SniffResult{KindPhoto, ".webp", "image/webp"}
 	}
 
-	// --- ISO base media file format (MP4/MOV/HEIF share the ftyp box) ---
-	// Bytes 4..8 are "ftyp"; the 4-byte major brand at 8..12 disambiguates still (HEIC) vs video (MP4/MOV).
+	// --- ISO base media file format (MP4/MOV/3GP and HEIF/AVIF share the ftyp box) ---
 	if bytes.Equal(b[4:8], []byte("ftyp")) {
-		brand := string(b[8:12])
-		switch brand {
-		case "heic", "heix", "hevc", "heim", "heis", "mif1", "msf1":
-			return SniffResult{KindPhoto, ".heic", "image/heic"}
-		case "avif", "avis":
-			return SniffResult{KindPhoto, ".avif", "image/avif"}
-		case "qt  ":
-			return SniffResult{KindVideo, ".mov", "video/quicktime"}
-		default:
-			// isom, mp41, mp42, iso2, iso5, M4V, dash, etc. , treat as MP4 video.
-			return SniffResult{KindVideo, ".mp4", "video/mp4"}
-		}
+		return sniffISO(b)
 	}
 
 	// --- Matroska / WebM (EBML header) ---
@@ -71,4 +62,61 @@ func Sniff(b []byte) SniffResult {
 	}
 
 	return SniffResult{KindUnknown, ".bin", ""}
+}
+
+// heifBrands are the ISO-BMFF brands that name a STILL: the HEIF image brands (ISO 23008-12; every
+// HEIF image file carries mif1 among its compatible brands, whatever its major brand says), the
+// MIAF profile brands, and AVIF. A clip's brands are isom, mp41, mp42, avc1, qt, 3gp and kin, and a
+// clip never carries an image brand.
+var heifBrands = map[string]bool{
+	"mif1": true, "msf1": true, "miaf": true, "jpeg": true,
+	"heic": true, "heix": true, "hevc": true, "hevx": true,
+	"heim": true, "heis": true, "hevm": true, "hevs": true,
+	"MiHE": true, "MiPr": true, "MiHB": true, "MiAC": true, "MiAB": true,
+	"avif": true, "avis": true,
+}
+
+// sniffISO tells a still from a clip inside the ISO base media format. The major brand alone is not
+// enough: a phone's HEIF photo can carry a major brand outside the familiar few (hevx for a 10-bit
+// or HDR still, heif on some cameras, mif1 with the real brand among the compatible ones), and
+// reading only the major brand filed such photos as MP4 videos, with a play glyph on every
+// thumbnail of a day. So every brand the ftyp box lists is read; an image brand anywhere makes it a
+// still. A box with no brand to decide by is told by what follows ftyp: a HEIF puts its meta box
+// there, a clip its moov or mdat.
+func sniffISO(b []byte) SniffResult {
+	size := int(binary.BigEndian.Uint32(b[0:4]))
+	if size < 16 || size > len(b) {
+		size = len(b)
+		if size > 256 {
+			size = 256
+		}
+	}
+	major := string(b[8:12])
+	brands := []string{major}
+	for i := 16; i+4 <= size; i += 4 {
+		brands = append(brands, string(b[i:i+4]))
+	}
+	still, avif := false, false
+	for _, br := range brands {
+		if heifBrands[br] {
+			still = true
+		}
+		if br == "avif" || br == "avis" {
+			avif = true
+		}
+	}
+	if !still && size+8 <= len(b) && string(b[size+4:size+8]) == "meta" {
+		still = true // no brand named it, but it is built like a HEIF: ftyp, then the item meta
+	}
+	switch {
+	case still && avif:
+		return SniffResult{KindPhoto, ".avif", "image/avif"}
+	case still:
+		return SniffResult{KindPhoto, ".heic", "image/heic"}
+	case major == "qt  ":
+		return SniffResult{KindVideo, ".mov", "video/quicktime"}
+	default:
+		// isom, mp41, mp42, iso2, iso5, M4V, 3gp, dash, etc. , an MP4 video
+		return SniffResult{KindVideo, ".mp4", "video/mp4"}
+	}
 }

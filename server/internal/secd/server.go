@@ -317,6 +317,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/days", s.handleDays)                         // the prebuilt day summaries, newest first (?before&limit)
 	mux.HandleFunc("/v1/day", s.handleDay)                           // one day's summary (?d=YYYY-MM-DD&build=1 writes it now, after the check-in)
 	mux.HandleFunc("/v1/devices/name", s.handleDeviceName)           // a device names itself
+	mux.HandleFunc("/v1/devices/retire", s.handleDeviceRetire)       // a sibling phone refused from now on
 	mux.HandleFunc("/v1/devices", s.handleDevices)                   // enrolled phones, honest stats
 	mux.HandleFunc("/v1/sync/reset", s.handleSyncReset)              // rewind this device's cursors
 	mux.HandleFunc("/v1/checkins", s.handleCheckins)                 // past check-ins, newest first

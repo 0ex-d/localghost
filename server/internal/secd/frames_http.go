@@ -1587,6 +1587,35 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"devices": rows})
 }
 
+// handleDeviceRetire , POST /v1/devices/retire {"device":"<key>"} , a sibling phone is refused
+// from now on (lost, sold, lent and not returned). Never the caller: a phone cannot lock itself
+// out by a slip, and the one in hand is the one that is trusted. The key is the 16-hex name the
+// DEVICES list shows.
+func (s *Server) handleDeviceRetire(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodPost {
+		s.appearsDown(w)
+		return
+	}
+	var req struct {
+		Device string `json:"device"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&req); err != nil {
+		s.appearsDown(w)
+		return
+	}
+	me := deviceKey(r)
+	if req.Device == "" || req.Device == me || (len(req.Device) > 16 && req.Device[:16] == me) {
+		writeErr(w, http.StatusBadRequest, "not this phone")
+		return
+	}
+	if err := s.Retire(req.Device); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "retired": strings.ToLower(req.Device)})
+}
+
 // handleDeviceName , POST /v1/devices/name {"name":"...","model":"..."} , the calling device
 // names ITSELF (identity comes from its certificate, so no device can rename another).
 func (s *Server) handleDeviceName(w http.ResponseWriter, r *http.Request) {

@@ -40,6 +40,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/LocalGhostDao/localghost/server/internal/hw"
 )
 
 const rekeyMessage = "localghost rekey v1\n"
@@ -100,12 +102,70 @@ func (rc *retiredCerts) load() {
 	defer f.Close()
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
-		if id := strings.TrimSpace(sc.Text()); len(id) == 64 {
+		if id := strings.TrimSpace(sc.Text()); len(id) == 64 || len(id) == 16 {
 			rc.ids[id] = true
 		}
 	}
 }
 
+// Retire refuses a phone from now on: its device key (16 hex, as `devices` lists them) or a
+// certificate's full id goes on the retired list on the OS disk, so it holds while the box is
+// locked too, and everything that certificate presents is answered as if the box were down, the
+// PIN entry included. There is no un-retire: a phone that should be back is enrolled again with a
+// fresh QR, and gets a new key and a new name. The operator's way (`ghost-cli ghost.secd retire
+// id=…`) and the phone's (POST /v1/devices/retire, never itself) both land here.
+func (s *Server) Retire(key string) error {
+	key = strings.ToLower(strings.TrimSpace(key))
+	if len(key) != 16 && len(key) != 64 {
+		return errors.New("a device key is 16 hex characters (ghost-cli ghost.secd devices lists them), a certificate id 64")
+	}
+	for _, ch := range key {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+			return errors.New("a device key is hex")
+		}
+	}
+	if err := s.retired.add(key); err != nil {
+		return err
+	}
+	secdLog.Warn("device retired: every certificate it presents is refused from now on", "fn", "Retire", "device", key)
+	return nil
+}
+
+// DevicesView is what `ghost-cli ghost.secd devices` prints: the enrolled phones with what each
+// has done (when the volume is open; the cursors live there) and how many are retired.
+type DevicesView struct {
+	Locked  bool           `json:"locked"`
+	Devices []hw.DeviceRow `json:"devices,omitempty"`
+	Retired int            `json:"retired"`
+	Note    string         `json:"note,omitempty"`
+}
+
+// Devices lists the enrolled phones for the control socket.
+func (s *Server) Devices() DevicesView {
+	s.retired.mu.Lock()
+	s.retired.load()
+	n := len(s.retired.ids)
+	s.retired.mu.Unlock()
+	v := DevicesView{Retired: n}
+	s.mu.Lock()
+	mounted := s.mounted
+	s.mu.Unlock()
+	if mounted < 0 {
+		v.Locked = true
+		v.Note = "the volume is locked: the phones' records are on it; retire works regardless"
+		return v
+	}
+	rows, err := s.notif.DevicesInfo(mounted)
+	if err != nil {
+		v.Note = "devices: " + err.Error()
+		return v
+	}
+	v.Devices = rows
+	return v
+}
+
+// has: the certificate's full id, or its device key (the first 16 of it, the name every listing
+// shows and `retire` takes); a retired device key refuses every certificate that key names.
 func (rc *retiredCerts) has(id string) bool {
 	if id == "" {
 		return false
@@ -113,7 +173,7 @@ func (rc *retiredCerts) has(id string) bool {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 	rc.load()
-	return rc.ids[id]
+	return rc.ids[id] || (len(id) > 16 && rc.ids[id[:16]])
 }
 
 func (rc *retiredCerts) add(id string) error {

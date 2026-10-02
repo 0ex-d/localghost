@@ -1,47 +1,84 @@
 # Contributing to LocalGhost
 
-Thanks for stopping by. Here's an honest state of things so you know what's useful right now.
+Thanks for stopping by. Here is an honest state of things, so you know what is useful right now.
 
-## What This Project Is
+## What this is
 
-LocalGhost is a local-first, privacy-focused AI platform. Everything runs on hardware you own. Nine daemons, each with one job, all open-source. The [manifesto](https://www.localghost.ai/manifesto) is the long version.
+A box at home that keeps a person's photos, trail, notes, voice, health and chats, reads them with
+models that run on the box, and gives them back on the phone. A fleet of Go daemons on a Debian
+box with a GPU (`server/`), and an Android app that is the only client (`app/android/`). The
+[README](README.md) is the shape of it, [the release notes](server/releases/0.0.1.md) are the
+whole of what wisp 0.0.1 does and how it works, and `server/tools/DEV_UPDATE.md` is the
+engineering journal, newest at the end: what changed, why, and what was tested.
 
-## Where We Are
+## Where we are
 
-Phase 0. Website, architecture, and [ten essays](https://www.localghost.ai/hard-truths) documenting the thinking. First commit incoming. That means some things are useful to contribute now, some things aren't useful yet, and a few things will never be useful.
+One release, wisp 0.0.1, cut on 2 October 2026. One box runs it with one phone, every day. The
+code is the truth; where an essay on the website and the code disagree, the code is what ships
+and the essay is where it is going.
 
-## Useful Right Now
+## Useful right now
 
-**Read the Hard Truths and tell me where the reasoning is weak.** Especially [The Honeypot Under Your Desk](https://www.localghost.ai/hard-truths/honeypot) (the threat model), [Dictator Brain](https://www.localghost.ai/hard-truths/dictator-brain) (the adversarial mirror architecture), and [The Model Trap](https://www.localghost.ai/hard-truths/model-trap) (the behavioural test suite approach). Open an issue with "Feedback: [post title]" if you spot holes.
+**Run it and say what broke.** A box is a Debian machine with an NVIDIA GPU and a spare NVMe;
+`server/tools/README.md` is the setup. An issue with the daemon's log lines
+(`journalctl -u ghost.<name>`) and the Box Status screen is a good issue. A photo format the box
+got wrong, a trail the map drew badly, a story that said something the facts did not, are all bugs.
 
-**Pressure-test the architecture docs.** `docs/SECURITY.md` covers the multi-PIN model. If you've broken a similar system before, or know a case the current design doesn't handle, tell me.
+**Fix a bug with a test.** Every package has tests beside it (`go test ./...`; the Postgres ones
+run when `GHOST_PG_SOCKET_DIR` names a Postgres socket directory and skip otherwise). A pull
+request that adds the failing case first is easy to say yes to.
 
-**Build something in the [ecosystem roadmap](https://www.localghost.ai/build).** Data liberation tools, cross-device sync without the cloud, a local photo library that doesn't suck. LocalGhost can't build everything and shouldn't. If you build one of these, add it to the [Freehold Directory](https://www.localghost.ai/directory) when it's ready.
+**Read the security model and tell me where it is weak.** [SECURITY.md](SECURITY.md) says how to
+report; the [release notes' known gaps](server/releases/0.0.1.md#known-gaps-at-wisp) say what is
+already known. If you have broken a similar system, or know a case the design does not handle,
+say so.
 
-**Write `ghost.tallyd` plugin specs.** When `ghost.tallyd` exists, it'll need data parsers for bank exports, health apps, fitness trackers, anything that exports structured data. The plugin architecture will be modular. Sketches and proposed schemas for these parsers are useful now so the plugin API gets designed around real inputs rather than imagined ones.
+**A format, a feed, a source.** The box reads EXIF and ISO-BMFF, GeoTIFF, ZIM, OpenStreetMap's
+land and roads, Health Connect's days and samples, the exchanges' order books. A phone or a camera
+that writes something the box misreads is worth a fixture and a test.
 
-## Not Useful Yet
+## How changes land
 
-**Code contributions.** No code to contribute to. When `wisp` (v0.1) ships, this changes. Watch the repo.
+- One commit, one change, with the reason in the message. The tree is `gofmt`-clean in every
+  file a change touches.
+- A test for what changed, in the package that changed. No network in tests; a fake mirror, a
+  fake exchange, a fixture file.
+- Nothing is dropped from the schema automatically. Adding is fine (`internal/hw/schemadef.go`
+  converges at every start); dropping is a named, dated migration a person decides on.
+- Nothing fetches from an upstream. The mirror, checked against its signed manifest, is the only
+  place setup and updates take files from, and an unreachable mirror stops the step rather than
+  falling back. If something needs a new public dataset, it goes onto the mirror first.
+- Nothing leaves the box but what the [README](README.md#what-leaves-the-box) names. A feature
+  that needs a request beyond that list needs a conversation first, in an issue.
+- The standard library first. The server's dependencies are go-tpm, `x/crypto` and `x/term`, and
+  that list grows for a reason, not for convenience. The decoders (zstd, ZIM, GeoTIFF, EXIF,
+  ISO-BMFF) are written in the tree for that reason.
+- A note at the end of `server/tools/DEV_UPDATE.md`: what changed, why, what was tested.
+- CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs `go vet`, every Go test, a
+  macOS cross-compile and the app's JVM tests on every push and pull request. A box is Linux;
+  the tree still builds on a Mac so it can be edited there (Linux-only calls live in
+  `_linux.go` files with a counterpart beside them).
 
-**Bug reports.** Same reason.
+## Not useful
 
-**Feature requests for unshipped daemons.** If you have ideas about what `ghost.shadowd` should do, read the [Dictator Brain](https://www.localghost.ai/hard-truths/dictator-brain) post first and open a discussion rather than an issue.
+**"Add crypto integration" / "Add blockchain to X".** Ethereum takes donations. The project is
+not crypto-adjacent beyond that, and the `.ai` domain is a coincidence, not a strategy.
 
-## Never Useful
+**"Centralise X for convenience".** The whole project exists to avoid this. If a feature needs a
+cloud dependency, it is either doing something wrong or it is not a LocalGhost feature.
 
-**"Add crypto integration" / "Add blockchain to X".** We use Ethereum for donations. The project isn't crypto-adjacent beyond that, and the `.ai` domain is a coincidence, not a strategy.
+**"Monetise X".** The [economics](https://www.localghost.ai/manifesto#economics) are documented.
+Hardware margin and optional software packages. No subscription.
 
-**"Centralise X for convenience".** The whole project exists to avoid this. If a feature requires a cloud dependency, it's either doing something wrong or it's not a LocalGhost feature.
+**A dependency for something the standard library does.**
 
-**"Monetise X".** The [economics](https://www.localghost.ai/manifesto#economics) are documented. Hardware margin and optional software packages. No subscription.
+## How to reach me
 
-## How to Reach Me
+Issues for anything public. PGP-encrypted email to `info@localghost.ai` for anything sensitive
+([the key](https://www.localghost.ai/.well-known/pgp-key.asc), fingerprint in
+[SECURITY.md](SECURITY.md)). Security issues have their own policy there.
 
-Issues for public discussion. PGP-encrypted email to `info@localghost.ai` for anything sensitive. Security issues have their own policy in [SECURITY.md](./SECURITY.md).
+## A note on pace
 
-## A Note on Scope
-
-This project is going to be built slowly and deliberately by someone who has built things before and doesn't need another startup to burn out on. Phase 0 means the foundation. The writing, the architecture, the design decisions that get locked in before the first line of code ships, those are the things that matter now, and those are the things worth contributing to.
-
-When the code lands, the contribution surface widens. Until then, the best contribution is an argument that makes the design better before it's written.
+This is built slowly and deliberately by one person who has built things before and does not
+need another startup to burn out on. Pull requests and issues get answered; it may take a week.

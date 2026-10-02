@@ -1,0 +1,62 @@
+# CI , what a box would build from this commit, checked on every push and pull request.
+#
+#   server   go vet and every Go test (the Postgres ones against the runner's own Postgres over its
+#            Unix socket, as on a box; they skip themselves when GHOST_PG_SOCKET_DIR is unset), then
+#            a cross-compile for macOS, so the tree keeps building where contributors edit it
+#   app      the Android app's JVM unit tests (no device, no emulator)
+#
+# Nothing here reaches outside GitHub but the module proxy and Maven; the box never runs any of it.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+      - name: Postgres, the runner's own, over its socket
+        run: |
+          sudo systemctl start postgresql
+          sudo -u postgres createuser -s "$USER"
+          sudo -u postgres psql -c "select version()"
+      - name: build
+        run: go build ./...
+      - name: vet
+        run: go vet ./...
+      - name: test
+        env:
+          GHOST_PG_SOCKET_DIR: /var/run/postgresql
+          GHOST_PG_PORT: "5432"
+          GHOST_PG_USER: runner
+        run: go test ./... -count=1
+      - name: builds on macOS too (a contributor's editor, not a box)
+        run: GOOS=darwin go vet ./...
+
+  app:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app/android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: unit tests
+        run: ./gradlew --no-daemon :app:testDebugUnitTest

@@ -226,7 +226,7 @@ func (b *llamaBackend) Start(ctx context.Context) error {
 	// ("left-over process llama-server in control group while starting unit") held port 18080
 	// and 9GB of VRAM, so the next oracled's child could not bind and every caption timed out
 	// for an hour. A SIGKILLed parent cannot clean up after itself; the kernel can.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
+	cmd.SysProcAttr = procs.ChildAttr()
 	cmd.Stdout = b.info.watcher(os.Stdout)
 	cmd.Stderr = b.info.watcher(os.Stderr)
 	if err := cmd.Start(); err != nil {

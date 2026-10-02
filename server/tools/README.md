@@ -424,6 +424,18 @@ The lock test matters as much as the unlock: lock from the app, watch the spin-d
 tick-up, then confirm the box answers 503 to everything and a wrong PIN is indistinguishable from a
 dead box. That indistinguishability is the product.
 
+A phone that is lost, sold or lent and not returned is retired, at the box or from another phone,
+and refused from then on, locked or not:
+
+    sudo ./tools/ns.sh ./bin/ghost-cli ghost.secd devices            # the enrolled phones, by device key
+    sudo ./tools/ns.sh ./bin/ghost-cli ghost.secd retire id=<key>    # that phone answered as if the box
+                                                                     # were down, the PIN entry included
+
+The retired list is on the OS disk (`/var/lib/ghost/devices/retired`, root's, keys only), so it
+holds while the volume is locked. There is no un-retire: the phone that should be back scans a
+fresh QR (`ghost-qr`) and is a new device. The same from a phone is `POST /v1/devices/retire`
+with a sibling's key, never its own.
+
 ## 8b. A user of their own for the daemons , root, once, with the box locked
 
 A box set up from 30 Sep 2026 has this already: setup.sh makes `ghostd` (GHOST_RUN_USER to name it
@@ -494,8 +506,9 @@ TERMS-MIT.txt, built reproducibly by `tools/release_build.sh`: the same tag give
 any machine, so anyone can rebuild a published release and compare it with the manifest), `app/`
 (the APK, its signature, APP.txt), `source/` (git archive of the tag) and SHA256SUMS with its
 signature. The script prints what comes next: push the tag, make the GitHub release with every
-file (`gh release create v0.0.1 --title "wisp 0.0.1" --notes-file releases/0.0.1.md $(find
-release/0.0.1 -type f)`), point the mirror's `server` set at the server files. The box reports itself as "wisp 0.0.1" (SETTINGS ›
+file (the `gh release create` line it prints; GitHub flattens the folders, so the server set's
+own SHA256SUMS stays home and every other name is unique), point the mirror's `server` set at the
+server files. The box reports itself as "wisp 0.0.1" (SETTINGS ›
 SERVER), and the phone offers the next release by its name. DEV_UPDATE.md, "A new server release
 from the phone", has how the box takes one.
 
