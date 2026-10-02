@@ -281,10 +281,14 @@ func reflectionLoop(ctx context.Context, mount string, store *hw.NotifStore, slo
 			}
 			db = poltergres.NewReadWrite(hw.SocketForMount(m), sc.Postgres.Port, sc.Postgres.RWUser, sc.Postgres.RWPass, sc.Postgres.Name)
 		}
+		memID := ""
 		pick := func(q string, args ...any) (string, string, bool) {
 			rows, err := db.Query(q, args...)
-			if err != nil || len(rows.Vals) == 0 || len(rows.Vals[0]) < 2 || rows.Vals[0][0] == nil || rows.Vals[0][1] == nil {
+			if err != nil || len(rows.Vals) == 0 || len(rows.Vals[0]) < 3 || rows.Vals[0][0] == nil || rows.Vals[0][1] == nil {
 				return "", "", false
+			}
+			if rows.Vals[0][2] != nil {
+				memID = *rows.Vals[0][2]
 			}
 			return *rows.Vals[0][0], *rows.Vals[0][1], true
 		}
@@ -293,12 +297,12 @@ func reflectionLoop(ctx context.Context, mount string, store *hw.NotifStore, slo
 		// found nothing, marked the day done, and the box never reflected on anything.
 		yearAgo := time.Now().AddDate(-1, 0, 0).Format("2006-01-02")
 		title, body, ok := pick(
-			"SELECT title, body FROM memories WHERE kind IN ('day','episode') AND NOT tombstoned AND source_ref IN ($1, $2)",
+			"SELECT title, body, id FROM memories WHERE kind IN ('day','episode') AND NOT tombstoned AND source_ref IN ($1, $2)",
 			"day:"+yearAgo, "episode:"+yearAgo)
 		head := "one year ago today"
 		if !ok {
 			title, body, ok = pick(
-				"SELECT title, body FROM memories WHERE kind IN ('day','episode') AND NOT tombstoned AND created_at < $1 ORDER BY random() LIMIT 1",
+				"SELECT title, body, id FROM memories WHERE kind IN ('day','episode') AND NOT tombstoned AND created_at < $1 ORDER BY random() LIMIT 1",
 				time.Now().AddDate(0, 0, -30).UnixMilli())
 			head = "a day worth revisiting"
 		}
@@ -308,7 +312,7 @@ func reflectionLoop(ctx context.Context, mount string, store *hw.NotifStore, slo
 			continue
 		}
 		if err := store.Produce(slot, hw.Notification{
-			Service: "ghost.cued", Kind: "reflection",
+			Service: "ghost.cued", Kind: "reflection", Link: "memories:" + memID,
 			Title: head + " , " + title,
 			Body:  body + " It is in your MEMORIES.",
 		}); err != nil {

@@ -14,6 +14,7 @@ import (
 
 	"github.com/LocalGhostDao/localghost/server/internal/egress"
 	"github.com/LocalGhostDao/localghost/server/internal/hw"
+	"github.com/LocalGhostDao/localghost/server/internal/oracle"
 )
 
 // Two feeds tell the same story, a third answers with an HTML page, a fourth is not fetched: the
@@ -307,5 +308,26 @@ func TestRetellAndBriefStories(t *testing.T) {
 	d, err := hw.NewsDocNow(db, now.Add(-48*time.Hour).Unix(), 0, now.Unix())
 	if err != nil || len(d.Stories) != 1 || d.Brief != "- One.\n- Two." || len(d.BriefStories) != 2 || d.BriefStories[1] != 2 {
 		t.Fatalf("%+v %v", d, err)
+	}
+}
+
+// "Write the brief now" says why when it cannot: no summaries yet; an up-to-date brief stands
+// unless the phone asks, and then the model is asked (here none answers, which it says).
+func TestBriefNowSaysWhy(t *testing.T) {
+	db := pgFresh(t, "lgtest_synthd_briefnow")
+	lg := slog.New(slog.NewTextHandler(io.Discard, nil))
+	oc := oracle.NewClient(t.TempDir(), time.Second)
+	now := time.Now()
+	if wrote, why, err := briefPass(db, oc, now, lg, true); err != nil || wrote || !strings.Contains(why, "fewer than two") {
+		t.Fatalf("%v %q %v", wrote, why, err)
+	}
+	_ = db.Exec(`INSERT INTO news_stories (id, first_seen, last_seen, title, sources, summary, written_by) VALUES
+		(1, $1, $1, 'A', 3, 'The first story.', 'model'), (2, $1, $1, 'B', 2, 'The second story.', 'model')`, now.Unix())
+	_ = db.Exec(`INSERT INTO settings (key, value) VALUES ('news_brief', $1)`, `{"at":`+strconv.FormatInt(now.Unix()-60, 10)+`,"text":"- One.\n- Two.","stories":[1,2]}`)
+	if wrote, why, _ := briefPass(db, oc, now, lg, false); wrote || why != "the brief is up to date" {
+		t.Fatalf("%v %q", wrote, why)
+	}
+	if wrote, why, _ := briefPass(db, oc, now, lg, true); wrote || why == "the brief is up to date" || why == "" {
+		t.Fatalf("forced, past the age check: %v %q", wrote, why)
 	}
 }

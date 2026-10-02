@@ -878,7 +878,10 @@ func (s *Store) SetState(key string, value []byte) error {
 // this ISO week has not been announced yet, drops a notification , framed offering the person a
 // look back, not an engagement hook: once a week, factual, and mutable like every notification.
 func (s *Store) WeeklyHighlight() error {
-	wk := time.Now().UTC().Format("2006-W02")
+	// the ISO week: "2006-W02" is a Go layout, so its "02" was the day of the month, the key
+	// changed every day and the same week was announced every day (found 2 Oct 2026)
+	y, w := time.Now().UTC().ISOWeek()
+	wk := fmt.Sprintf("%d-W%02d", y, w)
 	rows, err := s.db.Query("SELECT value FROM settings WHERE key = 'framed_week_highlight'")
 	if err == nil && len(rows.Vals) == 1 && rows.Vals[0][0] != nil && *rows.Vals[0][0] == wk {
 		return nil // this week already highlighted
@@ -905,9 +908,9 @@ func (s *Store) WeeklyHighlight() error {
 		dayName = t.Weekday().String()
 	}
 	if err := s.db.Exec(
-		"INSERT INTO notifications (service, kind, title, body, seen, options, created) VALUES ('ghost.framed','highlight',$1,$2,FALSE,'',now())",
+		"INSERT INTO notifications (service, kind, title, body, seen, options, created, link) VALUES ('ghost.framed','highlight',$1,$2,FALSE,'',now(),$3)",
 		"your week in frames",
-		dayName+" was the big one , "+n+" photos"+place+". They are on your MAP."); err != nil {
+		dayName+" was the big one , "+n+" photos"+place+". They are on your MAP.", "map:"+day); err != nil {
 		return err
 	}
 	return s.db.Exec(

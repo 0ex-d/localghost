@@ -349,6 +349,10 @@ func (s *Server) checkinReminderLoop() {
 		if mounted < 0 || s.notif == nil {
 			continue
 		}
+		// a week of notifications is kept; older ones go, every half hour while unlocked
+		if n, err := s.notif.PruneNotifications(mounted, time.Now()); err == nil && n > 0 {
+			secdLog.Info("notifications older than a week deleted", "fn", "checkinReminderLoop", "n", n)
+		}
 		h := time.Now().Hour()
 		if h < 19 || h > 21 {
 			continue
@@ -364,7 +368,7 @@ func (s *Server) checkinReminderLoop() {
 			continue
 		}
 		_ = s.notif.Produce(mounted, hw.Notification{
-			Service: "ghost.secd", Kind: "checkin",
+			Service: "ghost.secd", Kind: "checkin", Link: "memories",
 			Title: "how are you feeling today?",
 			Body:  "a couple of feelings are already ticked from your day , change them, or say a minute about it in a voice note",
 		})

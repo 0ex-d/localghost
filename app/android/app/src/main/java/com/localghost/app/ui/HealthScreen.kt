@@ -28,7 +28,7 @@ import com.localghost.app.ui.theme.*
 
 private val metricLabels = mapOf(
     "steps" to "steps", "sleep_minutes" to "sleep", "exercise_minutes" to "exercise",
-    "distance_km" to "distance", "calories" to "calories", "floors" to "floors",
+    "distance_km" to "distance", "active_calories" to "active kcal", "floors" to "floors",
     "hr_avg" to "heart rate (avg)", "hr_min" to "heart rate (min)", "hr_max" to "heart rate (max)",
     "weight_kg" to "weight",
 )
@@ -75,8 +75,9 @@ fun HealthScreen() {
             }
             else -> {
                 val order = listOf("steps", "sleep_minutes", "exercise_minutes", "distance_km",
-                    "calories", "floors", "hr_avg", "hr_max", "hr_min", "weight_kg")
-                val sorted = series!!.filter { it.values.isNotEmpty() }
+                    "active_calories", "floors", "hr_avg", "hr_max", "hr_min", "weight_kg")
+                // "calories" was Health Connect's resting estimate (a constant), not a measurement
+                val sorted = series!!.filter { it.values.isNotEmpty() && it.metric != "calories" }
                     .sortedBy { order.indexOf(it.metric).let { i -> if (i < 0) 99 else i } }
                 items(sorted, key = { it.metric }) { s ->
                 MetricCard(s)

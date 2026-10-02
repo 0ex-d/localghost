@@ -322,7 +322,7 @@ private fun phoneTracks(ctx: android.content.Context, box: List<Track>): List<Tr
 }
 
 @Composable
-fun MapScreen() {
+fun MapScreen(openDay: String = "", onDayShown: () -> Unit = {}) {
     val ctx = LocalContext.current
     val density = LocalDensity.current.density
     var world by remember { mutableStateOf<World?>(null) }
@@ -360,6 +360,17 @@ fun MapScreen() {
     // the newest day is the one shown until another is picked (and again if the picked one is gone)
     LaunchedEffect(days) {
         if (days.isNotEmpty() && days.none { it.first == trailDay }) trailDay = days.first().first
+    }
+    // a notification's day ("your week in frames"): lit and framed once the days are in, then let go
+    LaunchedEffect(days, openDay) {
+        if (openDay.isEmpty() || days.isEmpty()) return@LaunchedEffect
+        if (days.any { it.first == openDay }) {
+            trailDay = openDay
+            showAll = false
+            scrub = 1f
+            frameTick++
+        }
+        onDayShown()
     }
     fun stepDay(older: Boolean) {
         val i = days.indexOfFirst { it.first == trailDay }

@@ -205,7 +205,7 @@ func (w *Worker) one(ctx context.Context, kind string, do func(context.Context, 
 			// nothing on the box can read the picture (oracled tried Go's decoder and ffmpeg): no
 			// attempt will ever caption it, so the job is done without one, like a picture past
 			// the size limits, instead of failing five times and coming back at every stock-take.
-			// framed marks the frame unreadable and Box Status counts it apart.
+			// framed moves the photo to frames/damaged and Box Status counts it there.
 			w.Log.Info("image unreadable (damaged), left without a caption", "fn", "one", "kind", kind, "job", job.ID)
 			_ = w.Store.CompleteJob(job.ID)
 			w.Work.Add(kind+" unreadable", 1)

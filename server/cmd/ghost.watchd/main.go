@@ -115,7 +115,7 @@ func main() {
 				cfg.Postgres.RWUser, cfg.Postgres.RWPass, cfg.Postgres.Name)
 		}
 		if err := notifDB.Exec(
-			"INSERT INTO notifications (service, kind, title, body, seen, options, created) VALUES ($1,$2,$3,$4, FALSE, '[]', now())",
+			"INSERT INTO notifications (service, kind, title, body, seen, options, created, link) VALUES ($1,$2,$3,$4, FALSE, '[]', now(), 'status')",
 			service, kind, title, body); err != nil {
 			jlog.Warn("alert write failed", "fn", "main", "svc", service, "err", err)
 			notifDB = nil // reconnect on the next transition , Postgres may have been mid-restart

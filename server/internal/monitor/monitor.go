@@ -291,20 +291,44 @@ func prices(db *poltergres.ReadWrite, now time.Time) Section {
 		}
 		s.Rows = append(s.Rows, r)
 	}
-	// the fast lane: BTC, ETH and SOL every five seconds, one fetch-log line a minute
+	// the fast lane: BTC, ETH and SOL every five seconds from every venue, one fetch-log line per
+	// venue a minute; a venue that misses gets its own row
 	if st, err := feedstat.Stats(db, feedstat.KindFast, now.Add(-time.Hour), false); err == nil && len(st) > 0 {
-		t := st[0]
-		r := Row{K: "BTC, ETH, SOL every 5 s", V: fmt.Sprintf("%.0f%% of minutes clean · %s typical (last hour)", 100*t.Rate(), Ms(t.P50Ms))}
+		answering := 0
+		var p50s []int
+		var bad []Row
+		for _, v := range st {
+			ok := v.LastOKAt > 0 && now.Unix()-v.LastOKAt <= 5*60
+			if ok {
+				answering++
+			}
+			if v.P50Ms > 0 {
+				p50s = append(p50s, v.P50Ms)
+			}
+			if !ok || v.Rate() < 0.9 {
+				r := Row{K: "every 5 s, " + strings.TrimPrefix(v.Key, "fast:"), V: fmt.Sprintf("%.0f%% of minutes clean (last hour)", 100*v.Rate()), State: Flaky}
+				if !ok {
+					r.State = Failing
+				}
+				if v.LastError != "" {
+					r.V += " · last: " + v.LastError
+				}
+				bad = append(bad, r)
+			}
+		}
+		r := Row{K: "BTC, ETH, SOL every 5 s", V: fmt.Sprintf("%d of %d venues answering", answering, len(st))}
+		if len(p50s) > 0 {
+			sort.Ints(p50s)
+			r.V += " · " + Ms(p50s[len(p50s)/2]) + " typical"
+		}
 		switch {
-		case t.LastOKAt == 0 || now.Unix()-t.LastOKAt > 5*60:
+		case answering == 0:
 			r.State = Failing
-		case t.Rate() < 0.9:
+		case len(bad) > 0:
 			r.State = Flaky
 		}
-		if t.LastError != "" && r.State != "" {
-			r.V += " · last: " + t.LastError
-		}
 		s.Rows = append(s.Rows, r)
+		s.Rows = append(s.Rows, bad...)
 	}
 	s.Line = fmt.Sprintf("%d of %d symbols", priced, len(followed))
 	if x, ok := bySym["BTC"]; ok {

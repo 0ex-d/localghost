@@ -43,6 +43,11 @@ type Result struct {
 	Unparsable bool   `json:"unparsable"` // the file was not a batch at all (dropped, never retried)
 }
 
+// RestingEstimate is the metric older phone builds sent as "calories": Health Connect's total
+// calories, which on a box fed by Samsung Health is a resting estimate (the same 1,564 kcal every
+// day). It is not kept; "active_calories" is the measurement.
+const RestingEstimate = "calories"
+
 // metricOK: a short lowercase name with underscores and digits, nothing a phone could smuggle
 // SQL or a novel into.
 func metricOK(m string) bool {
@@ -128,6 +133,10 @@ func Ingest(db *poltergres.ReadWrite, raw []byte) (Result, error) {
 		}
 		wrote := 0
 		for metric, val := range d.Metrics {
+			if metric == RestingEstimate {
+				res.Dropped++ // Health Connect's resting estimate from an older phone build: not a measurement
+				continue
+			}
 			if !metricOK(metric) {
 				res.Dropped++
 				continue
@@ -181,8 +190,8 @@ func JournalLine(m map[string]float64) string {
 	if v, ok := m["floors"]; ok && v > 0 {
 		parts += fmt.Sprintf("%d floors. ", int(v))
 	}
-	if v, ok := m["calories"]; ok && v > 0 {
-		parts += fmt.Sprintf("%d kcal. ", int(v))
+	if v, ok := m["active_calories"]; ok && v > 0 {
+		parts += fmt.Sprintf("%d active kcal. ", int(v))
 	}
 	if v, ok := m["hr_avg"]; ok && v > 0 {
 		hi := ""

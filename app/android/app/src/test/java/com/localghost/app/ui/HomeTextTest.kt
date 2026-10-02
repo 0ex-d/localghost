@@ -69,4 +69,12 @@ class HomeTextTest {
         assertEquals(null, old[0].story)
         assertEquals(0, HomeText.points("", emptyList()).size)
     }
+
+    @Test fun pricesSayWhenAndFromHowMany() {
+        assertEquals("updated just now · 6 exchanges", HomeText.pricesLine(now - 1, now, 6))
+        assertEquals("updated 4 s ago", HomeText.pricesLine(now - 4, now, 1))
+        assertEquals("updated 2 min ago · 5 exchanges", HomeText.pricesLine(now - 125, now, 5))
+        assertEquals("", HomeText.pricesLine(0, now, 0))
+        assertEquals("the box did not answer", HomeText.briefNot(""))
+    }
 }

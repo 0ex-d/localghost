@@ -13,7 +13,7 @@ func TestApplyFast(t *testing.T) {
 		"SOL": {Price: 200, At: now.Unix() - 50, Change24: -1, HasChange: true},
 	}}
 	f := Fast{At: now.UnixMilli(), Prices: map[string]FastPrice{
-		"BTC": {Price: 102_000, At: now.UnixMilli() - 2000},
+		"BTC": {Price: 102_000, At: now.UnixMilli() - 2000, N: 5, Used: []string{"binance", "bitstamp", "coinbase", "kraken", "okx"}, Spread: 0.001},
 		"ETH": {Price: 4_010, At: now.UnixMilli() - 60_000}, // too old
 		"SOL": {Price: 260, At: now.UnixMilli() - 1000},     // 30% off the minute: a bad print
 		"XRP": {Price: 3, At: now.UnixMilli()},              // not in the index
@@ -23,7 +23,8 @@ func TestApplyFast(t *testing.T) {
 	}
 	b := s.Index["BTC"]
 	// the same price a day ago (100000/1.02) against the trade: +4.04%
-	if !b.Fast || b.Price != 102_000 || b.At != now.Unix()-2 || s.BTCUSD != 102_000 || b.Change24 < 4.03 || b.Change24 > 4.05 {
+	if !b.Fast || b.Price != 102_000 || b.At != now.Unix()-2 || s.BTCUSD != 102_000 || b.Change24 < 4.03 || b.Change24 > 4.05 ||
+		b.N != 5 || b.Used != "binance,bitstamp,coinbase,kraken,okx" || s.BTCN != 5 {
 		t.Fatalf("%+v %v", b, s.BTCUSD)
 	}
 	if s.Index["ETH"].Fast || s.Index["ETH"].Price != 4_000 || s.Index["SOL"].Price != 200 {

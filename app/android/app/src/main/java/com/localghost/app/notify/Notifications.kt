@@ -57,12 +57,14 @@ object Notifications {
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
 
     /** Tapping a notification opens the app; AFTER the security gate (biometric/PIN as always)
-     *  the app navigates to the notification inside , NOTIFICATIONS for most, MEMORIES for the
-     *  check-in ask. The extra rides the launch intent; unlock consumes it. */
-    private fun tapPI(ctx: Context, kind: String, reqCode: Int): PendingIntent {
+     *  the app goes to the thing it is about (NotifLink): the day on MAP, the memory, NEWS, Box
+     *  Status; NOTIFICATIONS when it names nothing. The extra rides the launch intent; unlock
+     *  consumes it. */
+    private fun tapPI(ctx: Context, item: PendingNotification, reqCode: Int): PendingIntent {
         val i = android.content.Intent(ctx, com.localghost.app.MainActivity::class.java).apply {
             action = "com.localghost.app.OPEN_NOTIFICATION"
-            putExtra("nav", when (kind) { "checkin", "nearby" -> "memories"; "news" -> "news"; else -> "notifications" })
+            // where the box says it goes (the day on MAP, the memory, NEWS), else by its kind
+            putExtra("nav", com.localghost.app.ui.NotifLink.nav(item.link, item.daemonId, item.kind))
             flags = android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
         return PendingIntent.getActivity(ctx, reqCode, i,
@@ -75,7 +77,7 @@ object Notifications {
         items.forEach { item ->
             val d = Daemon.from(item.daemonId)
             nm.notify(d.ordinal + 100, NotificationCompat.Builder(ctx, CHANNEL_ID)
-                .setContentIntent(tapPI(ctx, item.kind, (item.id % 10000).toInt()))
+                .setContentIntent(tapPI(ctx, item, (item.id % 10000).toInt()))
                 .setSmallIcon(d.icon)
                 .setColor(d.color)
                 .setSubText(d.label)

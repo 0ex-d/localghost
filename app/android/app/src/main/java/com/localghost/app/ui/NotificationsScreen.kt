@@ -28,11 +28,13 @@ enum class SessionHint { NONE, EXPIRING_SOON, EXPIRED }
 fun NotificationsScreen(
     @Suppress("UNUSED_PARAMETER") items: Loadable<List<PendingNotification>>,
     sessionHint: SessionHint = SessionHint.NONE,
+    onOpen: (NotifLink.Target) -> Unit = {},
 ) {
     // THE HISTORY, read when the screen opens: what every daemon on the box has said, newest
     // first. Reading it consumes nothing (the push the phone's pollers take is a separate cursor),
     // so what a notification said is here after it was shown, and here when it was never shown
-    // (muted, or the phone was off). Tapping one marks it seen; ✕ deletes it on the box.
+    // (muted, or the phone was off). Tapping one marks it seen and opens what it is about (the day
+    // on MAP, the memory, NEWS, Box Status: NotifLink); ✕ deletes it on the box. A week is kept.
     val ctx = androidx.compose.ui.platform.LocalContext.current
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     var history by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<Loadable<List<PendingNotification>>>(Loadable.Loading) }
@@ -61,7 +63,7 @@ fun NotificationsScreen(
             Spacer(Modifier.height(12.dp))
             SectionLabel("FROM THE BOX")
             Spacer(Modifier.height(4.dp))
-            Text("what the box's daemons have said, newest first · a tap marks one read · nothing is pushed through a third party",
+            Text("the last week, newest first · a tap opens it · nothing is pushed through a third party",
                 color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
             Spacer(Modifier.height(8.dp))
         }
@@ -78,6 +80,8 @@ fun NotificationsScreen(
                         if (!n.seen) scope.launch {
                             if (BoxClient.notificationSeen(ctx, n.id)) history = Loadable.Loaded(h.value.map { if (it.id == n.id) it.copy(seen = true) else it })
                         }
+                        val target = NotifLink.resolve(n.link, n.daemonId, n.kind)
+                        if (target.dest.isNotEmpty() && target.dest != "notifications") onOpen(target)
                     }
                     .padding(14.dp)) {
                     Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
@@ -96,6 +100,11 @@ fun NotificationsScreen(
                     Text(n.title, color = if (n.seen) GhostTextDim else GhostText, style = MaterialTheme.typography.titleMedium)
                     Spacer(Modifier.height(2.dp))
                     Text(n.body, color = GhostTextDim, style = MaterialTheme.typography.bodyMedium)
+                    val target = NotifLink.resolve(n.link, n.daemonId, n.kind)
+                    if (target.dest.isNotEmpty() && target.dest != "notifications") {
+                        Spacer(Modifier.height(6.dp))
+                        Text(NotifText.opens(target), color = TerminalGreen, style = MaterialTheme.typography.labelMedium)
+                    }
                 }
             }
         }

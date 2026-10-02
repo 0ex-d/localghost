@@ -6,7 +6,8 @@ package hw
 //
 //  1. NEVER destroy data. Missing things are created; mismatched types are migrated with an
 //     explicit cast when postgres can do it; columns that exist in the DB but not in the registry
-//     are DRIFT , logged loudly, left untouched. Dropping is a human decision, always.
+//     are DRIFT , logged loudly, left untouched. Dropping is a human decision, always (made, it
+//     goes in as a data migration below, named and dated).
 //  2. Users just run the latest build. Unlock runs Converge; whatever the box was missing, it
 //     gains; whatever changed shape, it migrates; the log says exactly what happened.
 //  3. One-shot DATA migrations (backfills, rebuilds) are versioned in schema_migrations and run
@@ -68,6 +69,8 @@ var schemaRegistry = []SchemaTable{
 		{"answer", "TEXT", true, "''"},
 		{"answered", "TIMESTAMPTZ", false, ""},
 		{"created", "TIMESTAMPTZ", true, "now()"},
+		// where a tap takes the phone: map:<day>, memories:<id>, memories:near, news, status
+		{"link", "TEXT", true, "''"},
 	}, Indexes: []string{
 		"CREATE INDEX IF NOT EXISTS notifications_id_desc ON notifications (id DESC)",
 	}},
@@ -544,6 +547,32 @@ var dataMigrations = []struct {
 	Run     func(db *poltergres.ReadWrite) error
 }{
 	{1, "baseline", func(db *poltergres.ReadWrite) error { return nil }},
+	// 2 Oct 2026, Vlad's call: what the removed features left behind goes. The paper sign-ins'
+	// table (news_logins, empty since they went) and the "unreadable" mark on frames (damaged
+	// photos are moved to frames/damaged instead).
+	{2, "drop the paper sign-ins and the unreadable mark", func(db *poltergres.ReadWrite) error {
+		if err := db.Exec("DROP TABLE IF EXISTS news_logins"); err != nil {
+			return err
+		}
+		return db.Exec("ALTER TABLE frames DROP COLUMN IF EXISTS unreadable")
+	}},
+	// 2 Oct 2026: "calories" was Health Connect's resting estimate, the same 1,564 kcal every day
+	// (Samsung Health shares no total), not a measurement; the phone now sends active kcal. The
+	// rows go, and the "N kcal." each health day's journal line carried.
+	{3, "drop the resting calorie estimate", func(db *poltergres.ReadWrite) error {
+		if err := db.Exec("DELETE FROM health_metrics WHERE metric = 'calories'"); err != nil {
+			return err
+		}
+		return db.Exec(`UPDATE journal_entries SET body = btrim(regexp_replace(body, '\s*[0-9]+ kcal\.', '', 'g'))
+			WHERE source = 'ghost.tallyd' AND ref LIKE 'health:%' AND body ~ '[0-9]+ kcal\.'`)
+	}},
+	// 2 Oct 2026: the weekly notifications (framed's week in frames, shadowd's observation) keyed
+	// their week by the day of the month and came again every day; one of each text is kept.
+	{4, "drop the repeated weekly notifications", func(db *poltergres.ReadWrite) error {
+		return db.Exec(`DELETE FROM notifications a USING notifications b
+			WHERE a.service IN ('ghost.framed', 'ghost.shadowd') AND a.kind IN ('highlight', 'observation')
+			AND b.service = a.service AND b.kind = a.kind AND b.title = a.title AND b.body = a.body AND a.id < b.id`)
+	}},
 }
 
 // normalizeType maps registry DDL types to information_schema.columns.data_type values.

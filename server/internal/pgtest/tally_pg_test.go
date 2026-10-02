@@ -43,6 +43,19 @@ func TestHealthIngestAgainstPostgres(t *testing.T) {
 	if err != nil || st.Days != 2 || st.Samples != 2 || st.NewestDay != "2026-09-30" || st.Metrics["steps"] != "2026-09-30" || st.LastValues["steps"] != 9000 || st.Metrics["hr_avg"] != "2026-09-30" {
 		t.Fatalf("status %+v %v", st, err)
 	}
+	// an older phone's "calories" (Health Connect's resting estimate) is not kept; active kcal is,
+	// and the day's line says so
+	if _, err := tally.Ingest(db, []byte(`{"days":[{"day":"2026-09-28","metrics":{"steps":7000,"calories":1564.5,"active_calories":456}}]}`)); err != nil {
+		t.Fatal(err)
+	}
+	rows, _ = db.Query("SELECT string_agg(metric, ',' ORDER BY metric) FROM health_metrics WHERE day = '2026-09-28'")
+	if len(rows.Vals) != 1 || *rows.Vals[0][0] != "active_calories,steps" {
+		t.Fatalf("metrics %v", rows.Vals)
+	}
+	rows, _ = db.Query("SELECT body FROM journal_entries WHERE ref = 'health:2026-09-28'")
+	if len(rows.Vals) != 1 || *rows.Vals[0][0] != "7000 steps. 456 active kcal." {
+		t.Fatalf("journal %q", *rows.Vals[0][0])
+	}
 	// not a batch: reported, no error (moved aside, never retried)
 	if res, err := tally.Ingest(db, []byte(`[1,2]`)); err != nil || !res.Unparsable {
 		t.Fatalf("unparsable %+v %v", res, err)

@@ -312,12 +312,14 @@ func groundedBrief(out string, summaries []string) (string, bool) {
 	return text, true
 }
 
-// briefPass writes the brief when the day's most-told stories changed, or when it is two hours old.
-func briefPass(db *poltergres.ReadWrite, oc *oracle.Client, now time.Time, lg *slog.Logger) (bool, error) {
+// briefPass writes the brief when the day's most-told stories changed, or when it is two hours
+// old; force (the phone's "write it now") writes it whatever its age. why says what it did, or
+// why it did not, in the phone's words.
+func briefPass(db *poltergres.ReadWrite, oc *oracle.Client, now time.Time, lg *slog.Logger, force bool) (wrote bool, why string, err error) {
 	rows, err := db.Query(`SELECT id, summary FROM news_stories WHERE last_seen >= $1 AND summary <> ''
 		ORDER BY sources DESC, last_seen DESC LIMIT $2`, now.Unix()-86400, briefStories)
 	if err != nil {
-		return false, err
+		return false, "", err
 	}
 	var ids []int64
 	var sums, leads []string
@@ -331,29 +333,32 @@ func briefPass(db *poltergres.ReadWrite, oc *oracle.Client, now time.Time, lg *s
 		leads = append(leads, newsLead(*v[1]))
 	}
 	if len(sums) < 2 {
-		return false, nil
+		return false, "fewer than two of the day's stories have a summary yet", nil
 	}
 	// a brief from before the points (prose) is written again at once
-	if old, ok := loadBrief(db); ok && strings.HasPrefix(old.Text, "- ") && sameIDs(old.Stories, ids) && now.Sub(time.Unix(old.At, 0)) < briefEvery {
-		return false, nil
+	if old, ok := loadBrief(db); !force && ok && strings.HasPrefix(old.Text, "- ") && sameIDs(old.Stories, ids) && now.Sub(time.Unix(old.At, 0)) < briefEvery {
+		return false, "the brief is up to date", nil
 	}
 	if onGPU, err := oc.OnGPU(); err != nil || !onGPU {
-		return false, nil
+		return false, "the model is on the CPU, the brief waits for the GPU", nil
 	}
 	resp, err := oc.Infer(oracle.Request{
 		Capability: "summarize", Class: oracle.ClassLocalSmall, Priority: oracle.PriorityBackground,
 		Input: briefPrompt(leads), MaxTokens: 360, Temperature: 0.2, DeadlineMS: 90000,
 	})
 	if err != nil || resp.Err != "" {
-		return false, nil
+		return false, "the model did not answer", nil
 	}
 	text, ok := groundedBrief(resp.Output, sums)
 	if !ok {
 		lg.Debug("news brief not grounded, kept the last", "fn", "briefPass")
-		return false, nil
+		return false, "the model's brief did not hold to the stories, the last one stands", nil
 	}
 	b, _ := json.Marshal(Brief{At: now.Unix(), Text: text, Stories: ids})
-	return true, db.Exec("INSERT INTO settings (key, value) VALUES ('news_brief', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", string(b))
+	if err := db.Exec("INSERT INTO settings (key, value) VALUES ('news_brief', $1) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", string(b)); err != nil {
+		return false, "", err
+	}
+	return true, "written", nil
 }
 
 func sameIDs(a, b []int64) bool {

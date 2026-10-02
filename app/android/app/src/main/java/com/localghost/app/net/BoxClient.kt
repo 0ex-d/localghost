@@ -20,7 +20,9 @@ import java.io.InputStream
 import org.json.JSONObject
 
 data class PendingNotification(val daemonId: String, val title: String, val body: String,
-    val id: Long = 0, val kind: String = "message", val seen: Boolean = false, val created: Long = 0)
+    val id: Long = 0, val kind: String = "message", val seen: Boolean = false, val created: Long = 0,
+    /** where a tap goes (NotifLink): "map:<day>", "memories:<id>", "news", "status"; "" for by kind */
+    val link: String = "")
 
 /** A saved conversation. Lives on the box (synthd); the phone lists + loads, holds the active
  *  one in memory only. */
@@ -671,7 +673,7 @@ object BoxClient {
                 val o = a.optJSONObject(i) ?: return@mapNotNull null
                 PendingNotification(o.optString("service", "ghost.secd"),
                     o.optString("title"), o.optString("body"),
-                    o.optLong("id"), o.optString("kind", "message"))
+                    o.optLong("id"), o.optString("kind", "message"), link = o.optString("link"))
             }
             if (out.isNotEmpty()) NotifyState.setLastPostedAt(ctx, now)
             out
@@ -688,7 +690,8 @@ object BoxClient {
         (0 until a.length()).mapNotNull { i ->
             val o = a.optJSONObject(i) ?: return@mapNotNull null
             PendingNotification(o.optString("service", "ghost.secd"), o.optString("title"), o.optString("body"),
-                o.optLong("id"), o.optString("kind", "message"), o.optBoolean("seen", false), o.optLong("created", 0L))
+                o.optLong("id"), o.optString("kind", "message"), o.optBoolean("seen", false), o.optLong("created", 0L),
+                o.optString("link"))
         }
     } catch (_: Exception) { null }
 
@@ -1260,19 +1263,37 @@ object BoxClient {
             r.optJSONObject("market")?.let { m -> Market(m.optString("code"), m.optDouble("value", 0.0), m.optDouble("dayChange", 0.0), m.optInt("constituents"), m.optInt("priced"), m.optString("month")) })
     } catch (_: Exception) { null }
 
-    /** BTC, ETH and SOL as of the last five seconds (/v1/rates/fast, from the box's Redis): each
-     *  symbol's price and 24-hour change; empty when the fast lane is quiet, null when unreachable. */
-    suspend fun fast(ctx: Context): Map<String, Pair<Double, Double?>>? = try {
+    /** The fast lane's last pass: when (unix ms; 0 when quiet), and each coin's price, 24-hour
+     *  change and how many exchanges went in. */
+    data class Fast(val at: Long, val prices: Map<String, Pair<Double, Double?>>, val venues: Map<String, Int>)
+
+    /** BTC, ETH and SOL as of the last five seconds (/v1/rates/fast, from the box's Redis, made from
+     *  every exchange the box follows); null when unreachable. */
+    suspend fun fast(ctx: Context): Fast? = try {
         val r = BoxHttp.getJson(ctx, "/v1/rates/fast")
-        val out = HashMap<String, Pair<Double, Double?>>()
+        val prices = HashMap<String, Pair<Double, Double?>>()
+        val venues = HashMap<String, Int>()
         r.optJSONObject("index")?.let { o ->
             o.keys().forEach { sym ->
                 val row = o.optJSONObject(sym) ?: return@forEach
                 val p = row.optDouble("price", 0.0)
-                if (p > 0) out[sym] = p to (if (row.optBoolean("hasChange")) row.optDouble("change24", 0.0) else null)
+                if (p > 0) {
+                    prices[sym] = p to (if (row.optBoolean("hasChange")) row.optDouble("change24", 0.0) else null)
+                    venues[sym] = row.optInt("n")
+                }
             }
         }
-        out
+        Fast(r.optLong("at"), prices, venues)
+    } catch (_: Exception) { null }
+
+    /** What "write the brief now" did: written, or why not, and the brief as it stands. */
+    data class BriefNow(val written: Boolean, val why: String, val brief: String, val briefAt: Long, val briefStories: List<Long>)
+
+    /** The day's brief written now (/v1/news/brief, up to two minutes on the box); null when unreachable. */
+    suspend fun writeBrief(ctx: Context): BriefNow? = try {
+        val r = BoxHttp.postJson(ctx, "/v1/news/brief", org.json.JSONObject(), 180_000)
+        BriefNow(r.optBoolean("written"), r.optString("why"), r.optString("brief"), r.optLong("briefAt"),
+            r.optJSONArray("briefStories")?.let { b -> (0 until b.length()).map { b.optLong(it) } } ?: emptyList())
     } catch (_: Exception) { null }
 
     /** One country as the box lists it: the tiles it holds for it, and their size on disk. */

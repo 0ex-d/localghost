@@ -282,6 +282,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/news/fetched", s.handleNewsFetched)          // the feeds' bytes, spooled for synthd
 	mux.HandleFunc("/v1/rates/fetched", s.handleRatesFetched)        // the tickers' bodies, spooled for tallyd
 	mux.HandleFunc("/v1/news", s.handleNews)                         // the stories, for the NEWS screen
+	mux.HandleFunc("/v1/news/brief", s.handleNewsBrief)              // the day's brief written now (home's button)
 	mux.HandleFunc("/v1/rates", s.handleRates)                       // the ECB table, the index per symbol, the rank list
 	mux.HandleFunc("/v1/rates/fast", s.handleRatesFast)              // BTC, ETH, SOL every five seconds, from Redis
 	mux.HandleFunc("/v1/rates/history", s.handleRatesHistory)        // a symbol's daily closes or a currency's daily rate

@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/LocalGhostDao/localghost/server/internal/apparedis"
@@ -566,7 +567,7 @@ func postDigest(db *poltergres.ReadWrite, now time.Time, kind, day string, produ
 	}
 	body := digestBody(stories)
 	if err := produce(hw.Notification{
-		Service: "ghost.synthd", Kind: "news",
+		Service: "ghost.synthd", Kind: "news", Link: "news",
 		Title: fmt.Sprintf("the news at %s: %d %s", kind, len(stories), pluralOf(len(stories), "story", "stories")),
 		Body:  body,
 	}); err != nil {
@@ -653,25 +654,9 @@ func newsLoop(ctx context.Context, mount, runDir string, produce func(hw.Notific
 	}
 	// the phone's copy of the last two days in Redis (hw.HotNews), rewritten after every batch and
 	// every slow pass, so /v1/news answers from memory
-	var rd *apparedis.ReadWrite
 	putHot := func() {
-		if db == nil {
-			return
-		}
-		if rd == nil {
-			r, err := hw.HotRedis(mount)
-			if err != nil {
-				return
-			}
-			rd = r
-		}
-		now := time.Now()
-		d, err := hw.NewsDocNow(db, now.Add(-hw.NewsHotDays*24*time.Hour).Unix(), 0, now.Unix())
-		if err != nil {
-			return
-		}
-		if err := hw.HotPut(rd, hw.HotNews, d, hw.HotNewsTTL); err != nil {
-			lg.Debug("news not put in redis", "fn", "newsLoop", "err", err)
+		if db != nil {
+			putHotNews(db, mount, lg)
 		}
 	}
 	drain := func() {
@@ -737,7 +722,7 @@ func newsLoop(ctx context.Context, mount, runDir string, produce func(hw.Notific
 		} else if n > 0 {
 			lg.Info("news summaries written", "fn", "newsLoop", "stories", n)
 		}
-		if wrote, err := briefPass(db, oc, now, lg); err != nil {
+		if wrote, _, err := briefPass(db, oc, now, lg, false); err != nil {
 			lg.Warn("news brief failed", "fn", "newsLoop", "err", err)
 		} else if wrote {
 			lg.Info("news brief written", "fn", "newsLoop")
@@ -793,6 +778,34 @@ func newsLoop(ctx context.Context, mount, runDir string, produce func(hw.Notific
 		case <-newsForce:
 			fetch(true)
 		}
+	}
+}
+
+var (
+	hotNewsMu  sync.Mutex
+	hotNewsRD  *apparedis.ReadWrite
+	briefNowMu sync.Mutex // one "write the brief now" at a time
+)
+
+// putHotNews writes the last two days of /v1/news to Redis (hw.HotNews), from the news loop and
+// from "write the brief now".
+func putHotNews(db *poltergres.ReadWrite, mount string, lg *slog.Logger) {
+	hotNewsMu.Lock()
+	defer hotNewsMu.Unlock()
+	if hotNewsRD == nil {
+		r, err := hw.HotRedis(mount)
+		if err != nil {
+			return
+		}
+		hotNewsRD = r
+	}
+	now := time.Now()
+	d, err := hw.NewsDocNow(db, now.Add(-hw.NewsHotDays*24*time.Hour).Unix(), 0, now.Unix())
+	if err != nil {
+		return
+	}
+	if err := hw.HotPut(hotNewsRD, hw.HotNews, d, hw.HotNewsTTL); err != nil {
+		lg.Debug("news not put in redis", "fn", "putHotNews", "err", err)
 	}
 }
 

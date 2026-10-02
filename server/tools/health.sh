@@ -196,11 +196,14 @@ for svc in $CHECK; do
                 fsum=$(echo "$f" | sed -n 's/.*"summary":"\([^"]*\)".*/\1/p' | head -1)
                 if [ -n "$fsum" ]; then
                     printf '  feeds: %s\n' "$fsum"
-                    echo "$f" | grep -o '"title":"[^"]*","state":"[^"]*","line":"[^"]*"' \
-                        | sed 's/"title":"\([^"]*\)","state":"\([^"]*\)","line":"\([^"]*\)"/    \2 · \1 · \3/'
+                    # a JSON string here may hold an escaped quote (a Go error names its URL in
+                    # quotes: Get "https://...": ...), so a value is ([^"\\]|\\.)*, not [^"]*
+                    S='([^"\\]|\\.)*'
+                    echo "$f" | grep -oE "\"title\":\"$S\",\"state\":\"$S\",\"line\":\"$S\"" \
+                        | sed -E "s/\"title\":\"($S)\",\"state\":\"($S)\",\"line\":\"($S)\"/    \\3 · \\1 · \\5/; s/\\\\\"/\"/g"
                     # and every detail row that is not well: which exchange, which feed, and why
-                    echo "$f" | grep -o '"k":"[^"]*","v":"[^"]*","state":"\(flaky\|late\|failing\)"' \
-                        | sed 's/"k":"\([^"]*\)","v":"\([^"]*\)","state":"\([^"]*\)"/      ! \1 (\3): \2/'
+                    echo "$f" | grep -oE "\"k\":\"$S\",\"v\":\"$S\",\"state\":\"(flaky|late|failing)\"" \
+                        | sed -E "s/\"k\":\"($S)\",\"v\":\"($S)\",\"state\":\"([a-z]*)\"/      ! \\1 (\\5): \\3/; s/\\\\\"/\"/g"
                 fi
             fi
             if [ "$svc" = "ghost.synthd" ]; then

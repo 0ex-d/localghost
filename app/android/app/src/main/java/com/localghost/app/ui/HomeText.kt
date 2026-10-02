@@ -71,6 +71,25 @@ object HomeText {
     /** The home row for a pinned coin with no rank list yet: the box's own price alone. */
     fun liveOnly(symbol: String, usd: Double, change24: Double?): Coin = Coin(0, symbol, symbol, usd, change24, 0.0)
 
+    /** "updated 4 s ago", "updated 2 min ago" for the prices; "" before the first. */
+    fun updated(atSec: Long, nowSec: Long): String {
+        if (atSec <= 0) return ""
+        val d = (nowSec - atSec).coerceAtLeast(0)
+        return "updated " + when {
+            d < 2 -> "just now"
+            d < 90 -> "$d s ago"
+            d < 90 * 60 -> "${(d + 30) / 60} min ago"
+            else -> "${(d + 1800) / 3600} h ago"
+        }
+    }
+
+    /** The prices' line under BTC and ETH: when, and from how many exchanges ("" for none). */
+    fun pricesLine(atSec: Long, nowSec: Long, exchanges: Int): String =
+        listOf(updated(atSec, nowSec), if (exchanges > 1) "$exchanges exchanges" else "").filter { it.isNotEmpty() }.joinToString(" · ")
+
+    /** What "write now" says when the box did not write a brief (its own reason, short). */
+    fun briefNot(why: String): String = if (why.isBlank()) "the box did not answer" else why
+
     /** "written 23 min ago" for the brief; "" before the first. */
     fun written(at: Long, now: Long): String {
         if (at <= 0) return ""

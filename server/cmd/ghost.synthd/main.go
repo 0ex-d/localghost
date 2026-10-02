@@ -843,7 +843,8 @@ func main() {
 		})
 		// news: the feeds and their health, the counts; feeds can be added (add={id,name,url}),
 		// removed (remove=id) or switched (enable=id on=true|false); digest=true posts the digest
-		// now whatever the hour.
+		// now whatever the hour; brief=true writes the day's brief now (and says why when it
+		// cannot: no summaries yet, the model on the CPU, an answer that did not hold).
 		ctl.Handle("news", func(args json.RawMessage) (ctlsock.Response, error) {
 			var a struct {
 				Add    *feeds.Source `json:"add"`
@@ -852,6 +853,7 @@ func main() {
 				On     *bool         `json:"on"`
 				Digest bool          `json:"digest"`
 				Fetch  bool          `json:"fetch"` // the box fetches the feeds now, whatever the phone is on
+				Brief  bool          `json:"brief"` // the brief written now, whatever its age (the phone's button)
 			}
 			if len(args) > 0 {
 				_ = json.Unmarshal(args, &a)
@@ -894,6 +896,19 @@ func main() {
 			out := map[string]any{}
 			if a.Fetch {
 				out["fetching"] = "the box fetches the feeds now; ask again in a minute"
+			}
+			if a.Brief {
+				// one brief at a time: a second press while one is being written waits for it
+				briefNowMu.Lock()
+				wrote, why, err := briefPass(db, oracle.NewClient(runDir, 2*time.Minute), time.Now(), lg, true)
+				briefNowMu.Unlock()
+				if err != nil {
+					return ctlsock.Response{OK: false, Err: err.Error()}, nil
+				}
+				if wrote {
+					putHotNews(db, mount, lg)
+				}
+				out["briefWritten"], out["briefWhy"] = wrote, why
 			}
 			if a.Digest {
 				now := time.Now()

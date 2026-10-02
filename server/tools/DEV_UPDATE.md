@@ -4436,13 +4436,71 @@ whole, a paywalled one's free part, both let go after a day), `TestDefaultSource
   too when they are half an hour old); a ‹ beside the title goes home from any screen (the ghost
   and the title too); home's brief is a list of points, each opening its story in NEWS; a story in
   NEWS shows its lead and the first two points (all of them open).
-- Removed files: `tools/removed.txt` lists them and `tools/apply_removed.sh` deletes each one still
-  holding a drop's stand-in (a file with content of its own at a listed path is left alone).
-  `redeploy.sh` runs it before the build; on Windows run `bash server/tools/apply_removed.sh` once
-  after unpacking and commit, and git takes them out of the box's tree too.
-
 Tested: `TestApplyFast`, `TestNewsDocWithin`, `TestGroundedNews` (lead and points, numbering,
 a point's number not in the reports), `TestGroundedBrief`, `TestLDArticleBody`,
 `TestRefusedOutletLeftAlone`, `TestRetellAndBriefStories`, `TestSQLPrepareEveryStatement`; app
 `HomeTextTest` (cap from supply, fast over the minute, brief points to stories) and
 `NewsTextTest` (lead and points). The fast lane and the Redis copies run on the box only.
+
+## Clean-up: no removal script; the removed features' leftovers dropped from the database
+
+- `tools/apply_removed.sh` and `tools/removed.txt` are gone, and `redeploy.sh` no longer calls
+  them. A drop that removes a file says so, with the `git rm` line to run.
+- Schema data migration 2 (once per box, at the next unlock) drops what the removed features left:
+  the `news_logins` table (the paper sign-ins) and `frames.unreadable` (damaged photos are moved to
+  `frames/damaged`). The schema's rule stands, a column the registry does not know is only named
+  (DRIFT in secd's log), never dropped, unless a dated migration says so.
+
+## The fast lane from every exchange, prices that move, when they were updated, "write now", health fixed
+
+- The fast lane asks every exchange that weighs in the index for BTC, ETH and SOL every five
+  seconds, not Coinbase alone (`rates.FastAsks`): one call each to Binance (`symbols=[...]`),
+  Kraken (`pair=XBTUSD,ETHUSD,SOLUSD`) and Bitfinex (`tickers?symbols=...`), one per coin to
+  Coinbase, Bitstamp and OKX; twelve requests, the venues side by side on kept-alive connections
+  (`egress.NewKeepAlive`). Gemini is not asked (no volume, so the index leaves it out anyway), nor
+  the USDT/USD leg (the minute's rate folds Binance's and OKX's prices into dollars). Each coin's
+  price is made the minute's way (`rates.FastIndex` over `MakeIndex`: fresh quotes, 2% from the
+  median, volume-weighted), with the venues that went in on the row. One fetch-log line per venue
+  a minute (`fast:<venue>`); Box Status says how many venues answer and gives a venue that misses
+  its own row.
+- The app: a price that changes rolls digit by digit (up green, down amber) and flashes
+  (`TickingPrice`), on home and CRYPTO. Home says when BTC and ETH were updated and from how many
+  exchanges ("updated 3 s ago · 6 exchanges", counting each second); CRYPTO says it for the fast
+  three and for the rest.
+- "[ write now ]" on home writes the day's brief at once (`POST /v1/news/brief`, synthd's
+  `news brief=true`, one at a time): the brief comes back, or why not (fewer than two summaries,
+  the model on the CPU, an answer that did not hold to the stories).
+- Health: the calories were Health Connect's resting estimate (the same 1,564 kcal every day;
+  Samsung Health shares no total), so the phone now reads ACTIVE kcal
+  (`ActiveCaloriesBurnedRecord`, a new permission to grant), the box ignores "calories" from an
+  older phone, and migration 3 deletes the old rows and the "N kcal." in each health day's journal
+  line. Steps, distance and active kcal take Samsung Health's own count where it wrote one (the
+  same aggregate filtered to its package): Health Connect's priority had put a phone-side counter
+  first, a few per cent under Samsung Health. "What is in Health Connect?" now reads newest first,
+  so it says when a source stopped writing.
+- health.sh prints the feeds' troubled rows even when a value holds an escaped quote (a Go error
+  quotes its URL; those rows were the ones silently missing).
+
+Tested: `TestFastAsks`, `TestFastIndexAcrossVenues`, `TestApplyFast` (venues on the row),
+`TestBriefNowSaysWhy`, `TestRemovedFeaturesDropped` (migrations 2 and 3),
+`TestHealthIngestAgainstPostgres` (the resting estimate refused, active kcal in the line); app
+`HomeTextTest` (the prices' line). The lane, the roll and the Health Connect reads run on the box
+and the phone only.
+
+## Notifications open what they are about, a week is kept, the weekly ones stop repeating
+
+- A notification carries where a tap goes (`notifications.link`, `hw.Notification.Link`):
+  framed's week in frames `map:<day>` (that day lit and framed on MAP), cued's reflection
+  `memories:<id>` (MEMORIES filtered to that memory), cued's near-you `memories:near` (NEAR YOU
+  open), the check-in `memories`, synthd's digest `news`, watchd's alerts and shadowd's
+  observation `status` (Box Status). One from before goes by its service and kind (`NotifLink`).
+  A tap in the list marks it read and opens it; each says where ("open on MAP ›"); a tap in the
+  shade lands in the same place after unlock.
+- A week is kept: `/v1/notifications/list` shows the last seven days, and secd deletes older rows
+  (and trims the Redis list) every half hour while unlocked (`PruneNotifications`).
+- The weekly highlight came every day: its week key was `Format("2006-W02")`, and "02" in a Go
+  layout is the day of the month, so the key changed daily. framed and shadowd now key by
+  `ISOWeek()`, and migration 4 keeps one of each repeated weekly text.
+
+Tested: `TestNotificationLinkAndWeek`, `TestRemovedFeaturesDropped` (migration 4), app
+`NotifLinkTest`.

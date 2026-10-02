@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/LocalGhostDao/localghost/server/internal/ctlsock"
 	"github.com/LocalGhostDao/localghost/server/internal/egress"
 	"github.com/LocalGhostDao/localghost/server/internal/feeds"
 	"github.com/LocalGhostDao/localghost/server/internal/hw"
@@ -390,6 +391,55 @@ func (s *Server) handleRates(w http.ResponseWriter, r *http.Request) {
 		hw.ApplyFast(&d.RatesSnapshot, f, now)
 	}
 	writeJSON(w, d)
+}
+
+// briefNowDoc is what "write the brief now" did: written, or why not, and the brief as it stands.
+type briefNowDoc struct {
+	OK           bool    `json:"ok"`
+	Written      bool    `json:"written"`
+	Why          string  `json:"why"`
+	Brief        string  `json:"brief"`
+	BriefAt      int64   `json:"briefAt"`
+	BriefStories []int64 `json:"briefStories"`
+}
+
+// handleNewsBrief , POST /v1/news/brief , the day's brief written now, whatever its age (home's
+// button): synthd asks the model from the day's summaries and says why when it cannot (fewer than
+// two summaries, the model on the CPU, an answer that did not hold to the stories). Up to two
+// minutes; the brief as it stands comes back either way.
+func (s *Server) handleNewsBrief(w http.ResponseWriter, r *http.Request) {
+	if !s.session.Valid(bearer(r)) || r.Method != http.MethodPost {
+		s.appearsDown(w)
+		return
+	}
+	mounted, ok := s.mountedSlot()
+	if !ok {
+		s.appearsDown(w)
+		return
+	}
+	out := briefNowDoc{BriefStories: []int64{}}
+	runDir := fmt.Sprintf("%s/mnt/slot%d/run", s.cfg.StateDir, mounted)
+	resp, err := ctlsock.NewClientTimeout("ghost.synthd", runDir, 3*time.Minute).Call("news", map[string]any{"brief": true})
+	switch {
+	case err != nil:
+		out.Why = "ghost.synthd did not answer"
+	case !resp.OK:
+		out.Why = resp.Err
+	default:
+		var d struct {
+			Written bool   `json:"briefWritten"`
+			Why     string `json:"briefWhy"`
+		}
+		_ = json.Unmarshal(resp.Data, &d)
+		out.OK, out.Written, out.Why = true, d.Written, d.Why
+	}
+	if db, derr := s.notif.DB(mounted); derr == nil {
+		out.Brief, out.BriefAt, out.BriefStories = hw.NewsBrief(db)
+		if out.BriefStories == nil {
+			out.BriefStories = []int64{}
+		}
+	}
+	writeJSON(w, out)
 }
 
 // fastDoc is /v1/rates/fast: the fast coins as the index rows /v1/rates gives, seconds old.

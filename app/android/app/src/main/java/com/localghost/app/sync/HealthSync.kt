@@ -3,14 +3,15 @@ package com.localghost.app.sync
 import android.content.Context
 import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.permission.HealthPermission
+import androidx.health.connect.client.records.ActiveCaloriesBurnedRecord
 import androidx.health.connect.client.records.DistanceRecord
 import androidx.health.connect.client.records.ExerciseSessionRecord
 import androidx.health.connect.client.records.FloorsClimbedRecord
 import androidx.health.connect.client.records.HeartRateRecord
 import androidx.health.connect.client.records.SleepSessionRecord
 import androidx.health.connect.client.records.StepsRecord
-import androidx.health.connect.client.records.TotalCaloriesBurnedRecord
 import androidx.health.connect.client.records.WeightRecord
+import androidx.health.connect.client.records.metadata.DataOrigin
 import androidx.health.connect.client.request.AggregateGroupByPeriodRequest
 import androidx.health.connect.client.request.ReadRecordsRequest
 import androidx.health.connect.client.time.TimeRangeFilter
@@ -28,13 +29,18 @@ import java.time.temporal.ChronoUnit
  * refinement is free and re-sync is harmless.
  */
 object HealthSync {
+    /** Samsung Health's package: its own count wins where it wrote one (see sync). */
+    const val SAMSUNG_HEALTH = "com.sec.android.app.shealth"
+
     val PERMISSIONS = setOf(
         HealthPermission.getReadPermission(StepsRecord::class),
         HealthPermission.getReadPermission(SleepSessionRecord::class),
         HealthPermission.getReadPermission(ExerciseSessionRecord::class),
         HealthPermission.getReadPermission(HeartRateRecord::class),
         HealthPermission.getReadPermission(DistanceRecord::class),
-        HealthPermission.getReadPermission(TotalCaloriesBurnedRecord::class),
+        // ACTIVE calories, the kcal Samsung Health shows: the total Health Connect answers is its
+        // own resting estimate (1,564 kcal every day, measured or not), not a measurement
+        HealthPermission.getReadPermission(ActiveCaloriesBurnedRecord::class),
         HealthPermission.getReadPermission(FloorsClimbedRecord::class),
         HealthPermission.getReadPermission(WeightRecord::class),
         // History gate , literal string (the constant arrived in a later client than ours):
@@ -153,12 +159,27 @@ object HealthSync {
                     metrics = setOf(
                         StepsRecord.COUNT_TOTAL,
                         DistanceRecord.DISTANCE_TOTAL,
-                        TotalCaloriesBurnedRecord.ENERGY_TOTAL,
+                        ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL,
                         FloorsClimbedRecord.FLOORS_CLIMBED_TOTAL,
                         ExerciseSessionRecord.EXERCISE_DURATION_TOTAL,
                     ),
                     timeRangeFilter = TimeRangeFilter.between(zStart, zEnd),
                     timeRangeSlicer = java.time.Period.ofDays(1)))
+            // SAMSUNG HEALTH'S OWN COUNT WINS where it wrote one. Health Connect's total follows its
+            // source priority, and a phone that counts steps itself (Health Connect's own
+            // counter, a fitness app) can sit above Samsung Health there: the box then got the
+            // phone's steps without the watch's, a few per cent under what Samsung Health shows.
+            // The same aggregate, Samsung Health's records only, replaces those days' steps,
+            // distance and active kcal; a day it did not write keeps Health Connect's total.
+            val samsung = try {
+                client.aggregateGroupByPeriod(
+                    AggregateGroupByPeriodRequest(
+                        metrics = setOf(StepsRecord.COUNT_TOTAL, DistanceRecord.DISTANCE_TOTAL, ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL),
+                        timeRangeFilter = TimeRangeFilter.between(zStart, zEnd),
+                        timeRangeSlicer = java.time.Period.ofDays(1),
+                        dataOriginFilter = setOf(DataOrigin(SAMSUNG_HEALTH))))
+                    .associateBy { it.startTime.toLocalDate().format(fmt) }
+            } catch (_: Exception) { emptyMap() }
             buckets.forEach { b ->
                 // ZERO IS NOT DATA here , empty buckets return non-null zeros for some metric
                 // types (Duration aggregates in particular), and writing them created 7,305
@@ -168,7 +189,12 @@ object HealthSync {
                 val vals = HashMap<String, Double>()
                 b.result[StepsRecord.COUNT_TOTAL]?.toDouble()?.takeIf { it > 0 }?.let { vals["steps"] = it }
                 b.result[DistanceRecord.DISTANCE_TOTAL]?.inKilometers?.takeIf { it > 0 }?.let { vals["distance_km"] = it }
-                b.result[TotalCaloriesBurnedRecord.ENERGY_TOTAL]?.inKilocalories?.takeIf { it > 0 }?.let { vals["calories"] = it }
+                b.result[ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL]?.inKilocalories?.takeIf { it > 0 }?.let { vals["active_calories"] = it }
+                samsung[b.startTime.toLocalDate().format(fmt)]?.let { sb ->
+                    sb.result[StepsRecord.COUNT_TOTAL]?.toDouble()?.takeIf { it > 0 }?.let { vals["steps"] = it }
+                    sb.result[DistanceRecord.DISTANCE_TOTAL]?.inKilometers?.takeIf { it > 0 }?.let { vals["distance_km"] = it }
+                    sb.result[ActiveCaloriesBurnedRecord.ACTIVE_CALORIES_TOTAL]?.inKilocalories?.takeIf { it > 0 }?.let { vals["active_calories"] = it }
+                }
                 b.result[FloorsClimbedRecord.FLOORS_CLIMBED_TOTAL]?.takeIf { it > 0 }?.let { vals["floors"] = it }
                 b.result[ExerciseSessionRecord.EXERCISE_DURATION_TOTAL]?.seconds?.takeIf { it > 0 }
                     ?.let { vals["exercise_minutes"] = it / 60.0 }
@@ -242,10 +268,10 @@ object HealthSync {
                 m["distance_km"] = (m["distance_km"] ?: 0.0) + r.distance.inKilometers
             }
         }
-        if (!aggregated) tryRead("calories", TotalCaloriesBurnedRecord::class) { recs ->
+        if (!aggregated) tryRead("active calories", ActiveCaloriesBurnedRecord::class) { recs ->
             recs.forEach { r ->
                 val m = bucket(r.startTime)
-                m["calories"] = (m["calories"] ?: 0.0) + r.energy.inKilocalories
+                m["active_calories"] = (m["active_calories"] ?: 0.0) + r.energy.inKilocalories
             }
         }
         if (!aggregated) tryRead("floors", FloorsClimbedRecord::class) { recs ->
@@ -257,14 +283,10 @@ object HealthSync {
         tryRead("weight", WeightRecord::class) { recs ->
             recs.forEach { r -> bucket(r.time)["weight_kg"] = r.weight.inKilograms }
         }
-        // A CONSTANT IS NOT A MEASUREMENT. Samsung Health synthesizes a BMR-based calories total
-        // for ANY day you query , 1564.50 kcal, every day since 2006, data or no data ("you were
-        // presumably alive"). One constant made every day in history look like a health day and
-        // marched the full-history walk to its 20-year cap. Rule: calories only count on days
-        // where something was actually MEASURED (any other metric present); a day whose only
-        // content is the provider's guess about your resting metabolism is an empty day.
-        val calOnly = days.entries.count { (_, m) -> m.keys.all { it == "calories" } }
-        days.entries.removeAll { (_, m) -> m.keys.all { it == "calories" } }
+        // A CONSTANT IS NOT A MEASUREMENT. Health Connect's TOTAL calories is a resting estimate
+        // for any day asked (1,564 kcal, every day since 2006, data or no data), so it is not read
+        // at all: active kcal is (2 Oct 2026). calOnly stays for the full-history walk's message.
+        val calOnly = 0
         when {
             days.isEmpty() && hrSamples.isEmpty() ->
                 SyncResult(0, skipped, if (skipped.size >= 8) "every record type failed , re-check permissions" else null).also { noteRun(ctx, it, days) }
@@ -331,10 +353,13 @@ object HealthSync {
                 var oldest: Instant? = null
                 var newest: Instant? = null
                 val apps = LinkedHashSet<String>()
+                // NEWEST FIRST: three pages from the oldest end said when the record STARTS and
+                // nothing about whether it stopped (a source that went quiet a fortnight ago
+                // looked as healthy as one writing now)
                 do {
                     val resp = client.readRecords(
-                        if (token == null) ReadRecordsRequest(cls, range)
-                        else ReadRecordsRequest(cls, range, pageToken = token))
+                        if (token == null) ReadRecordsRequest(cls, range, ascendingOrder = false)
+                        else ReadRecordsRequest(cls, range, ascendingOrder = false, pageToken = token))
                     resp.records.forEach { r ->
                         n++
                         val t = stamp(r)
@@ -347,7 +372,8 @@ object HealthSync {
                     pages++
                 } while (!token.isNullOrEmpty() && pages < 3)
                 val span = if (oldest != null && newest != null)
-                    " " + oldest.toString().take(10) + ".." + newest.toString().take(10) else ""
+                    " " + oldest.toString().take(10) + ".." + newest.toString().take(10) +
+                        (if (pages >= 3) " (the newest)" else "") else ""
                 val who = if (apps.isEmpty()) "" else " from " + apps.joinToString("/")
                 out.add(if (n == 0) "$label: nothing in Health Connect"
                         else "$label: $n${if (pages >= 3) "+" else ""} record(s)$span$who")
@@ -360,7 +386,7 @@ object HealthSync {
         one("sleep", SleepSessionRecord::class) { it.startTime }
         one("weight", WeightRecord::class) { it.time }
         one("exercise", ExerciseSessionRecord::class) { it.startTime }
-        one("calories", TotalCaloriesBurnedRecord::class) { it.startTime }
+        one("active calories", ActiveCaloriesBurnedRecord::class) { it.startTime }
         one("distance", DistanceRecord::class) { it.startTime }
         return out
     }

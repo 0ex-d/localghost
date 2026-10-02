@@ -170,13 +170,14 @@ func interactionTrend(db *poltergres.ReadWrite, lg *slog.Logger) error {
 	if prior7 == 0 || this7 < 60 || this7 < 2*prior7 {
 		return nil
 	}
-	wk := time.Now().UTC().Format("2006-W02")
+	y, w := time.Now().UTC().ISOWeek() // "2006-W02" was the day of the month (a Go layout)
+	wk := fmt.Sprintf("%d-W%02d", y, w)
 	rows, err := db.Query("SELECT value FROM settings WHERE key = 'shadow_interaction_note'")
 	if err == nil && len(rows.Vals) == 1 && rows.Vals[0][0] != nil && *rows.Vals[0][0] == wk {
 		return nil // this week already observed
 	}
 	if err := db.Exec(
-		"INSERT INTO notifications (service, kind, title, body, seen, options, created) VALUES ('ghost.shadowd','observation',$1,$2,FALSE,'',now())",
+		"INSERT INTO notifications (service, kind, title, body, seen, options, created, link) VALUES ('ghost.shadowd','observation',$1,$2,FALSE,'',now(),'status')",
 		"an observation about this week",
 		fmt.Sprintf("you sent the ghost %d messages this week, up from %d the week before. Not a problem , just a fact you own. The graphs are on Box Status.", this7, prior7)); err != nil {
 		return err

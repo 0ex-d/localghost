@@ -129,18 +129,33 @@ fun MainShell(
     var dest by rememberSaveable { mutableStateOf(Dest.HOME) }
     // the story a point of home's brief opens in NEWS (0: none)
     var newsFocus by rememberSaveable { mutableLongStateOf(0L) }
+    // what a notification opens: a day on MAP, a memory (its id) or "near" in MEMORIES ("" none)
+    var mapDay by rememberSaveable { mutableStateOf("") }
+    var memFocus by rememberSaveable { mutableStateOf("") }
+    fun openTarget(t: NotifLink.Target) {
+        when (t.dest) {
+            "map" -> { mapDay = t.arg; dest = Dest.MAP }
+            "memories" -> { memFocus = t.arg; dest = Dest.MEMORIES }
+            "news" -> { newsFocus = 0L; dest = Dest.NEWS }
+            "status" -> dest = Dest.HARNESS
+            "notifications" -> dest = Dest.NOTIFICATIONS
+        }
+    }
     // A notification tap lands here AFTER the security gate (MainShell only exists unlocked):
     // navigate to the thing the notification was about, once.
     LaunchedEffect(navRequest) {
+        when {
+            // a notification's own place (the shade's tap): "map:<day>", "memories:<id>", "status"
+            navRequest.startsWith("map") || navRequest.startsWith("memories") || navRequest == "status" ->
+                openTarget(NotifLink.resolve(navRequest, "", ""))
+        }
         when (navRequest) {
             "notifications" -> dest = Dest.NOTIFICATIONS
-            "memories" -> dest = Dest.MEMORIES
             "news" -> dest = Dest.NEWS
             "home" -> dest = Dest.HOME
             "chat" -> dest = Dest.CHAT
             "phrases" -> dest = Dest.PHRASES
             "settings" -> dest = Dest.SETTINGS
-            "map" -> dest = Dest.MAP
         }
         if (navRequest.isNotEmpty()) onNavConsumed()
     }
@@ -210,7 +225,7 @@ fun MainShell(
                             onOpenBoxChat = { id -> onOpenBoxChat(id); dest = Dest.CHAT },
                             onRenameBoxChat = onRenameBoxChat,
                             onDeleteBoxChat = onDeleteBoxChat)
-                        Dest.MEMORIES -> MemoriesScreen(lifeContext)
+                        Dest.MEMORIES -> MemoriesScreen(lifeContext, open = memFocus, onOpened = { memFocus = "" })
                         Dest.NEWS -> NewsScreen(openStory = newsFocus, onStoryShown = { newsFocus = 0L })
                         Dest.NOTIFICATIONS -> {
                             val nctx = androidx.compose.ui.platform.LocalContext.current
@@ -221,12 +236,12 @@ fun MainShell(
                                 com.localghost.app.security.SessionStore.isExpiringSoon(nctx, nowSec, 6 * 3600) -> SessionHint.EXPIRING_SOON
                                 else -> SessionHint.NONE
                             }
-                            NotificationsScreen(pending, hint)
+                            NotificationsScreen(pending, hint, onOpen = { t -> openTarget(t) })
                         }
                         Dest.HARNESS -> HarnessScreen(daemons, onRefresh = onRefreshDaemons)
                         Dest.SYNC -> SyncScreen(sync, onSync, onRequestFullAccess, onTogglePause = onTogglePause)
                         Dest.GALLERY -> GalleryScreen()
-                        Dest.MAP -> MapScreen()
+                        Dest.MAP -> MapScreen(openDay = mapDay, onDayShown = { mapDay = "" })
                         Dest.PHRASES -> PhrasesScreen()
                         Dest.HEALTH -> HealthScreen()
                         Dest.CODES -> PinManagementScreen(devices)

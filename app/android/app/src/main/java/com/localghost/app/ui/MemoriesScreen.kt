@@ -41,7 +41,7 @@ import kotlinx.coroutines.launch
  * kind=user and untouchable from birth.
  */
 @Composable
-fun MemoriesScreen(context: LifeContext?) {
+fun MemoriesScreen(context: LifeContext?, open: String = "", onOpened: () -> Unit = {}) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var rows by remember { mutableStateOf<List<BoxClient.MemRow>?>(null) }
@@ -109,6 +109,23 @@ fun MemoriesScreen(context: LifeContext?) {
     }
     fun reload() { scope.launch { rows = BoxClient.memoriesList(ctx) } }
     LaunchedEffect(Unit) { reload() }
+    // what a notification opened: "near" opens NEAR YOU; a memory's id filters the list to it
+    LaunchedEffect(open, rows) {
+        when {
+            open.isEmpty() -> return@LaunchedEffect
+            open == "near" -> {
+                nearOpen = true
+                if (near == null && !nearLoading) loadNear()
+                onOpened()
+            }
+            else -> {
+                val list = rows ?: return@LaunchedEffect
+                val id = open.toLongOrNull()
+                list.firstOrNull { it.id == id }?.let { memQuery = it.title }
+                onOpened()
+            }
+        }
+    }
 
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)) {

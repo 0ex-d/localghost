@@ -68,7 +68,14 @@ type Notification struct {
 	Answer   string   `json:"answer,omitempty"`
 	Answered int64    `json:"answered,omitempty"`
 	Created  int64    `json:"created"` // unix seconds
+	// Link is where a tap takes the phone: "map:<day>" (that day lit on MAP), "memories:<id>"
+	// (that memory), "memories:near", "memories", "news", "status" (Box Status); "" for none, and
+	// the phone then goes by the service and kind.
+	Link string `json:"link,omitempty"`
 }
+
+// NotifKeep is how long a notification is kept: a week, then it goes (PruneNotifications).
+const NotifKeep = 7 * 24 * time.Hour
 
 // IsAsk reports whether this notification expects an answer (it carries options).
 func (n Notification) IsAsk() bool { return len(n.Options) > 0 }
@@ -776,14 +783,14 @@ func (s *NotifStore) List(slot int, limit int) ([]Notification, error) {
 	}
 	rows, err := c.Query("SELECT id, service, kind, title, body, seen, "+
 		"coalesce(options,''), coalesce(answer,''), coalesce(extract(epoch from answered)::bigint,0), "+
-		"extract(epoch from created)::bigint "+
-		"FROM notifications ORDER BY id DESC LIMIT $1", limit)
+		"extract(epoch from created)::bigint, link "+
+		"FROM notifications WHERE created >= to_timestamp($2) ORDER BY id DESC LIMIT $1", limit, time.Now().Add(-NotifKeep).Unix())
 	if err != nil {
 		return nil, err
 	}
 	res := make([]Notification, 0, len(rows.Vals))
 	for _, r := range rows.Vals {
-		if len(r) < 10 {
+		if len(r) < 11 {
 			continue
 		}
 		cell := func(i int) string {
@@ -797,7 +804,7 @@ func (s *NotifStore) List(slot int, limit int) ([]Notification, error) {
 		created, _ := strconv.ParseInt(cell(9), 10, 64)
 		n := Notification{
 			ID: id, Service: cell(1), Kind: cell(2), Title: cell(3), Body: cell(4),
-			Seen: cell(5) == "t", Answer: cell(7), Answered: answered, Created: created,
+			Seen: cell(5) == "t", Answer: cell(7), Answered: answered, Created: created, Link: cell(10),
 		}
 		if o := cell(6); o != "" {
 			_ = json.Unmarshal([]byte(o), &n.Options) // options is a JSON array; ignore if malformed
@@ -877,6 +884,41 @@ func (s *NotifStore) Delete(slot int, id int64) error {
 	return c.Exec("DELETE FROM notifications WHERE id = $1", id)
 }
 
+// PruneNotifications deletes what is older than a week (NotifKeep), from Postgres and from the
+// Redis list of the last hundred. Returns how many rows went.
+func (s *NotifStore) PruneNotifications(slot int, now time.Time) (int, error) {
+	c, err := s.pg(slot)
+	if err != nil {
+		return 0, err
+	}
+	rows, err := c.Query("WITH gone AS (DELETE FROM notifications WHERE created < to_timestamp($1) RETURNING 1) SELECT count(*) FROM gone",
+		now.Add(-NotifKeep).Unix())
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	if len(rows.Vals) == 1 && rows.Vals[0][0] != nil {
+		n, _ = strconv.Atoi(*rows.Vals[0][0])
+	}
+	// the Redis list is Produce's cache: what is left of it past a week goes too
+	if recent, err := s.readRecent(slot); err == nil {
+		cut := now.Add(-NotifKeep).Unix()
+		keep := 0
+		for _, r := range recent {
+			if r.Created >= cut || r.Created == 0 {
+				keep++
+			}
+		}
+		switch {
+		case keep == 0 && len(recent) > 0:
+			_ = s.redis(slot, "DEL", recentKey)
+		case keep < len(recent):
+			_ = s.redis(slot, "LTRIM", recentKey, "0", strconv.Itoa(keep-1))
+		}
+	}
+	return n, nil
+}
+
 // --- helpers ---
 
 // sinceID is the notifications with id > after, oldest first, at most limit, from Postgres.
@@ -885,14 +927,14 @@ func (s *NotifStore) sinceID(slot int, after int64, limit int) ([]Notification, 
 	if err != nil {
 		return nil, err
 	}
-	rows, err := c.Query("SELECT id, service, kind, title, body, coalesce(options,''), extract(epoch from created)::bigint "+
+	rows, err := c.Query("SELECT id, service, kind, title, body, coalesce(options,''), extract(epoch from created)::bigint, link "+
 		"FROM notifications WHERE id > $1 ORDER BY id LIMIT $2", after, limit)
 	if err != nil {
 		return nil, err
 	}
 	res := make([]Notification, 0, len(rows.Vals))
 	for _, r := range rows.Vals {
-		if len(r) < 7 || r[0] == nil {
+		if len(r) < 8 || r[0] == nil {
 			continue
 		}
 		cell := func(i int) string {
@@ -903,7 +945,7 @@ func (s *NotifStore) sinceID(slot int, after int64, limit int) ([]Notification, 
 		}
 		id, _ := strconv.ParseInt(cell(0), 10, 64)
 		created, _ := strconv.ParseInt(cell(6), 10, 64)
-		n := Notification{ID: id, Service: cell(1), Kind: cell(2), Title: cell(3), Body: cell(4), Created: created}
+		n := Notification{ID: id, Service: cell(1), Kind: cell(2), Title: cell(3), Body: cell(4), Created: created, Link: cell(7)}
 		if o := cell(5); o != "" {
 			_ = json.Unmarshal([]byte(o), &n.Options)
 		}
@@ -1015,9 +1057,9 @@ func (s *NotifStore) insertPostgres(slot int, n Notification) (int64, error) {
 		return 0, err
 	}
 	rows, err := c.Query(
-		"INSERT INTO notifications (service, kind, title, body, seen, options, created) "+
-			"VALUES ($1,$2,$3,$4, FALSE, $5, to_timestamp($6)) RETURNING id",
-		n.Service, n.Kind, n.Title, n.Body, optionsJSON, created)
+		"INSERT INTO notifications (service, kind, title, body, seen, options, created, link) "+
+			"VALUES ($1,$2,$3,$4, FALSE, $5, to_timestamp($6), $7) RETURNING id",
+		n.Service, n.Kind, n.Title, n.Body, optionsJSON, created, n.Link)
 	if err != nil {
 		return 0, err
 	}

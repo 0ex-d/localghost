@@ -238,6 +238,8 @@ func (s *Server) routes() []route {
 			Auth: true, Request: looseList{}, Response: okDoc{}, Handler: s.handleRatesFetched},
 		{Method: "GET", Path: "/v1/news", Summary: "The stories the feeds add up to (?since=<unix>&limit=N), each with its outlets' entries and the box's summary (a lead and points), and the day's brief (one point per story, briefStories in order); the last two days come from Redis.",
 			Auth: true, Response: newsDoc{}, Handler: s.handleNews},
+		{Method: "POST", Path: "/v1/news/brief", Summary: "The day's brief written now, whatever its age (home's button): written or why not (fewer than two summaries, the model on the CPU, an answer that did not hold to the stories), and the brief as it stands. Up to two minutes.",
+			Auth: true, Response: briefNowDoc{}, Handler: s.handleNewsBrief},
 		{Method: "GET", Path: "/v1/rates", Summary: "The box's market numbers: the ECB table of the newest day, the USD index per symbol and its making, the top 100 coins, and the market index (the fifty largest, weighted by last month's volume).",
 			Auth: true, Response: hw.RatesDoc{}, Handler: s.handleRates},
 		{Method: "GET", Path: "/v1/rates/fast", Summary: "BTC, ETH and SOL as of the last five seconds (Coinbase's last trade over the box's index), each with its 24-hour change; from Redis only.",

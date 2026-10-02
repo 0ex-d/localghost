@@ -93,7 +93,7 @@ func OfferNearby(db hw.Querier, sent string, now time.Time) (n *hw.Notification,
 			dist = fmt.Sprintf("%.0f km", s.DistanceKm)
 		}
 		return &hw.Notification{
-			Service: "ghost.cued", Kind: "nearby",
+			Service: "ghost.cued", Kind: "nearby", Link: "memories:near",
 			Title: "something new near you: " + s.Name,
 			Body:  what + ", " + dist + " " + s.Bearing + " of where you are , " + s.Why + ". More under MEMORIES › near you.",
 		}, k, nil

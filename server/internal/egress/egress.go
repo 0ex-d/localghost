@@ -55,6 +55,18 @@ func New() *Client {
 	return &Client{hc: &http.Client{Transport: tr, Timeout: 40 * time.Second}}
 }
 
+// NewKeepAlive is New holding more connections open, for a caller that asks the same hosts every
+// few seconds (tallyd's fast lane): no new TLS handshake each time.
+func NewKeepAlive(perHost int) *Client {
+	c := New()
+	if tr, ok := c.hc.Transport.(*http.Transport); ok {
+		tr.MaxIdleConns = perHost * 8
+		tr.MaxIdleConnsPerHost = perHost
+		tr.IdleConnTimeout = 90 * time.Second
+	}
+	return c
+}
+
 // Get fetches one address. Every outcome is a Fetched (the ingest wants to know a failure too);
 // err is set only when the context ended.
 func (c *Client) Get(ctx context.Context, id, url string) (Fetched, error) {

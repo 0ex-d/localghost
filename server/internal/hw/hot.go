@@ -2,7 +2,8 @@ package hw
 
 // WHAT THE PHONE WANTS AT ONCE sits in the vault's Redis (apparedis): the prices, the rank list and
 // the market index as /v1/rates answers them (rewritten by tallyd every minute), BTC, ETH and SOL
-// every five seconds (tallyd's fast lane, Coinbase's ticker), and the last two days of news with
+// every five seconds (tallyd's fast lane: every venue that weighs in the index, rates.FastAsks,
+// each coin's price made the minute's way, rates.MakeIndex), and the last two days of news with
 // the brief as /v1/news answers them (rewritten by synthd whenever a story, summary or brief
 // changes). Postgres stays the record; Redis is the copy that answers in a millisecond, gone on a
 // restart and rebuilt from Postgres on the first read that misses.
@@ -10,6 +11,7 @@ package hw
 import (
 	"encoding/json"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/LocalGhostDao/localghost/server/internal/apparedis"
@@ -17,7 +19,7 @@ import (
 
 const (
 	HotRates = "hot:rates" // the /v1/rates doc
-	HotFast  = "hot:fast"  // BTC, ETH, SOL every five seconds
+	HotFast  = "hot:fast"  // BTC, ETH, SOL every five seconds, from every venue
 	HotNews  = "hot:news"  // the /v1/news doc, two days
 
 	HotRatesTTL = 5 * time.Minute // tallyd rewrites it every minute
@@ -31,10 +33,13 @@ const (
 // FastSymbols are the coins asked every five seconds; the rest move with the minute.
 var FastSymbols = []string{"BTC", "ETH", "SOL"}
 
-// FastPrice is one coin's last trade on Coinbase.
+// FastPrice is one coin's index from the fast lane: the venues' last trades, volume-weighted.
 type FastPrice struct {
-	Price float64 `json:"price"`
-	At    int64   `json:"at"` // unix ms, the venue's time of the trade
+	Price  float64  `json:"price"`
+	At     int64    `json:"at"` // unix ms, when the lane made it
+	N      int      `json:"n"`  // venues that went in
+	Used   []string `json:"used"`
+	Spread float64  `json:"spread"`
 }
 
 // Fast is the fast lane's last pass.
@@ -73,8 +78,8 @@ func HotRedis(mount string) (*apparedis.ReadWrite, error) {
 
 // ApplyFast puts the fast lane's prices over the minute's index: a coin's price and time become
 // the trade's, its 24-hour change is moved to match (the same 24-hour-ago price), and the flat BTC
-// numbers follow. A price older than FastFresh, or more than 5% off the minute's index (one
-// venue's bad print), is left out. Returns how many coins it moved.
+// numbers follow, with the venues that went in. A price older than FastFresh, or more than 5% off
+// the minute's index, is left out. Returns how many coins it moved.
 func ApplyFast(s *RatesSnapshot, f Fast, now time.Time) int {
 	n := 0
 	for sym, p := range f.Prices {
@@ -97,11 +102,14 @@ func ApplyFast(s *RatesSnapshot, f Fast, now time.Time) int {
 			}
 		}
 		r.Price, r.At, r.Fast = p.Price, p.At/1000, true
+		if p.N > 0 {
+			r.N, r.Used, r.Spread = p.N, strings.Join(p.Used, ","), p.Spread
+		}
 		s.Index[sym] = r
 		n++
 	}
 	if b, ok := s.Index["BTC"]; ok {
-		s.BTCUSD, s.BTCAt = b.Price, b.At
+		s.BTCUSD, s.BTCAt, s.BTCN, s.BTCSpread, s.BTCUsed = b.Price, b.At, b.N, b.Spread, b.Used
 	}
 	return n
 }

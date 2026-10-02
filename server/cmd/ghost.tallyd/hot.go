@@ -2,9 +2,11 @@ package main
 
 // THE PHONE'S COPY, AT ONCE. After every minute (and every batch the phone sends) tallyd writes
 // /v1/rates as it stands to the vault's Redis (hw.HotRates), so secd answers from memory instead of
-// four queries. And the fast lane: BTC, ETH and SOL from Coinbase's ticker every five seconds
-// (three small requests, well inside its public limit), kept in Redis only (hw.HotFast); the
-// minute series stays the record. A minute of the lane goes in the fetch log as one line.
+// four queries. And the fast lane: BTC, ETH and SOL every five seconds from every venue that
+// weighs in the index (twelve small requests across six venues, rates.FastAsks, each venue's
+// share well inside its public limit), each coin's price made the minute's way and kept in Redis
+// only (hw.HotFast); the minute series stays the record. A minute of the lane is one fetch-log
+// line per venue.
 
 import (
 	"context"
@@ -66,55 +68,78 @@ func (h *hotRedis) putRates(db *poltergres.ReadWrite, now time.Time, lg *slog.Lo
 	}
 }
 
-// fastState is the lane's last minute, for the `rates` command.
+// fastState is the lane's last minute per venue, for the `rates` command.
 type fastState struct {
 	mu     sync.Mutex
-	at     time.Time
-	asked  int
-	ok     int
+	venues map[string]venueMinute // the last full minute
 	lastOK time.Time
-	err    string
+	prices map[string]hw.FastPrice
+}
+
+// venueMinute is one venue's minute of the fast lane.
+type venueMinute struct {
+	Asked    int    `json:"asked"`
+	Answered int    `json:"answered"`
+	TookMs   []int  `json:"-"`
+	Median   int    `json:"typicalMs"`
+	Err      string `json:"lastError,omitempty"`
 }
 
 func (f *fastState) snapshot() map[string]any {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := map[string]any{"every": hw.FastEvery.String(), "symbols": hw.FastSymbols, "askedThisMinute": f.asked, "answeredThisMinute": f.ok}
+	out := map[string]any{"every": hw.FastEvery.String(), "symbols": hw.FastSymbols, "venues": f.venues}
 	if !f.lastOK.IsZero() {
-		out["lastAnswerAt"] = f.lastOK.Unix()
+		out["lastAt"] = f.lastOK.Unix()
 	}
-	if f.err != "" {
-		out["lastError"] = f.err
+	if len(f.prices) > 0 {
+		out["prices"] = f.prices
 	}
 	return out
 }
 
-// fastLoop asks Coinbase for the fast coins every five seconds and puts their last trades in
-// Redis. A coin Coinbase does not answer keeps its last price until it is too old to use.
+// fastLoop asks every venue that weighs in the index for the fast coins every five seconds, the
+// venues side by side (each venue's calls one after the other), makes each coin's index the
+// minute's way and puts it in Redis. A coin no venue answered for keeps its last price until it
+// is too old to use (hw.FastFresh). A minute of the lane is one fetch-log line per venue.
 func fastLoop(ctx context.Context, h *hotRedis, fs *fastState, lg *slog.Logger) {
-	client := egress.New()
+	client := egress.NewKeepAlive(2)
+	asks := rates.FastAsks(hw.FastSymbols)
+	byVenue := map[string][]rates.FastAsk{}
+	for _, a := range asks {
+		byVenue[a.Venue] = append(byVenue[a.Venue], a)
+	}
+	want := map[string]bool{}
+	for _, s := range hw.FastSymbols {
+		want[s] = true
+	}
 	t := time.NewTicker(hw.FastEvery)
 	defer t.Stop()
 	last := hw.Fast{Prices: map[string]hw.FastPrice{}}
 	minute := time.Now().Truncate(time.Minute)
-	var took []int
-	asked, ok, errText := 0, 0, ""
+	tally := map[string]*venueMinute{}
 	flush := func(now time.Time) {
-		if asked == 0 {
+		if len(tally) == 0 {
 			return
 		}
-		sort.Ints(took)
-		e := feedstat.Entry{Source: "coinbase:fast", Kind: feedstat.KindFast, By: "box", OK: ok == asked, Items: ok, Error: errText}
-		if len(took) > 0 {
-			e.TookMs = took[len(took)/2]
+		var logged []feedstat.Entry
+		done := map[string]venueMinute{}
+		for v, m := range tally {
+			sort.Ints(m.TookMs)
+			if len(m.TookMs) > 0 {
+				m.Median = m.TookMs[len(m.TookMs)/2]
+			}
+			logged = append(logged, feedstat.Entry{Source: "fast:" + v, Kind: feedstat.KindFast, By: "box",
+				OK: m.Answered == m.Asked, Items: m.Answered, TookMs: m.Median, Error: m.Err})
+			done[v] = *m
 		}
 		if db := h.db(); db != nil {
-			_ = feedstat.Log(db, now, []feedstat.Entry{e})
+			_ = feedstat.Log(db, now, logged)
 		}
 		fs.mu.Lock()
-		fs.at, fs.asked, fs.ok, fs.err = now, asked, ok, errText
+		fs.venues = done
 		fs.mu.Unlock()
-		asked, ok, errText, took = 0, 0, "", took[:0]
+		tally = map[string]*venueMinute{}
 	}
 	for {
 		select {
@@ -129,38 +154,79 @@ func fastLoop(ctx context.Context, h *hotRedis, fs *fastState, lg *slog.Logger) 
 			if rd == nil {
 				continue
 			}
-			got := 0
-			for _, sym := range hw.FastSymbols {
-				m := rates.Market{Exchange: "coinbase", Base: sym, Quote: "USD"}
-				asked++
-				f, err := client.Get(ctx, "coinbase:fast:"+sym, m.TickerURL())
-				if err != nil {
-					return // the context ended
-				}
-				took = append(took, f.TookMs)
-				if f.Error != "" || f.Status < 200 || f.Status > 299 {
-					errText = sym + ": " + fetchWhy(f)
-					continue
-				}
-				q, perr := rates.ParseTicker(m, []byte(f.Body), now)
-				if perr != nil || q.Price <= 0 {
-					errText = sym + ": not a ticker"
-					continue
-				}
-				ok++
-				got++
-				last.Prices[sym] = hw.FastPrice{Price: q.Price, At: q.At.UnixMilli()}
+			var mu sync.Mutex
+			var quotes []rates.Quote
+			var wg sync.WaitGroup
+			for venue, list := range byVenue {
+				wg.Add(1)
+				go func(venue string, list []rates.FastAsk) {
+					defer wg.Done()
+					for _, a := range list {
+						f, err := client.Get(ctx, a.ID, a.URL)
+						if err != nil {
+							return // the context ended
+						}
+						var qs []rates.Quote
+						why := ""
+						if f.Error != "" || f.Status < 200 || f.Status > 299 {
+							why = fetchWhy(f)
+						} else if qs, err = rates.ParseFast(a, []byte(f.Body), want, now); err != nil {
+							why = "not a ticker: " + err.Error()
+						}
+						mu.Lock()
+						m := tally[venue]
+						if m == nil {
+							m = &venueMinute{}
+							tally[venue] = m
+						}
+						m.Asked++
+						m.TookMs = append(m.TookMs, f.TookMs)
+						if why == "" {
+							m.Answered++
+							quotes = append(quotes, qs...)
+						} else {
+							m.Err = why
+						}
+						mu.Unlock()
+					}
+				}(venue, list)
 			}
-			if got == 0 {
+			wg.Wait()
+			if ctx.Err() != nil {
+				return
+			}
+			// USDT's dollar price from the minute (it moves in the fourth decimal)
+			usdt := 1.0
+			var doc hw.RatesDoc
+			if hw.HotGet(rd, hw.HotRates, &doc) {
+				if u, ok := doc.Index["USDT"]; ok && u.Price > 0.9 && u.Price < 1.1 {
+					usdt = u.Price
+				}
+			}
+			made := 0
+			stamp := time.Now()
+			for _, sym := range hw.FastSymbols {
+				ix, err := rates.FastIndex(quotes, sym, usdt, stamp)
+				if err != nil {
+					continue
+				}
+				last.Prices[sym] = hw.FastPrice{Price: ix.Price, At: stamp.UnixMilli(), N: ix.N, Used: ix.Used, Spread: ix.Spread}
+				made++
+			}
+			if made == 0 {
 				continue
 			}
-			last.At = time.Now().UnixMilli()
+			last.At = stamp.UnixMilli()
 			if err := hw.HotPut(rd, hw.HotFast, last, hw.HotFastTTL); err != nil {
 				lg.Debug("fast prices not put in redis", "fn", "fastLoop", "err", err)
 				continue
 			}
 			fs.mu.Lock()
-			fs.lastOK = now
+			fs.lastOK = stamp
+			fs.prices = map[string]hw.FastPrice{}
+			for k, v := range last.Prices {
+				fs.prices[k] = v
+			}
 			fs.mu.Unlock()
 		}
 	}

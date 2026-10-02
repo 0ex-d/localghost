@@ -45,10 +45,12 @@ fun HomeScreen(onAsk: (String) -> Unit, onOpenNews: () -> Unit, onOpenStory: (Lo
     val scope = rememberCoroutineScope()
     var news by remember { mutableStateOf<BoxClient.News?>(null) }
     var rates by remember { mutableStateOf<BoxClient.Rates?>(null) }
-    var fast by remember { mutableStateOf<Map<String, Pair<Double, Double?>>>(emptyMap()) }
+    var fast by remember { mutableStateOf<BoxClient.Fast?>(null) }
     var failed by remember { mutableStateOf(false) }
     var refreshing by remember { mutableStateOf(false) }
     var fetching by remember { mutableStateOf(false) }
+    var writing by remember { mutableStateOf(false) }
+    var briefNote by remember { mutableStateOf("") }
     var tick by remember { mutableIntStateOf(0) }
     var nowS by remember { mutableStateOf(System.currentTimeMillis() / 1000) }
     LaunchedEffect(tick) {
@@ -63,11 +65,27 @@ fun HomeScreen(onAsk: (String) -> Unit, onOpenNews: () -> Unit, onOpenStory: (Lo
             kotlinx.coroutines.delay(60_000)
         }
     }
-    // BTC and ETH every five seconds, from the box's Redis (no Postgres, no venue per ask)
+    // BTC and ETH every five seconds, from the box's Redis (the box asks the exchanges, not this phone)
     LaunchedEffect(Unit) {
         while (true) {
             BoxClient.fast(ctx)?.let { fast = it }
             kotlinx.coroutines.delay(5_000)
+        }
+    }
+    // "write now": the box writes the day's brief from the summaries it has, up to two minutes
+    val writeBrief: () -> Unit = {
+        if (!writing) {
+            writing = true
+            briefNote = ""
+            scope.launch {
+                val r = BoxClient.writeBrief(ctx)
+                writing = false
+                when {
+                    r == null -> briefNote = HomeText.briefNot("")
+                    r.written -> news = news?.copy(brief = r.brief, briefAt = r.briefAt, briefStories = r.briefStories)
+                    else -> briefNote = HomeText.briefNot(r.why)
+                }
+            }
         }
     }
     val refresh: () -> Unit = {
@@ -97,8 +115,15 @@ fun HomeScreen(onAsk: (String) -> Unit, onOpenNews: () -> Unit, onOpenStory: (Lo
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     SectionLabel("THE DAY'S NEWS")
                     Spacer(Modifier.weight(1f))
-                    Text("all stories ▸", color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
+                    Text(if (writing) "writing…" else "[ write now ]", color = if (writing) GhostTextDim else TerminalGreen,
+                        style = MaterialTheme.typography.labelMedium,
+                        modifier = Modifier.clickable(enabled = !writing) { writeBrief() }.padding(4.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("all ▸", color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
                         modifier = Modifier.clickable { onOpenNews() }.padding(4.dp))
+                }
+                if (briefNote.isNotEmpty()) {
+                    Text(briefNote, color = Warning, style = MaterialTheme.typography.labelSmall)
                 }
                 Spacer(Modifier.height(6.dp))
                 val n = news
@@ -154,28 +179,49 @@ private fun BriefPoint(p: HomeText.Point, onTap: () -> Unit) {
     }
 }
 
-/** BTC and ETH, always; CRYPTO50 under them; a tap opens CRYPTO with the rest. */
+/**
+ * BTC and ETH, always, each price rolling when it moves; when they were updated and from how many
+ * exchanges under them, with CRYPTO50; a tap opens CRYPTO with the rest.
+ */
 @Composable
-private fun PricesCard(rates: BoxClient.Rates?, fast: Map<String, Pair<Double, Double?>>, failed: Boolean, onOpenCrypto: () -> Unit) {
+private fun PricesCard(rates: BoxClient.Rates?, fast: BoxClient.Fast?, failed: Boolean, onOpenCrypto: () -> Unit) {
+    // the age line counts on its own, every second
+    var nowS by remember { mutableStateOf(System.currentTimeMillis() / 1000) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(1_000)
+            nowS = System.currentTimeMillis() / 1000
+        }
+    }
     Column(Modifier.fillMaxWidth().border(1.dp, TerminalDim, RectangleShape).background(VoidLighter)
         .clickable { onOpenCrypto() }.padding(14.dp)) {
         val r = rates
-        if (r == null && fast.isEmpty()) {
+        val f = fast
+        if (r == null && (f == null || f.prices.isEmpty())) {
             Text(if (failed) "no prices: the box did not answer" else "reading the box's prices…", color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
             return@Column
         }
-        val live: Map<String, Pair<Double, Double?>> = HomeText.withFast(r?.index?.associate { ix -> ix.symbol to (ix.price to ix.change24) } ?: emptyMap(), fast)
+        val live: Map<String, Pair<Double, Double?>> = HomeText.withFast(r?.index?.associate { ix -> ix.symbol to (ix.price to ix.change24) } ?: emptyMap(), f?.prices ?: emptyMap())
         val coins: List<HomeText.Coin> = live.map { (sym, v) -> HomeText.liveOnly(sym, v.first, v.second) }
         val pinned: List<HomeText.Coin> = HomeText.pinned(coins)
         if (pinned.isEmpty()) Text("no prices on the box yet", color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
         pinned.forEach { c ->
             Row(verticalAlignment = Alignment.Bottom, modifier = Modifier.padding(vertical = 2.dp)) {
                 Text(c.symbol, color = TerminalGreen, style = MaterialTheme.typography.titleMedium, modifier = Modifier.width(56.dp))
-                Text(HomeText.money(c.usd), color = GhostText, fontSize = 22.sp, style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+                Box(Modifier.weight(1f)) {
+                    TickingPrice(HomeText.money(c.usd), c.usd, GhostText, MaterialTheme.typography.titleLarge, fontSize = 22.sp)
+                }
                 val ch = HomeText.change(c.change24)
                 Text(ch, color = if (ch.startsWith("-")) Warning else TerminalGreen, style = MaterialTheme.typography.titleSmall)
             }
         }
+        // when: the fast lane's pass, else the minute's BTC
+        val fastAt: Long = (f?.at ?: 0L) / 1000
+        val at: Long = if (fastAt > 0 && f?.prices?.containsKey("BTC") == true) fastAt else (r?.btcAt ?: 0L)
+        val fastN: Int = f?.venues?.entries?.firstOrNull { it.key == "BTC" }?.value ?: 0
+        val exchanges: Int = if (fastAt > 0 && fastN > 0) fastN else (r?.btcN ?: 0)
+        val line = HomeText.pricesLine(at, nowS, exchanges)
+        if (line.isNotEmpty()) Text(line, color = TerminalDim, style = MaterialTheme.typography.labelSmall)
         Spacer(Modifier.height(6.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             val m = r?.market
@@ -225,10 +271,11 @@ private fun AskBox(onAsk: (String) -> Unit) {
 fun CryptoScreen() {
     val ctx = androidx.compose.ui.platform.LocalContext.current
     var rates by remember { mutableStateOf<BoxClient.Rates?>(null) }
-    var fast by remember { mutableStateOf<Map<String, Pair<Double, Double?>>>(emptyMap()) }
+    var fast by remember { mutableStateOf<BoxClient.Fast?>(null) }
     var failed by remember { mutableStateOf(false) }
     var refreshing by remember { mutableStateOf(false) }
     var tick by remember { mutableIntStateOf(0) }
+    var nowS by remember { mutableStateOf(System.currentTimeMillis() / 1000) }
     LaunchedEffect(tick) {
         while (true) {
             val r = BoxClient.rates(ctx)
@@ -241,7 +288,14 @@ fun CryptoScreen() {
     LaunchedEffect(Unit) {
         while (true) {
             BoxClient.fast(ctx)?.let { fast = it }
+            nowS = System.currentTimeMillis() / 1000
             kotlinx.coroutines.delay(5_000)
+        }
+    }
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(1_000)
+            nowS = System.currentTimeMillis() / 1000
         }
     }
     Column(Modifier.fillMaxSize().padding(horizontal = 20.dp).padding(top = 16.dp)) {
@@ -249,7 +303,8 @@ fun CryptoScreen() {
         Spacer(Modifier.height(6.dp))
         Refreshable(refreshing, { refreshing = true; tick++ }, Modifier.weight(1f).fillMaxWidth()) {
             val r = rates
-            val live: Map<String, Pair<Double, Double?>> = HomeText.withFast(r?.index?.associate { ix -> ix.symbol to (ix.price to ix.change24) } ?: emptyMap(), fast)
+            val f = fast
+            val live: Map<String, Pair<Double, Double?>> = HomeText.withFast(r?.index?.associate { ix -> ix.symbol to (ix.price to ix.change24) } ?: emptyMap(), f?.prices ?: emptyMap())
             val ranks: List<HomeText.Coin> = r?.ranks?.map { c -> HomeText.Coin(c.rank, c.symbol.uppercase(), c.name, c.priceUsd, c.change24, c.marketCap, c.supply) } ?: emptyList()
             val rows: List<HomeText.Coin> = HomeText.merge(ranks, live)
             LazyColumn(Modifier.fillMaxSize()) {
@@ -257,6 +312,16 @@ fun CryptoScreen() {
                     r == null && failed -> item { ErrorLine("the box did not answer , is it unlocked? pull down to try again") }
                     r == null -> item { LoadingRow() }
                     else -> {
+                        // when: BTC, ETH and SOL from the fast lane, the rest from the box's minute
+                        val minuteAt: Long = r.index.filter { it.symbol !in (f?.prices?.keys ?: emptySet()) }.maxOfOrNull { it.at } ?: 0L
+                        val fastAt: Long = (f?.at ?: 0L) / 1000
+                        item {
+                            Text(listOf(
+                                if (fastAt > 0) (f?.prices?.keys?.sorted()?.joinToString(", ") ?: "") + " " + HomeText.updated(fastAt, nowS) else "",
+                                if (minuteAt > 0) "the rest " + HomeText.updated(minuteAt, nowS) else "",
+                            ).filter { it.isNotBlank() }.joinToString(" · "), color = TerminalDim, style = MaterialTheme.typography.labelSmall,
+                                modifier = Modifier.padding(bottom = 6.dp))
+                        }
                         r.market?.takeIf { it.value > 0 }?.let { m ->
                             item {
                                 Text("${m.code} " + "%.1f".format(java.util.Locale.US, m.value) + "  " + HomeText.change(m.dayChange) + " today · ${m.priced} of ${m.constituents} priced · weights of ${m.month}",
@@ -282,7 +347,7 @@ private fun CoinLine(c: HomeText.Coin) {
                 style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         Column(horizontalAlignment = Alignment.End) {
-            Text(HomeText.money(c.usd), color = GhostText, style = MaterialTheme.typography.bodyMedium)
+            TickingPrice(HomeText.money(c.usd), c.usd, GhostText, MaterialTheme.typography.bodyMedium)
             val ch = HomeText.change(c.change24)
             Text(ch, color = if (ch.startsWith("-")) Warning else TerminalGreen, style = MaterialTheme.typography.labelSmall)
         }
