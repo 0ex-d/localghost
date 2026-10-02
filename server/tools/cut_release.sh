@@ -224,12 +224,15 @@ if [ -s "$APPOUT" ]; then
     [ -s "$APPOUT.asc" ] || sign "$APPOUT"
     # what the APK says of itself, when the build tools are here to ask
     [ -n "$BT" ] || find_sdk || true
+    # (read whole, never `head`: under pipefail a reader that closes early gives the tool
+    # SIGPIPE, the substitution fails, and set -e ends the cut without a word, as it did once
+    # right after "the app built and signed")
     CERT=""; VN=""; VC=""
     if [ -n "$BT" ] && [ -x "$BT/apksigner" ]; then
-        CERT="$("$BT/apksigner" verify --print-certs "$APPOUT" 2>/dev/null | grep -i 'certificate SHA-256' | head -1 | awk '{print $NF}')"
+        CERT="$("$BT/apksigner" verify --print-certs "$APPOUT" 2>/dev/null | awk 'tolower($0) ~ /certificate sha-256/ && !c { c = $NF } END { print c }' || true)"
     fi
     if [ -n "$BT" ] && [ -x "$BT/aapt2" ]; then
-        BADGE="$("$BT/aapt2" dump badging "$APPOUT" 2>/dev/null | head -1)"
+        BADGE="$("$BT/aapt2" dump badging "$APPOUT" 2>/dev/null | sed -n '/^package:/p' || true)"
         VN="$(printf '%s' "$BADGE" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")"
         VC="$(printf '%s' "$BADGE" | sed -n "s/.*versionCode='\([^']*\)'.*/\1/p")"
         if [ -n "$VN" ] && [ "$VN" != "$VERSION" ]; then

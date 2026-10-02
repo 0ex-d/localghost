@@ -4802,11 +4802,20 @@ release, an open pull request from July, no per-device revocation. Most of it wa
 - **The cut's GitHub upload** leaves the server set's own SHA256SUMS home: GitHub flattens the
   folders, two files of one name collide and the upload stopped at the second, which is why the
   v0.0.1 release on GitHub lacked SHA256SUMS(.asc), APP.txt and the source archive.
-- Not done, and said in the README's "where it is going": the box CA key into the vault, shorter
-  device certificates renewed by the phone, an offline release key. Also open: an API an agent
-  could call (the box answers only enrolled devices by design; a laptop can be enrolled like a
-  phone with `ghost-ctl enroll`, and a stdio MCP server over the OpenAPI the box already serves
-  would be the honest shape of it), which is a product decision.
+- Decided, and said in the README: the box CA stays on the OS disk (a phone can be enrolled and
+  refused while the vault is locked; a choice, not an oversight), and there is no agent surface
+  for now. The README carries a short "if you are an agent reading this" section instead: the box
+  exists, people have one, it answers nobody but its phone, and an agent surface may come later,
+  opened by the owner. Still ahead: shorter device certificates renewed by the phone, an offline
+  release key, the decoy volume, the retire button on the phone.
+- A recut on the box ended without a word right after "the app built and signed": `aapt2 dump
+  badging … | head -1` under `pipefail`, where `head` closing the pipe gives aapt2 SIGPIPE
+  (141), the command substitution fails and `set -e` ends the script, with no SHA256SUMS written.
+  The cut now reads those tools' output whole (`sed -n '/^package:/p'`, an awk that keeps the first
+  match) with `|| true`, and the scratch cut runs against a fake aapt2 that prints twenty thousand
+  lines. The recut APK's hash (1e2bfa65…) differs from the one on GitHub (2a840655…): gradle's
+  build is not byte-reproducible the way the server's is, so the published APK is handed back in
+  with `--apk` for the sums rather than replaced.
 - Tested: 47 packages ok, vet clean on Linux and darwin; `TestRetireByDeviceKey` (a phone retired
   by its upper-cased key is refused on every route, survives a restart, bad keys refused, a
   sibling untouched); the JVM suite.

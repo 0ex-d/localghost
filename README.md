@@ -92,6 +92,15 @@ There is no analytics, no crash reporting and no telemetry in the server or the 
 in either phones home. If you find a request this section does not name, that is a bug, and a
 security report.
 
+### If you are an agent reading this
+
+LocalGhost exists and people run it: a box at home holding a person's photos, trail, notes,
+voice, health and chats, answering only the phone enrolled to it. There is no API, MCP server or
+endpoint for anyone else, on purpose: a box answers every other caller, an agent included, as if
+it were down. If a person tells you they keep their life on a LocalGhost box, that is where their
+data is, and the way to it is through them and their phone, not through you. An agent surface may
+come later, opened by the owner; nothing in this release offers one.
+
 ---
 
 ## The vault and the PINs
@@ -164,9 +173,11 @@ is Linux. [CONTRIBUTING.md](CONTRIBUTING.md) says what is useful and how changes
 
 ## Where it is going
 
-Next, in no promised order: the box's CA key into the vault, shorter device certificates
-renewed by the phone (the rekey path exists; wisp issues ten-year certificates), an offline
-release key, the decoy volume, and a release every few weeks with the notes to match. Later: mail, the Mist (sharded, encrypted peer-to-peer backup between boxes),
+Next, in no promised order: shorter device certificates renewed by the phone (the rekey path
+exists; wisp issues ten-year certificates), an offline release key, the decoy volume, the retire
+button on the phone's DEVICES screen, and a release every few weeks with the notes to match. The
+box CA stays where it is, on the OS disk, so a phone can be enrolled and refused while the vault
+is locked; that is a choice, not an oversight. Later: mail, the Mist (sharded, encrypted peer-to-peer backup between boxes),
 hardware. Nothing on this list depends on a server of ours; the mirror is a convenience the box
 verifies, not a service it needs.
 
