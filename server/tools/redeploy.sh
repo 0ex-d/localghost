@@ -165,73 +165,115 @@ if [ -z "${GHOST_PIN:-}" ] && [ -t 0 ] && [ "$NGINX_ONLY" = "0" ] && [ "${VOLUME
 fi
 if [ -n "${GHOST_PIN:-}" ] && systemctl is-active --quiet ghost.secd; then
     echo "graceful halt before the binary swap"
-    "$REPO/bin/ghost-cli" --run-dir=/var/lib/ghost/run ghost.secd halt "pin=$GHOST_PIN" || true
-    echo "halt sent to secd; watching the volume's processes"
-    # halt replies ok unconditionally (PIN-opaque); confirm by watching the volume's services die,
-    # and SAY WHICH ONES are slow: each one is named the second it goes, and a survivor is shown
-    # with its pid, parent, state and kernel wait channel every five seconds , the difference
-    # between a process that is ignoring SIGTERM (state S, parent 1: an orphan nobody signals) and
-    # one the kernel is still tearing down (state D or Z, wchan in exit_mmap or the GPU driver:
-    # already dead, releasing memory), which is the llama-server question.
-    _halt0=$(date +%s)
-    _seen=""
-    _left=""
-    _killed=""
-    _unkillable=""
-    for i in $(seq 1 45); do
-        # (|| true: pgrep exits 1 when nothing is left, which is the success case; under pipefail
-        # that status used to END THE SCRIPT right here, before the restart , the new secd was
-        # staged but never started)
-        _alive=$( { pgrep -fa '/var/lib/ghost/mnt/.*/bin/' 2>/dev/null || true; } | sed -E 's|.*/bin/([^ ]+).*|\1|' | sort -u | tr '\n' ' ')
-        if [ -z "$_alive" ]; then _left=""; break; fi
-        _left="$_alive"
-        # anything seen before that is no longer alive: say so now, with the second
-        for n in $(echo "$_seen" | tr ' ' '\n' | sort -u); do
-            [ -z "$n" ] && continue
-            case " $_alive " in *" $n "*) ;; *) echo "  gone after $((i-1))s: $n"; _seen=$(echo " $_seen " | sed "s/ $n / /g") ;; esac
-        done
-        for n in $_alive; do case " $_seen " in *" $n "*) ;; *) _seen="$_seen $n" ;; esac; done
-        if [ $((i % 5)) -eq 0 ]; then
-            echo "  still up after ${i}s: $_alive"
-            for pid in $(pgrep -f '/var/lib/ghost/mnt/.*/bin/' 2>/dev/null); do
-                ps -o pid=,ppid=,stat=,wchan:28=,etimes=,comm= -p "$pid" 2>/dev/null | sed 's/^/      pid ppid stat wchan up comm: /'
+    # halt replies ok unconditionally (PIN-opaque: a wrong PIN, the wipe PIN and the limiter's
+    # lockout all get the same "ok" and nothing happens); confirm by watching the volume's
+    # services die, and SAY WHICH ONES are slow: each one is named the second it goes, and a
+    # survivor is shown with its pid, parent, state and kernel wait channel every five seconds ,
+    # the difference between a process that is ignoring SIGTERM (state S, parent 1: an orphan
+    # nobody signals) and one the kernel is still tearing down (state D or Z, wchan in exit_mmap
+    # or the GPU driver: already dead, releasing memory), which is the llama-server question.
+    #
+    # THE HALT THAT DID NOT TAKE. On 2 Oct 2026 a mistyped PIN got "ok", nothing moved for 45 s,
+    # and the watch below took the live postmaster (parent 1, as pg_ctl leaves it) for an orphan
+    # and killed it under the running daemons. So: a process set that has not changed at all
+    # twelve seconds in is not a slow teardown, it is no teardown; the PIN is asked for once
+    # more (secd's AuthorizesLock neither logs nor counts a wrong halt PIN, so the retry costs
+    # nothing), and after that the hard restart is said plainly. And the databases are never
+    # strays: pg_ctl and redis daemonise, parent 1 is their normal state, and secd's halt is
+    # what stops them.
+    _alive_sig() { # pid:state of everything from the volume's bin, one line, stable order
+        { pgrep -f '/var/lib/ghost/mnt/.*/bin/' 2>/dev/null || true; } | sort -n | while read -r pid; do
+            [ -n "$pid" ] && ps -o pid=,stat= -p "$pid" 2>/dev/null | tr -s ' ' ':'
+        done | tr '\n' ' '
+    }
+    _try=1
+    while :; do
+        "$REPO/bin/ghost-cli" --run-dir=/var/lib/ghost/run ghost.secd halt "pin=$GHOST_PIN" || true
+        echo "halt sent to secd; watching the volume's processes"
+        _halt0=$(date +%s)
+        _seen=""
+        _left=""
+        _killed=""
+        _unkillable=""
+        _sig0="$(_alive_sig)"
+        _moved=""
+        for i in $(seq 1 45); do
+            # (|| true: pgrep exits 1 when nothing is left, which is the success case; under pipefail
+            # that status used to END THE SCRIPT right here, before the restart , the new secd was
+            # staged but never started)
+            _alive=$( { pgrep -fa '/var/lib/ghost/mnt/.*/bin/' 2>/dev/null || true; } | sed -E 's|.*/bin/([^ ]+).*|\1|' | sort -u | tr '\n' ' ')
+            if [ -z "$_alive" ]; then _left=""; _moved=1; break; fi
+            _left="$_alive"
+            # anything seen before that is no longer alive: say so now, with the second
+            for n in $(echo "$_seen" | tr ' ' '\n' | sort -u); do
+                [ -z "$n" ] && continue
+                case " $_alive " in *" $n "*) ;; *) echo "  gone after $((i-1))s: $n"; _seen=$(echo " $_seen " | sed "s/ $n / /g"); _moved=1 ;; esac
             done
-        fi
-        # AN ORPHAN IS NOT A TEARDOWN. Ten seconds in, a survivor whose parent is init and whose
-        # state is R or S is alive and ignoring the halt , the llama-server seen at 60 days old,
-        # parent 1, state R , and nothing else will ever stop it: not the cohort (already down),
-        # not this script's patience, and systemd only after its three-minute timeout, which is
-        # what "systemctl restart took three minutes" was. The new build's lock path kills such
-        # strays itself; this is the same act for the halt that is already under way.
-        if [ "$i" -ge 10 ]; then
-            for pid in $(pgrep -f '/var/lib/ghost/mnt/.*/bin/' 2>/dev/null); do
-                set -- $(ps -o ppid=,stat=,etimes=,comm= -p "$pid" 2>/dev/null)
-                [ "${1:-}" = "1" ] || continue
-                case "${2:-}" in R*|S*) ;; *) continue ;; esac
-                case " $_killed " in *" $pid "*)
-                    # Already SIGKILLed and still here: SIGKILL cannot be ignored, only outrun by a
-                    # process that never returns from the kernel. Once, with the evidence, then quiet.
-                    case " $_unkillable " in *" $pid "*) ;; *)
-                        _unkillable="$_unkillable $pid"
-                        echo "  UNKILLABLE: ${4:-?} pid $pid survived SIGKILL , it is stuck inside the kernel (state ${2}); no signal, no systemd timeout and no patience ends it."
-                        echo "      pending signals: $(grep -E '^(ShdPnd|SigPnd)' /proc/$pid/status 2>/dev/null | tr '\n' ' ')"
-                        echo "      kernel stack:    $(head -4 /proc/$pid/stack 2>/dev/null | tr '\n' ' ' | cut -c1-200) (empty = it is ON a cpu right now, spinning)"
-                        echo "      GPU faults:      $(dmesg 2>/dev/null | grep -c 'NVRM: Xid') Xid line(s); first: $(dmesg 2>/dev/null | grep 'NVRM: Xid' | head -1 | cut -c1-160)"
-                        echo "      what now:        sudo ./tools/unwedge.sh  (who, where, since when; --reset for the levers; else a cold reboot)"
-                        ;;
+            for n in $_alive; do case " $_seen " in *" $n "*) ;; *) _seen="$_seen $n" ;; esac; done
+            if [ -z "$_moved" ] && [ "$(_alive_sig)" != "$_sig0" ]; then _moved=1; fi
+            if [ -z "$_moved" ] && [ "$i" -ge 12 ]; then
+                echo "  nothing has moved in ${i}s: the same processes, the same states. The halt did not take:"
+                echo "  a wrong PIN and the wipe PIN get the same \"ok\" and do nothing, and nothing is logged, on"
+                echo "  purpose (a mistyped halt PIN does not count against the limiter either). The box is still"
+                echo "  up; nothing here will be killed."
+                break
+            fi
+            if [ $((i % 5)) -eq 0 ]; then
+                echo "  still up after ${i}s: $_alive"
+                for pid in $(pgrep -f '/var/lib/ghost/mnt/.*/bin/' 2>/dev/null); do
+                    ps -o pid=,ppid=,stat=,wchan:28=,etimes=,comm= -p "$pid" 2>/dev/null | sed 's/^/      pid ppid stat wchan up comm: /'
+                done
+            fi
+            # AN ORPHAN IS NOT A TEARDOWN. Ten seconds into a teardown that is under way, a survivor
+            # whose parent is init and whose state is R or S is alive and ignoring the halt , the
+            # llama-server seen at 60 days old, parent 1, state R , and nothing else will ever stop
+            # it: not the cohort (already down), not this script's patience, and systemd only after
+            # its three-minute timeout, which is what "systemctl restart took three minutes" was.
+            # The new build's lock path kills such strays itself; this is the same act for the halt
+            # that is already under way. Never the databases (see the top), and never before
+            # something else has stopped (a halt that did not take is handled above).
+            if [ "$i" -ge 10 ] && [ -n "$_moved" ]; then
+                for pid in $(pgrep -f '/var/lib/ghost/mnt/.*/bin/' 2>/dev/null); do
+                    set -- $(ps -o ppid=,stat=,etimes=,comm= -p "$pid" 2>/dev/null)
+                    [ "${1:-}" = "1" ] || continue
+                    case "${2:-}" in R*|S*) ;; *) continue ;; esac
+                    case "${4:-}" in postgres|redis-server) continue ;; esac
+                    case " $_killed " in *" $pid "*)
+                        # Already SIGKILLed and still here: SIGKILL cannot be ignored, only outrun by a
+                        # process that never returns from the kernel. Once, with the evidence, then quiet.
+                        case " $_unkillable " in *" $pid "*) ;; *)
+                            _unkillable="$_unkillable $pid"
+                            echo "  UNKILLABLE: ${4:-?} pid $pid survived SIGKILL , it is stuck inside the kernel (state ${2}); no signal, no systemd timeout and no patience ends it."
+                            echo "      pending signals: $(grep -E '^(ShdPnd|SigPnd)' /proc/$pid/status 2>/dev/null | tr '\n' ' ')"
+                            echo "      kernel stack:    $(head -4 /proc/$pid/stack 2>/dev/null | tr '\n' ' ' | cut -c1-200) (empty = it is ON a cpu right now, spinning)"
+                            echo "      GPU faults:      $(dmesg 2>/dev/null | grep -c 'NVRM: Xid') Xid line(s); first: $(dmesg 2>/dev/null | grep 'NVRM: Xid' | head -1 | cut -c1-160)"
+                            echo "      what now:        sudo ./tools/unwedge.sh  (who, where, since when; --reset for the levers; else a cold reboot)"
+                            ;;
+                        esac
+                        continue ;;
                     esac
-                    continue ;;
-                esac
-                echo "  orphan: ${4:-?} pid $pid (parent 1, state ${2}, up ${3:-?}s) ignores the halt , killing it"
-                kill -TERM "$pid" 2>/dev/null || true; sleep 2
-                if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid" 2>/dev/null || true; fi
-                _killed="$_killed $pid"
-            done
+                    echo "  orphan: ${4:-?} pid $pid (parent 1, state ${2}, up ${3:-?}s) ignores the halt , killing it"
+                    kill -TERM "$pid" 2>/dev/null || true; sleep 2
+                    if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid" 2>/dev/null || true; fi
+                    _killed="$_killed $pid"
+                done
+            fi
+            sleep 1
+        done
+        if [ -z "$_moved" ] && [ -n "$_left" ]; then
+            if [ "$_try" -lt 2 ] && [ -t 0 ]; then
+                _try=$((_try + 1))
+                printf "main PIN again (Enter for the hard restart instead): " > /dev/tty
+                read -rs GHOST_PIN
+                echo > /dev/tty
+                [ -n "$GHOST_PIN" ] && continue
+            fi
+            echo "no graceful halt: hard restart (secd's SIGTERM lock races systemd's kill timeout; the unlock repairs what that leaves)"
+            break
         fi
-        sleep 1
+        break
     done
     for n in $_seen; do [ -n "$n" ] && case " $_left " in *" $n "*) ;; *) echo "  gone after $((i-1))s: $n" ;; esac; done
-    echo "cohort down after $(( $(date +%s) - _halt0 ))s"
     if [ -n "$_unkillable" ]; then
         echo "an unkillable process holds the volume and the service's cgroup: the restart below will wait out"
         echo "systemd's stop timeout (minutes), then start the new secd beside it. The volume cannot be fully"
@@ -239,10 +281,11 @@ if [ -n "${GHOST_PIN:-}" ] && systemctl is-active --quiet ghost.secd; then
         echo "finish this redeploy, then  sudo ./tools/unwedge.sh  , it says which. A card that fell off the"
         echo "bus (Xid 79) wants a COLD reboot (poweroff, 30s, on), and the app unlocks the volume after."
         echo "The new build kills strays before they can grow old."
-    elif [ -n "$_left" ]; then
-        echo "still stopping after 45s: $_left , hard restart; interrupted work heals on the next stock-take"
+    elif [ -n "$_left" ] && [ -n "$_moved" ]; then
+        echo "still stopping after $(( $(date +%s) - _halt0 ))s: $_left , hard restart; interrupted work heals on the next stock-take"
         echo "      (per-daemon stop timings: watchd's log 'service stopped' / 'cohort down'; llama-server's: oracled's log 'llama-server stop')"
-    else
+    elif [ -z "$_left" ]; then
+        echo "cohort down after $(( $(date +%s) - _halt0 ))s"
         echo "halted cleanly , cohort down, redis saved, postgres checkpointed."
     fi
 elif [ "${VOLUME_LOCKED:-0}" = "0" ]; then

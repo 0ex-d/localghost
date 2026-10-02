@@ -4885,3 +4885,25 @@ Anchor Terminal's second pass, after wisp 0.0.2:
 - Tested: `TestRunNeverWritesTheLinkOffATerminal` (a non-terminal writer: ErrScreen, nothing
   written, no identity minted, the message names the size), `TestMinScreenIsTheSmallest`,
   the pair package; build and vet.
+
+## redeploy: a halt that did not take is said, not acted on; the postmaster is never a stray
+
+- A redeploy on 2 Oct asked for the main PIN, sent the halt, and for 45 s every process of the
+  cohort sat where it was, parents intact, states unchanged. `halt` answers "ok" whatever the PIN
+  (PIN-opaque, by design, and `AuthorizesLock` logs nothing), so the only sign was that nothing
+  moved; a mistyped PIN is the likely cause. Ten seconds in, the watch's orphan rule (parent 1,
+  state R or S, under the volume's bin) matched the postmaster, whose parent is 1 by nature
+  (pg_ctl daemonises it), and killed it under the running daemons; then "cohort down after 55s"
+  printed, unconditionally, above "still stopping after 45s", and the hard restart followed.
+  Postgres recovers from WAL at the next unlock; in-flight writes at that second were lost.
+- Now: the watch keeps a signature of the volume's processes (pid:state) and, when nothing has
+  changed twelve seconds in, says the halt did not take (a wrong PIN or the wipe PIN, same
+  "ok", nothing logged), kills nothing, asks for the PIN once more (a wrong halt PIN costs
+  nothing at the limiter) and after that says "no graceful halt: hard restart" plainly. The
+  orphan rule runs only once something else has stopped (a teardown under way) and never on
+  `postgres` or `redis-server`. "cohort down" prints only when the cohort is down.
+- Tested with the halt block extracted into a harness and fake processes under the volume's
+  path (argv0 trick, comm from a copied binary): a halt that does nothing ends in 11 s with
+  nothing killed; a clean halt names each process as it goes and says "halted cleanly"; a
+  teardown with a stray ghost.watchd (parent 1) and the postmaster (parent 1): the stray is
+  killed at 10 s, the postmaster is left alone to the end.
