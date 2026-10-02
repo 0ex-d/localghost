@@ -58,6 +58,11 @@ fi
 case "$VERSION" in *[!0-9.]*) echo "a version is numbers and dots (0.0.1); the name comes from tools/release.names" >&2; exit 2 ;; esac
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$HERE"
+# not under sudo: root's gpg has no site key, and root-owned output stops the next cut as the user
+if [ -n "${SUDO_USER:-}" ]; then
+    echo "run the cut as yourself, not under sudo: the signatures come from $SUDO_USER's gpg, and files root writes under release/ cannot be cleared by the next cut" >&2
+    exit 2
+fi
 TAG="v$VERSION"
 NOTES="releases/$VERSION.md"
 PINS="releases/pins.txt"
@@ -162,7 +167,10 @@ W="$(mktemp -d)"
 cleanup() { git worktree remove --force "$W/src" >/dev/null 2>&1 || true; rm -rf "$W"; }
 trap cleanup EXIT
 git worktree add --detach "$W/src" "$TAG" >/dev/null 2>&1 || { echo "could not make a worktree of $TAG" >&2; exit 1; }
-rm -rf "$OUT"
+if [ -e "$OUT" ] && ! rm -rf "$OUT" 2>/dev/null; then
+    echo "cannot clear $OUT: an earlier cut left files another user owns there (root, when it ran under sudo). sudo rm -rf $OUT, then run the cut again as $(id -un)." >&2
+    exit 1
+fi
 mkdir -p "$OUT/source"
 ( cd "$W/src/$PREFIX" && GO="$GO" ./tools/release_build.sh "$VERSION" "$OUT" )
 # the site key, for the signatures (info@localghost.ai; the key that signs the site and the mirror)

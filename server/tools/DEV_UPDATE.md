@@ -4704,6 +4704,10 @@ moved tag refused). App: `DayTextTest`, `NotifLinkTest` (the page), `ReleaseInfo
 - `SHA256SUMS` no longer lists the `.asc` signatures (a GPG signature carries its time, so it is
   never the same twice; the sums now are, when the build is: the recut in the scratch repo gives
   an identical SHA256SUMS with the app in it).
+- A cut run under sudo once left `release/0.0.1/` root-owned, and the next cut as coder died on
+  `rm: Permission denied`. The cut now refuses to run under sudo (root's gpg has no site key, and
+  root's files block the user's next cut) and, when it cannot clear `release/<version>/`, says
+  whose files are in the way and the `sudo rm -rf` that clears them, instead of six rm errors.
 - Two Kotlin warnings the box's build printed are cleared (`UnlockClock.kt` a `!!` on a non-null
   value, `QrScanScreen.kt` a `.toFloat()` on a Float). The three AGP "Project object as a
   dependency notation" deprecations are the Android Gradle plugin's own, for a newer AGP.
