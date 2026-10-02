@@ -39,4 +39,17 @@ class FeedsTextTest {
         assertEquals("", FeedsText.staleness(r, 1060))
         assertEquals("the box's last report is 5 min old", FeedsText.staleness(r, 1300))
     }
+
+    @Test fun foldedUnderTheDaemons() {
+        fun sec(id: String, st: String) = FeedsText.Section(id, id, st, "", 12, "", emptyList())
+        val r = FeedsText.Report(1000, "flaky", "2 want a look", listOf(sec("prices", "ok"), sec("market", "flaky"), sec("daily", "flaky"), sec("history", "filling")))
+        assertEquals("data feeds · 2 want a look", FeedsText.foldLine(r, false))
+        assertEquals("data feeds · 1 wants a look", FeedsText.foldLine(r.copy(sections = r.sections.take(2)), false))
+        assertEquals("data feeds · filling", FeedsText.foldLine(FeedsText.Report(1000, "filling", "", listOf(sec("history", "filling"))), false))
+        assertEquals("data feeds · all well", FeedsText.foldLine(FeedsText.Report(1000, "ok", "", listOf(sec("prices", "ok"))), false))
+        assertEquals("data feeds · reading…", FeedsText.foldLine(null, false))
+        assertEquals("archive pipeline · 99% at the latest stage · 26 damaged", FeedsText.pipelineLine(33025, 32965, 26, true, false))
+        assertEquals("archive pipeline · all at the latest stage", FeedsText.pipelineLine(10, 10, 0, true, false))
+        assertEquals("archive pipeline · not reported by this build", FeedsText.pipelineLine(0, 0, 0, false, true))
+    }
 }

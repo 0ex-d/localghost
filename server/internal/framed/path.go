@@ -11,6 +11,8 @@ import (
 	"encoding/json"
 	"math"
 	"time"
+
+	"github.com/LocalGhostDao/localghost/server/internal/dem"
 )
 
 // TrackPoint is one location sample from the watch/phone.
@@ -45,6 +47,21 @@ func BuildDayPath(day time.Time, points []TrackPoint, photos []PhotoPoint) ([]by
 
 // BuildDayPathAsking is [BuildDayPath] with the day's trail questions (questions.go) on the line.
 func BuildDayPathAsking(day time.Time, points []TrackPoint, photos []PhotoPoint, questions []Question) ([]byte, error) {
+	return BuildDayPathHeights(day, points, photos, questions, nil)
+}
+
+// HeightFunc is the ground's height at a place in metres (internal/dem); ok false where unknown.
+type HeightFunc func(lat, lon float64) (float64, bool)
+
+// climbThreshold is how far the ground must rise or fall before a change counts toward the day's
+// climb: the 90 m model and a quarter-hour trail are both rough, and without it a flat walk
+// along a hillside adds up to a mountain.
+const climbThreshold = 10.0
+
+// BuildDayPathHeights is [BuildDayPathAsking] with the ground's height under the line: "alts"
+// beside "times" (a height for each kept vertex, null where the box has no tile), and the day's
+// climb and descent, highest and lowest, from the cleaned points (internal/dem's Climb).
+func BuildDayPathHeights(day time.Time, points []TrackPoint, photos []PhotoPoint, questions []Question, height HeightFunc) ([]byte, error) {
 	dayStart := time.Date(day.UTC().Year(), day.UTC().Month(), day.UTC().Day(), 0, 0, 0, 0, time.UTC).Unix()
 	dayEnd := dayStart + 86400
 	inDay := func(pts []TrackPoint) []TrackPoint {
@@ -97,6 +114,30 @@ func BuildDayPathAsking(day time.Time, points []TrackPoint, photos []PhotoPoint,
 		if len(questions) > 0 {
 			// the stretches the person is asked about ("were you there?")
 			features[len(features)-1].Properties["questions"] = questions
+		}
+		if height != nil {
+			props := features[len(features)-1].Properties
+			alts := make([]any, len(simplified))
+			known := 0
+			for i, p := range simplified {
+				if h, ok := height(p.Lat, p.Lon); ok {
+					alts[i] = int(math.Round(h))
+					known++
+				}
+			}
+			if known > 0 {
+				props["alts"] = alts
+			}
+			var hs []float64
+			for _, p := range points {
+				if h, ok := height(p.Lat, p.Lon); ok {
+					hs = append(hs, h)
+				}
+			}
+			if up, down, high, low, ok := dem.Climb(hs, climbThreshold); ok {
+				props["climbM"], props["descentM"] = math.Round(up), math.Round(down)
+				props["highM"], props["lowM"] = math.Round(high), math.Round(low)
+			}
 		}
 	}
 	for _, ph := range photos {

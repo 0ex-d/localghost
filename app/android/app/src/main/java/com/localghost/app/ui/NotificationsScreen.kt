@@ -29,12 +29,14 @@ fun NotificationsScreen(
     @Suppress("UNUSED_PARAMETER") items: Loadable<List<PendingNotification>>,
     sessionHint: SessionHint = SessionHint.NONE,
     onOpen: (NotifLink.Target) -> Unit = {},
+    onOpenOne: (Long) -> Unit = {},
 ) {
     // THE HISTORY, read when the screen opens: what every daemon on the box has said, newest
     // first. Reading it consumes nothing (the push the phone's pollers take is a separate cursor),
     // so what a notification said is here after it was shown, and here when it was never shown
-    // (muted, or the phone was off). Tapping one marks it seen and opens what it is about (the day
-    // on MAP, the memory, NEWS, Box Status: NotifLink); ✕ deletes it on the box. A week is kept.
+    // (muted, or the phone was off). Tapping one opens its page (NotificationScreen: the whole of
+    // it, and the thing it is about shown under it); the green line under it goes straight to the
+    // thing (the day, the memory, NEWS, Box Status: NotifLink); ✕ deletes it on the box. A week is kept.
     val ctx = androidx.compose.ui.platform.LocalContext.current
     val scope = androidx.compose.runtime.rememberCoroutineScope()
     var history by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<Loadable<List<PendingNotification>>>(Loadable.Loading) }
@@ -77,11 +79,9 @@ fun NotificationsScreen(
                 Column(Modifier.fillMaxWidth().border(1.dp, if (n.seen) TerminalDim else TerminalGreen, RectangleShape)
                     .background(VoidLighter)
                     .clickable {
-                        if (!n.seen) scope.launch {
-                            if (BoxClient.notificationSeen(ctx, n.id)) history = Loadable.Loaded(h.value.map { if (it.id == n.id) it.copy(seen = true) else it })
-                        }
-                        val target = NotifLink.resolve(n.link, n.daemonId, n.kind)
-                        if (target.dest.isNotEmpty() && target.dest != "notifications") onOpen(target)
+                        // its page: the whole of it, and what it is about, shown there
+                        if (!n.seen) history = Loadable.Loaded(h.value.map { if (it.id == n.id) it.copy(seen = true) else it })
+                        onOpenOne(n.id)
                     }
                     .padding(14.dp)) {
                     Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
@@ -103,7 +103,9 @@ fun NotificationsScreen(
                     val target = NotifLink.resolve(n.link, n.daemonId, n.kind)
                     if (target.dest.isNotEmpty() && target.dest != "notifications") {
                         Spacer(Modifier.height(6.dp))
-                        Text(NotifText.opens(target), color = TerminalGreen, style = MaterialTheme.typography.labelMedium)
+                        // straight to the thing, past its page
+                        Text(NotifText.opens(target), color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
+                            modifier = Modifier.clickable { onOpen(target) })
                     }
                 }
             }

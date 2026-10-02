@@ -453,10 +453,22 @@ build comes back by itself if the new one fails it (or from ROLL BACK). Once, as
     sudo ./tools/redeploy.sh    # installs ghost-update-guard, its unit drop-in, and the verifier +
                                 # site key in /opt/localghost/tools
 
-Building a release for the mirror (a clean tree at a tag; the web repo publishes it as the set
-`server`): `./tools/release_build.sh 0.9.3`. It is reproducible: the same commit gives the same
-bytes, so anyone can rebuild a published release and compare it with the manifest. DEV_UPDATE.md,
-"A new server release from the phone", has the rest.
+Cutting a release (the web repo publishes it as the mirror's set `server`):
+
+    ./tools/cut_release.sh 0.0.1
+
+A release is its name (`tools/release.names`: 0.0.1 is wisp), its notes (`releases/0.0.1.md`:
+what it does, what is in it, how it works) and its pin (`releases/pins.txt`: the commit it was
+cut from, written at the first cut). The first cut tags HEAD as `v0.0.1` (a clean tree, the notes
+committed); every cut after builds from that tag in a clean worktree, whatever the checkout holds,
+and refuses to build when the tag no longer points at the pinned commit. The output,
+`release/0.0.1/server/`, is the bundle, RELEASE.txt (with `name=`), NOTES.md, NOTICE.txt,
+TERMS-MIT.txt and SHA256SUMS, built reproducibly (`tools/release_build.sh`): the same tag gives the
+same bytes on any machine, so anyone can rebuild a published release and compare it with the
+manifest. The script prints what comes next: push the tag, make the GitHub release with the
+files, point the mirror's `server` set at them. The box reports itself as "wisp 0.0.1" (SETTINGS ›
+SERVER), and the phone offers the next release by its name. DEV_UPDATE.md, "A new server release
+from the phone", has how the box takes one.
 
 ## 8d. Move the phone's TLS into secd , root once (recommended on a box that hosts other sites)
 

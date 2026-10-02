@@ -910,7 +910,7 @@ func (s *Store) WeeklyHighlight() error {
 	if err := s.db.Exec(
 		"INSERT INTO notifications (service, kind, title, body, seen, options, created, link) VALUES ('ghost.framed','highlight',$1,$2,FALSE,'',now(),$3)",
 		"your week in frames",
-		dayName+" was the big one , "+n+" photos"+place+". They are on your MAP.", "map:"+day); err != nil {
+		dayName+" was the big one , "+n+" photos"+place+". Tap for the day.", "day:"+day); err != nil {
 		return err
 	}
 	return s.db.Exec(

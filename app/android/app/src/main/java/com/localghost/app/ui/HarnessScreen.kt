@@ -35,6 +35,38 @@ fun HarnessScreen(daemons: Loadable<List<DaemonStatus>>, onRefresh: () -> Unit =
         }
     }
     statsFor?.let { name -> ServiceStatsDialog(name = name, onDismiss = { statsFor = null }) }
+    // THE ARCHIVE'S PROGRESS AND THE DATA FEEDS, folded under the daemons that do the work
+    // (ghost.framed, ghost.tallyd): closed, one dim line; open, the whole panel. Read every 30 s,
+    // every 5 s while the archive is open.
+    val ctx = LocalContext.current
+    var pipeline by remember { mutableStateOf<BoxClient.Pipeline?>(null) }
+    var pipelineNone by remember { mutableStateOf(false) }
+    var feeds by remember { mutableStateOf<FeedsText.Report?>(null) }
+    var feedsNone by remember { mutableStateOf(false) }
+    var folds by remember { mutableStateOf(setOf<String>()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            val got = BoxClient.pipeline(ctx)
+            if (got == null && pipeline == null) pipelineNone = true else if (got != null) { pipeline = got; pipelineNone = false }
+            kotlinx.coroutines.delay(if ("pipeline" in folds) 5_000 else 30_000)
+        }
+    }
+    LaunchedEffect(Unit) {
+        while (true) {
+            val got = BoxClient.feedsStatus(ctx)
+            if (got == null && feeds == null) feedsNone = true else if (got != null) { feeds = got; feedsNone = false }
+            kotlinx.coroutines.delay(30_000)
+        }
+    }
+    val toggle: (String) -> Unit = { k -> folds = if (k in folds) folds - k else folds + k }
+    val pipelineFold: @Composable () -> Unit = {
+        val pl = pipeline
+        Fold(FeedsText.pipelineLine(pl?.total ?: 0, pl?.atLatest?.done ?: 0, pl?.damaged ?: 0, pl != null, pipelineNone),
+            "pipeline" in folds, { toggle("pipeline") }) { PipelineBody(pl, pipelineNone) }
+    }
+    val feedsFold: @Composable () -> Unit = {
+        Fold(FeedsText.foldLine(feeds, feedsNone), "feeds" in folds, { toggle("feeds") }) { FeedsBody(feeds, feedsNone) }
+    }
 
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -64,19 +96,28 @@ fun HarnessScreen(daemons: Loadable<List<DaemonStatus>>, onRefresh: () -> Unit =
                 }
             }
         }
-        item { PipelinePanel() }
-        item { FeedsPanel() }
         when (daemons) {
             is Loadable.Loading -> item { LoadingRow("polling daemons…") }
             is Loadable.Failed -> item { ErrorLine(daemons.reason) }
-            is Loadable.Loaded -> items(daemons.value) { d ->
-                DaemonRow(d, onClick = {
-                    statsFor = when (d.id) {
-                        "cpu" -> "host.cpu"; "memory" -> "host.mem"; "gpu" -> "host.gpu"
-                        "system disk" -> "host.disk"
-                        else -> d.id // daemons, postgres, redis, volume: sampler names match
+            is Loadable.Loaded -> {
+                items(daemons.value) { d ->
+                    DaemonRow(d, onClick = {
+                        statsFor = when (d.id) {
+                            "cpu" -> "host.cpu"; "memory" -> "host.mem"; "gpu" -> "host.gpu"
+                            "system disk" -> "host.disk"
+                            else -> d.id // daemons, postgres, redis, volume: sampler names match
+                        }
+                    }) {
+                        when (d.id) {
+                            "ghost.framed" -> pipelineFold()
+                            "ghost.tallyd" -> feedsFold()
+                        }
                     }
-                })
+                }
+                // a box that does not list them (an older build): the folds on their own, last
+                val ids = daemons.value.map { it.id }
+                if ("ghost.framed" !in ids) item { pipelineFold() }
+                if ("ghost.tallyd" !in ids) item { feedsFold() }
             }
         }
         item { Spacer(Modifier.height(24.dp)) }
@@ -84,32 +125,15 @@ fun HarnessScreen(daemons: Loadable<List<DaemonStatus>>, onRefresh: () -> Unit =
 }
 
 /**
- * THE ARCHIVE'S PROGRESS , the stock-take as a panel: every stage as a bar with done/total and
- * what is left, the description rate and the time the rest will take at that pace, searchd's
- * queue, and framed's own check while it runs. Polled every 5 s while the screen is open; the
- * numbers are the box's (/v1/pipeline), nothing is estimated on the phone.
+ * THE ARCHIVE'S PROGRESS , the stock-take, folded under ghost.framed: every stage as a bar with
+ * done/total and what is left, the description rate and the time the rest will take at that pace,
+ * searchd's queue, and framed's own check while it runs. The numbers are the box's (/v1/pipeline),
+ * nothing is estimated on the phone.
  */
 @Composable
-private fun PipelinePanel() {
-    val ctx = LocalContext.current
-    var p by remember { mutableStateOf<BoxClient.Pipeline?>(null) }
-    var unsupported by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            val got = BoxClient.pipeline(ctx)
-            if (got == null && p == null) unsupported = true else if (got != null) { p = got; unsupported = false }
-            kotlinx.coroutines.delay(5_000)
-        }
-    }
-    Column(Modifier.fillMaxWidth().border(1.dp, TerminalDim, RectangleShape).background(VoidLighter).padding(14.dp)) {
-        Row {
-            Text("◉", color = TerminalGreen, style = MaterialTheme.typography.bodyMedium)
-            Spacer(Modifier.width(8.dp))
-            Text("archive pipeline", color = TerminalGreen, style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.weight(1f))
-            p?.let { Text("v${it.version}", color = GhostTextDim, style = MaterialTheme.typography.labelMedium) }
-        }
-        Spacer(Modifier.height(6.dp))
+private fun PipelineBody(p: BoxClient.Pipeline?, unsupported: Boolean) {
+    Column(Modifier.fillMaxWidth()) {
+        p?.let { Text("pipeline v${it.version}", color = GhostTextDim, style = MaterialTheme.typography.labelSmall) }
         val pl = p
         when {
             pl == null && unsupported -> Text("the box does not report pipeline progress yet , deploy the current build",
@@ -168,43 +192,24 @@ private fun PipelinePanel() {
 }
 
 /**
- * THE DATA FEEDS , what the box pulls in from outside (the prices every minute, the exchanges,
- * the history walked back, CRYPTO50, the ECB, the rank list, the daily candles, the news) and how
- * each is doing, judged on the box (/v1/feeds/status): a mark, a line, how old the newest piece
- * is. A section opens on tap to the box's detail. Polled every 30 s while the screen is open; the
- * ages tick between polls.
+ * THE DATA FEEDS , folded under ghost.tallyd: what the box pulls in from outside (the prices every
+ * minute, the exchanges, the history walked back, CRYPTO50, the ECB, the rank list, the daily
+ * candles, the news) and how each is doing, judged on the box (/v1/feeds/status): a mark, a line,
+ * how old the newest piece is. A section opens on tap to the box's detail; the ages tick.
  */
 @Composable
-private fun FeedsPanel() {
-    val ctx = LocalContext.current
-    var report by remember { mutableStateOf<FeedsText.Report?>(null) }
-    var unsupported by remember { mutableStateOf(false) }
+private fun FeedsBody(report: FeedsText.Report?, unsupported: Boolean) {
     var open by remember { mutableStateOf(setOf<String>()) }
     var nowS by remember { mutableStateOf(System.currentTimeMillis() / 1000) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            val got = BoxClient.feedsStatus(ctx)
-            if (got == null && report == null) unsupported = true else if (got != null) { report = got; unsupported = false }
-            nowS = System.currentTimeMillis() / 1000
-            kotlinx.coroutines.delay(30_000)
-        }
-    }
     LaunchedEffect(Unit) {
         while (true) {
             kotlinx.coroutines.delay(5_000)
             nowS = System.currentTimeMillis() / 1000
         }
     }
-    Column(Modifier.fillMaxWidth().border(1.dp, TerminalDim, RectangleShape).background(VoidLighter).padding(14.dp)) {
+    Column(Modifier.fillMaxWidth()) {
         val r = report
-        Row {
-            Text("◉", color = TerminalGreen, style = MaterialTheme.typography.bodyMedium)
-            Spacer(Modifier.width(8.dp))
-            Text("data feeds", color = TerminalGreen, style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.weight(1f))
-            r?.let { Text(FeedsText.word(it.state), color = toneColour(FeedsText.tone(it.state)), style = MaterialTheme.typography.labelMedium) }
-        }
-        Spacer(Modifier.height(6.dp))
+        r?.let { Text(FeedsText.word(it.state), color = toneColour(FeedsText.tone(it.state)), style = MaterialTheme.typography.labelSmall) }
         when {
             r == null && unsupported -> Text("the box does not report its feeds yet , deploy the current build",
                 color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
@@ -297,8 +302,24 @@ private fun StageBar(label: String, s: BoxClient.Stage, strong: Boolean = false)
     }
 }
 
+/** A fold inside a daemon's card: one dim line with ▸, the panel under it when open. Its own tap,
+ *  not the card's (which opens the daemon's history). */
 @Composable
-private fun DaemonRow(d: DaemonStatus, onClick: () -> Unit = {}) {
+private fun Fold(line: String, isOpen: Boolean, onToggle: () -> Unit, content: @Composable () -> Unit) {
+    Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+        Row(Modifier.fillMaxWidth().clickable { onToggle() }.padding(vertical = 4.dp)) {
+            Text(line, color = GhostTextDim, style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
+            Text(if (isOpen) "  ▾" else "  ▸", color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+        }
+        if (isOpen) {
+            Spacer(Modifier.height(6.dp))
+            content()
+        }
+    }
+}
+
+@Composable
+private fun DaemonRow(d: DaemonStatus, onClick: () -> Unit = {}, fold: @Composable () -> Unit = {}) {
     Column(Modifier.fillMaxWidth().border(1.dp, GhostBorder, RectangleShape)
         .background(VoidLighter).clickable { onClick() }.padding(14.dp)) {
         Row {
@@ -313,6 +334,7 @@ private fun DaemonRow(d: DaemonStatus, onClick: () -> Unit = {}) {
         Spacer(Modifier.height(2.dp))
         Text("${d.detail}  ·  ${d.lastRun}", color = GhostTextDim,
             style = MaterialTheme.typography.labelMedium)
+        fold()
     }
 }
 

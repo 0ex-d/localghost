@@ -1,0 +1,4 @@
+# The releases' names: "<version> <name>", one a line, read by tools/release_build.sh (RELEASE.txt's
+# name=, secd.ReleaseName, what the phone shows: "wisp 0.0.1"). Committed with the code, so a
+# release built again from its commit is named the same.
+0.0.1 wisp

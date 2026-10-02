@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"image"
 	"image/color"
+	"strings"
 	"testing"
 	"time"
 )
@@ -131,5 +132,50 @@ func TestExtFor(t *testing.T) {
 	}
 	if extFor("", "noext") != ".bin" {
 		t.Fatal("no extension falls back to .bin")
+	}
+}
+
+// The ground's height under the line: a height per kept vertex (null where unknown) and the
+// day's climb, the hill up and back down.
+func TestBuildDayPathHeights(t *testing.T) {
+	day, _ := time.Parse("2006-01-02", "2024-06-01")
+	d0 := day.Unix()
+	pts := []TrackPoint{
+		{TS: d0 + 600, Lat: 51.50, Lon: 0.00},
+		{TS: d0 + 1200, Lat: 51.51, Lon: 0.02},
+		{TS: d0 + 1800, Lat: 51.53, Lon: 0.01},
+		{TS: d0 + 2400, Lat: 51.50, Lon: 0.03},
+		{TS: d0 + 3000, Lat: 51.60, Lon: 0.05}, // no tile there
+	}
+	height := func(lat, lon float64) (float64, bool) {
+		if lat > 51.55 {
+			return 0, false
+		}
+		return 1000 * (lat - 51.5) * 10, true // 51.53 is 300 m up
+	}
+	doc, err := BuildDayPathHeights(day, pts, nil, nil, height)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var g struct {
+		Features []struct {
+			Properties map[string]any `json:"properties"`
+		} `json:"features"`
+	}
+	if err := json.Unmarshal(doc, &g); err != nil {
+		t.Fatal(err)
+	}
+	p := g.Features[0].Properties
+	alts, _ := p["alts"].([]any)
+	times, _ := p["times"].([]any)
+	if len(alts) != len(times) || alts[0] != float64(0) || alts[len(alts)-1] != nil {
+		t.Fatalf("alts %v (times %v)", alts, times)
+	}
+	if p["climbM"] != float64(300) || p["descentM"] != float64(300) || p["highM"] != float64(300) || p["lowM"] != float64(0) {
+		t.Fatalf("%v %v %v %v", p["climbM"], p["descentM"], p["highM"], p["lowM"])
+	}
+	plain, _ := BuildDayPath(day, pts, nil)
+	if strings.Contains(string(plain), "alts") || strings.Contains(string(plain), "climbM") {
+		t.Fatal("no heights without the tiles")
 	}
 }

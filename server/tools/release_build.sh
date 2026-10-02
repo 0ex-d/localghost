@@ -4,11 +4,14 @@
 #   ./tools/release_build.sh 0.9.3                  from a clean tree at tag v0.9.3 (or any commit)
 #   ./tools/release_build.sh 0.9.3 /tmp/rel         the set's files land in /tmp/rel/server/
 #
+# A release's name (0.0.1 is "wisp") comes from tools/release.names, committed with the code.
+#
 # What it makes, in <outdir>/server/ (default ./release/server/), for the web repo's mirror publish
 # to put under /<build>/server/ and sign into MANIFEST.txt like every other set:
-#   localghost-server-<version>-linux-amd64.tar.gz   VERSION, COMMIT, CHANGES.txt, bin/, tools/
+#   localghost-server-<version>-linux-amd64.tar.gz   VERSION, COMMIT, CHANGES.txt, NOTES.md, bin/, tools/
 #   RELEASE.txt    what the phone shows before anyone downloads anything: version, commit, date,
 #                  and the commits since the last tag, one line each
+#   NOTES.md       the release's notes (releases/<version>.md), the same text as in the bundle
 #   NOTICE.txt, TERMS-MIT.txt   the set's notice and licence, which travel with every set
 #
 # REPRODUCIBLE: CGO off, -trimpath, no build id, the tar sorted with the commit's time on every
@@ -29,6 +32,10 @@ OUT="${2:-$HERE/release}/server"
 GO="${GO:-go}"
 cd "$HERE"
 
+# the release's name, from tools/release.names ("<version> <name>" a line), so the same commit
+# names it the same way on any machine; "" for a version without one
+RELNAME="$(awk -v v="$VERSION" '$1 == v { print $2; exit }' tools/release.names 2>/dev/null || true)"
+case "$RELNAME" in *[!a-z0-9-]*) echo "a release name is [a-z0-9-] (tools/release.names)" >&2; exit 2 ;; esac
 COMMIT="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
     echo "the tree has uncommitted changes: a release is built from a commit" >&2
@@ -41,7 +48,7 @@ W="$(mktemp -d)"
 trap 'rm -rf "$W"' EXIT
 mkdir -p "$W/b/bin" "$W/b/tools" "$OUT"
 
-LDFLAGS="-s -w -buildid= -X github.com/LocalGhostDao/localghost/server/internal/secd.Version=$VERSION"
+LDFLAGS="-s -w -buildid= -X github.com/LocalGhostDao/localghost/server/internal/secd.Version=$VERSION -X github.com/LocalGhostDao/localghost/server/internal/secd.ReleaseName=$RELNAME"
 build() { CGO_ENABLED=0 GOOS=linux GOARCH=amd64 "$GO" build -trimpath -ldflags "$LDFLAGS" -o "$W/b/bin/$1" "./cmd/$1"; }
 build ghost.secd
 for d in cmd/ghost.*; do
@@ -53,6 +60,12 @@ build ghost-cli
 build ghost-ctl
 install -m755 tools/mirror_fetch.sh "$W/b/tools/mirror_fetch.sh"
 install -m644 tools/mirror-key.asc "$W/b/tools/mirror-key.asc"
+# the release's notes (releases/<version>.md: what it does, what is in it, how it works), in the
+# bundle and beside it in the set
+if [ -s "releases/$VERSION.md" ]; then
+    install -m644 "releases/$VERSION.md" "$W/b/NOTES.md"
+    install -m644 "releases/$VERSION.md" "$OUT/NOTES.md"
+fi
 
 echo "$VERSION" > "$W/b/VERSION"
 echo "$COMMIT" > "$W/b/COMMIT"
@@ -64,10 +77,11 @@ fi
 
 NAME="localghost-server-$VERSION-linux-amd64.tar.gz"
 ( cd "$W/b" && tar --sort=name --mtime="@$EPOCH" --owner=0 --group=0 --numeric-owner --format=gnu \
-      -cf - VERSION COMMIT CHANGES.txt bin tools ) | gzip -n -9 > "$OUT/$NAME"
+      -cf - VERSION COMMIT CHANGES.txt bin tools $( [ -f NOTES.md ] && echo NOTES.md ) ) | gzip -n -9 > "$OUT/$NAME"
 
 {
     echo "version=$VERSION"
+    [ -n "$RELNAME" ] && echo "name=$RELNAME"
     echo "commit=$COMMIT"
     echo "date=$(date -u -d "@$EPOCH" +%Y-%m-%dT%H:%M:%SZ)"
     echo "bundle=$NAME"
@@ -76,12 +90,12 @@ NAME="localghost-server-$VERSION-linux-amd64.tar.gz"
     sed 's/^/  /' "$W/b/CHANGES.txt"
 } > "$OUT/RELEASE.txt"
 cat > "$OUT/NOTICE.txt" <<EOF
-LocalGhost server $VERSION (commit $COMMIT), built reproducibly from the public repository:
+LocalGhost server ${RELNAME:+$RELNAME }$VERSION (commit $COMMIT), built reproducibly from the public repository:
 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -buildid=" for linux/amd64 (tools/release_build.sh).
 The box checks this set's signature and hashes before it puts a release on, and rolls it back if
 the release fails its first unlock.
 EOF
 cp LICENSE "$OUT/TERMS-MIT.txt" 2>/dev/null || cp ../LICENSE "$OUT/TERMS-MIT.txt"
 
-echo "release $VERSION ($COMMIT) in $OUT:"
+echo "release ${RELNAME:+$RELNAME }$VERSION ($COMMIT) in $OUT:"
 ( cd "$OUT" && sha256sum ./* | sed 's|  \./|  |' )

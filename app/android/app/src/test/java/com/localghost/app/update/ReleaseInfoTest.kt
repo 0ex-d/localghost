@@ -32,6 +32,10 @@ d23072b4dd44e7c82758696f242d74d8c51bac6895bd4907fa05ef72ed8c8ccd  /20260930T1200
         assertEquals("0.9.3", r.version)
         assertEquals(listOf("e830701 the vault rings", "a1b2c3d trail questions"), r.changes)
         assertNull(ReleaseInfo.release("commit=x"))
+        val w = ReleaseInfo.release("version=0.0.1\nname=wisp\ncommit=abc\nchanges:\n  abc the first release\n")!!
+        assertEquals("wisp", w.name)
+        assertEquals("wisp 0.0.1", w.label)
+        assertEquals("0.9.3", ReleaseInfo.release("version=0.9.3\n")!!.label)
     }
 
     @Test fun comparesVersions() {

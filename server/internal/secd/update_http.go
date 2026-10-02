@@ -37,6 +37,10 @@ import (
 // Version is the build secd reports (Makefile: git describe; tools/release_build.sh: the tag).
 var Version = "dev"
 
+// ReleaseName is the release's name (tools/release.names: 0.0.1 is "wisp"), "" for a build from
+// source.
+var ReleaseName = ""
+
 // updateMaxBytes bounds one uploaded file of the set (the bundle is the big one).
 const updateMaxBytes = 512 << 20
 
@@ -96,7 +100,7 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		s.appearsDown(w)
 		return
 	}
-	writeJSON(w, map[string]any{"version": Version, "trial": update.LoadTrial(s.updPaths())})
+	writeJSON(w, map[string]any{"version": Version, "name": ReleaseName, "trial": update.LoadTrial(s.updPaths())})
 }
 
 // handleUpdateFile , POST /v1/update/file?name=... , one file of the set, streamed to incoming/.

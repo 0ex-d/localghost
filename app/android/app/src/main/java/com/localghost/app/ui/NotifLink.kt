@@ -18,6 +18,8 @@ object NotifLink {
             val (head, arg) = l.substringBefore(':') to l.substringAfter(':', "")
             when (head) {
                 "map" -> return Target("map", arg.takeIf { day.matches(it) } ?: "")
+                "day" -> return Target("day", arg.takeIf { day.matches(it) } ?: "")
+                "notification" -> return Target("notification", arg.takeIf { it.toLongOrNull() != null } ?: "")
                 "memories" -> return Target("memories", arg.takeIf { it == "near" || it.toLongOrNull() != null } ?: "")
                 "news", "status", "notifications" -> return Target(head)
             }

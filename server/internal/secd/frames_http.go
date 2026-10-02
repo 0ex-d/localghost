@@ -995,6 +995,13 @@ func (s *Server) handleGeoTracks(w http.ResponseWriter, r *http.Request) {
 		WalkM float64 `json:"walkM,omitempty"`
 		RideM float64 `json:"rideM,omitempty"`
 		Stays int     `json:"stays,omitempty"`
+		// the ground's height under the line (framed, from the elevation tiles): parallel to
+		// coords, null where the box has no tile; the day's climb and descent, highest and lowest
+		Alts     []*int  `json:"alts,omitempty"`
+		ClimbM   float64 `json:"climbM,omitempty"`
+		DescentM float64 `json:"descentM,omitempty"`
+		HighM    float64 `json:"highM,omitempty"`
+		LowM     float64 `json:"lowM,omitempty"`
 	}
 	out := []track{}
 	dir := s.pathsDir(mounted)
@@ -1033,6 +1040,11 @@ func (s *Server) handleGeoTracks(w http.ResponseWriter, r *http.Request) {
 					DistanceM float64         `json:"distanceM"`
 					Glitches  int             `json:"glitches"`
 					Questions json.RawMessage `json:"questions"`
+					Alts      []*int          `json:"alts"`
+					ClimbM    float64         `json:"climbM"`
+					DescentM  float64         `json:"descentM"`
+					HighM     float64         `json:"highM"`
+					LowM      float64         `json:"lowM"`
 				} `json:"properties"`
 			} `json:"features"`
 		}
@@ -1055,6 +1067,10 @@ func (s *Server) handleGeoTracks(w http.ResponseWriter, r *http.Request) {
 			if len(f.Properties.Times) == len(lonlat) {
 				t.Times = f.Properties.Times
 			}
+			if len(f.Properties.Alts) == len(lonlat) {
+				t.Alts = f.Properties.Alts
+			}
+			t.ClimbM, t.DescentM, t.HighM, t.LowM = f.Properties.ClimbM, f.Properties.DescentM, f.Properties.HighM, f.Properties.LowM
 			if rb, err := os.ReadFile(filepath.Join(dir, d+".route.json")); err == nil {
 				var rt struct {
 					Line  string            `json:"line"`

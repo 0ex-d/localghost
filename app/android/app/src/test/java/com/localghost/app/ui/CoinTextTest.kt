@@ -34,12 +34,16 @@ class CoinTextTest {
     }
 
     @Test fun memoryKindsAndTheNote() {
-        val kinds = listOf("person", "person", "me", "day", "episode", "user", "distilled")
+        val kinds = listOf("person", "person", "me", "day", "episode", "user", "distilled", "place", "insight")
         val c = MemoryKinds.counts(kinds)
-        assertEquals(7, c["all"])
+        assertEquals(9, c["all"])
         assertEquals(2, c["people"])
         assertEquals(2, c["days"])
+        assertEquals(5, c["distilled"]) // the chats', the people, the places, what the box noticed
+        assertEquals(1, c["places"])
+        assertEquals(1, c["noticed"])
         assertEquals(true, MemoryKinds.matches("people", "person"))
+        assertEquals(true, MemoryKinds.matches("distilled", "place"))
         assertEquals(false, MemoryKinds.matches("people", "me"))
         assertEquals("you are Vlad · 3 about you · 4 people", AboutText.status("Vlad", 3, 4, false, true))
         assertEquals("nothing written yet", AboutText.status("", 0, 0, false, false))

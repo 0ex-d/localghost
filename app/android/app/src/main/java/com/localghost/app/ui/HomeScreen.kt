@@ -284,6 +284,11 @@ private fun ForYouCard(f: HomeData.ForYou, nowS: Long, onOpenStory: (Long) -> Un
         Text("from the news", color = TerminalDim, style = MaterialTheme.typography.labelSmall)
         f.stories.forEach { s -> ForYouRow(s.title, s.why, s.lead) { onOpenStory(s.id) } }
     }
+    f.remember?.let { m ->
+        Spacer(Modifier.height(6.dp))
+        Text(HomeData.rememberHeading(m.kind), color = TerminalDim, style = MaterialTheme.typography.labelSmall)
+        ForYouRow(m.title, "", m.body) { onOpenTarget("memories:${m.id}") }
+    }
 }
 
 @Composable

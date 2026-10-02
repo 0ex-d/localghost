@@ -1,8 +1,9 @@
 package com.localghost.app.ui
 
 /**
- * THE KINDS OF MEMORY, as MEMORIES' chips: me (from my note), my people, the days, the outings,
- * what the box distilled from chats and notes, and mine (written by hand). Pure, for the tests.
+ * THE KINDS OF MEMORY, as MEMORIES' chips: me (from my note and the check-ins), what the box
+ * distilled (from the chats and notes, my people, my places, what it noticed), each of those on
+ * its own, the days, the outings, and mine (written by hand). Pure, for the tests.
  */
 object MemoryKinds {
     data class Kind(val id: String, val label: String, val kinds: Set<String>)
@@ -10,10 +11,13 @@ object MemoryKinds {
     val all = listOf(
         Kind("all", "all", emptySet()),
         Kind("me", "me", setOf("me")),
+        // what the box distilled: from the chats and notes, the people, the places, what it noticed
+        Kind("distilled", "distilled", setOf("distilled", "person", "place", "insight")),
         Kind("people", "people", setOf("person")),
+        Kind("places", "places", setOf("place")),
+        Kind("noticed", "noticed", setOf("insight")),
         Kind("days", "days", setOf("day", "episode")),
         Kind("outings", "outings", setOf("outing")),
-        Kind("distilled", "distilled", setOf("distilled")),
         Kind("yours", "written by me", setOf("user")),
     )
 

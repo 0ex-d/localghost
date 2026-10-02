@@ -22,7 +22,9 @@ import org.json.JSONObject
 data class PendingNotification(val daemonId: String, val title: String, val body: String,
     val id: Long = 0, val kind: String = "message", val seen: Boolean = false, val created: Long = 0,
     /** where a tap goes (NotifLink): "map:<day>", "memories:<id>", "news", "status"; "" for by kind */
-    val link: String = "")
+    val link: String = "",
+    /** an ask: the choices offered, the one taken ("" until then) */
+    val options: List<String> = emptyList(), val answer: String = "")
 
 /** A saved conversation. Lives on the box (synthd); the phone lists + loads, holds the active
  *  one in memory only. */
@@ -287,7 +289,11 @@ object BoxClient {
     }
 
     /** What the box runs and a release on trial (GET /v1/update); null from a box that predates it. */
-    class UpdateStatus(val version: String, val trialVersion: String, val trialPrev: String, val trialState: String, val trialReason: String)
+    class UpdateStatus(val version: String, val trialVersion: String, val trialPrev: String, val trialState: String, val trialReason: String,
+                       val name: String = "") {
+        /** "wisp 0.0.1", or the version alone (a build from source has no name). */
+        val label: String get() = if (name.isNotBlank()) "$name $version" else version
+    }
 
     suspend fun updateStatus(ctx: Context): UpdateStatus? = try {
         val o = BoxHttp.getJson(ctx, "/v1/update")
@@ -295,7 +301,7 @@ object BoxClient {
         else {
             val t = o.optJSONObject("trial") ?: org.json.JSONObject()
             UpdateStatus(o.optString("version", ""), t.optString("version", ""), t.optString("prev", ""),
-                t.optString("state", ""), t.optString("reason", ""))
+                t.optString("state", ""), t.optString("reason", ""), o.optString("name", ""))
         }
     } catch (e: kotlinx.coroutines.CancellationException) {
         throw e
@@ -692,9 +698,16 @@ object BoxClient {
             val o = a.optJSONObject(i) ?: return@mapNotNull null
             PendingNotification(o.optString("service", "ghost.secd"), o.optString("title"), o.optString("body"),
                 o.optLong("id"), o.optString("kind", "message"), o.optBoolean("seen", false), o.optLong("created", 0L),
-                o.optString("link"))
+                o.optString("link"),
+                o.optJSONArray("options")?.let { a -> (0 until a.length()).map { a.optString(it) }.filter { it.isNotEmpty() } } ?: emptyList(),
+                o.optString("answer"))
         }
     } catch (_: Exception) { null }
+
+    /** Answer an ask (POST /v1/notifications/answer {id, answer}): one of its options. */
+    suspend fun notificationAnswer(ctx: Context, id: Long, answer: String): Boolean = try {
+        BoxHttp.postJson(ctx, "/v1/notifications/answer", org.json.JSONObject().put("id", id).put("answer", answer)).optBoolean("ok", false)
+    } catch (_: Exception) { false }
 
     suspend fun notificationSeen(ctx: Context, id: Long): Boolean = try {
         BoxHttp.postJson(ctx, "/v1/notifications/seen", org.json.JSONObject().put("id", id)).optBoolean("ok", false)
@@ -938,13 +951,15 @@ object BoxClient {
         val steps: Int = 0, val sleepMinutes: Int = 0, val exerciseMinutes: Int = 0,
         val suggested: List<String> = emptyList())
 
-    /** What today looked like so far , the check-in prefill. Bounds are the PHONE's day. */
-    suspend fun daySummary(ctx: Context): DaySummary? = try {
+    /** What a day looked like , today so far by default (the check-in prefill), or the day the
+     *  bounds give (the DAY page). Bounds are the PHONE's day. */
+    suspend fun daySummary(ctx: Context, bounds: Pair<Long, Long>? = null): DaySummary? = try {
         val cal = java.util.Calendar.getInstance()
         cal.set(java.util.Calendar.HOUR_OF_DAY, 0); cal.set(java.util.Calendar.MINUTE, 0)
         cal.set(java.util.Calendar.SECOND, 0); cal.set(java.util.Calendar.MILLISECOND, 0)
-        val start = cal.timeInMillis / 1000
-        val r = BoxHttp.getJson(ctx, "/v1/day/summary?start=$start&end=${start + 86400}")
+        val start = bounds?.first ?: (cal.timeInMillis / 1000)
+        val end = bounds?.second ?: (start + 86400)
+        val r = BoxHttp.getJson(ctx, "/v1/day/summary?start=$start&end=$end")
         fun arr(k: String): List<String> { val x = r.optJSONArray(k) ?: return emptyList()
             return (0 until x.length()).map { x.optString(it) } }
         DaySummary(r.optInt("photos"), r.optInt("videos"), arr("places"), arr("notes"),
@@ -962,6 +977,22 @@ object BoxClient {
         val d = r.optJSONObject("day") ?: org.json.JSONObject()
         DayStory(d.optString("day", day), d.optString("title"), d.optString("summary"), d.optString("writtenBy"), d.optLong("builtAt"), r.optBoolean("checkedIn", false))
     } catch (_: Exception) { null }
+
+    /** A day's photos and videos, oldest first (the archive's newest-first pages read back from
+     *  the day's end until its start; 600 at most). */
+    suspend fun dayFrames(ctx: Context, start: Long, end: Long): List<GalleryFrame>? {
+        val out = ArrayList<GalleryFrame>()
+        var before = end
+        while (out.size < 600) {
+            val page = try { framesList(ctx, before, 200) } catch (_: Exception) { return null }
+            if (page.isEmpty()) break
+            for (f in page) if (f.takenAt in start until end) out.add(f)
+            val oldest = page.minOf { it.takenAt }
+            if (oldest < start || page.size < 200) break
+            before = oldest
+        }
+        return out.sortedBy { it.takenAt }
+    }
 
     data class OtdYear(val year: Int, val yearsAgo: Int, val narrative: String,
         val places: List<String>, val photos: List<String>, val notes: List<String>,
@@ -1536,8 +1567,14 @@ object BoxClient {
      *  times build, a clock per vertex and the day's distance over the raw points. */
     data class DayTrack(val day: String, val lat: DoubleArray, val lon: DoubleArray, val times: LongArray, val distanceM: Double, val glitches: Int = 0,
                         val line: String = "", val walkM: Double = 0.0, val rideM: Double = 0.0, val stays: Int = 0,
-                        val questions: List<TrailQuestion> = emptyList()) {
+                        val questions: List<TrailQuestion> = emptyList(),
+                        /** the ground's height under each point in metres (Int.MIN_VALUE where the box
+                         *  has no tile), empty without the elevation tiles; the day's climb and descent,
+                         *  highest and lowest */
+                        val alts: IntArray = IntArray(0), val climbM: Double = 0.0, val descentM: Double = 0.0,
+                        val highM: Double = 0.0, val lowM: Double = 0.0) {
         val n: Int get() = lat.size
+        val hasAlts: Boolean get() = alts.size == lat.size && lat.isNotEmpty()
         val hasTimes: Boolean get() = times.size == lat.size && lat.isNotEmpty()
     }
 
@@ -1600,7 +1637,11 @@ object BoxClient {
                 val times = if (t != null && t.length() == c.length()) LongArray(t.length()) { t.optLong(it) } else LongArray(0)
                 DayTrack(o.optString("day", ""), lat, lon, times, o.optDouble("distanceM", 0.0).let { if (it.isNaN()) 0.0 else it }, o.optInt("glitches", 0),
                     o.optString("line", ""), o.optDouble("walkM", 0.0), o.optDouble("rideM", 0.0), o.optInt("stays", 0),
-                    TrailQuestion.listFrom(o.optJSONArray("questions")))
+                    TrailQuestion.listFrom(o.optJSONArray("questions")),
+                    o.optJSONArray("alts")?.takeIf { it.length() == c.length() }?.let { al ->
+                        IntArray(al.length()) { j -> if (al.isNull(j)) Int.MIN_VALUE else al.optInt(j) }
+                    } ?: IntArray(0),
+                    o.optDouble("climbM", 0.0), o.optDouble("descentM", 0.0), o.optDouble("highM", 0.0), o.optDouble("lowM", 0.0))
             }
         }
     } catch (_: Exception) { null }

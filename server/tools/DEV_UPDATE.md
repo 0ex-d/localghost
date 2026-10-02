@@ -4597,3 +4597,61 @@ the stories), `TestParseAbout`, `TestNamed`, `TestNamePromptAndParse`,
 `TestIdentityAndDistillPrompt`, `TestPickWikiTitle`, `TestParseWikiSummary`, `TestSiteText`,
 `TestPublicSite`, `TestCoinDescPromptAndGrounding`, `TestCoinsToWrite` (Postgres); app
 `HomeDataTest`, `CoinTextTest`.
+
+## wisp 0.0.1, the first release cut; Wikipedia and the heights on the box; a page per day and per notification; places and what the box notices
+
+- **The release.** `tools/cut_release.sh 0.0.1` cuts wisp 0.0.1, or cuts it again from the same
+  commit to the same bytes: the name in `tools/release.names`, the notes in `releases/0.0.1.md`
+  (what it does, what is in it, how it works; NOTES.md in the bundle and the set), the pin in
+  `releases/pins.txt` (written at the first cut; a moved tag is refused). The first cut tags HEAD
+  as `v0.0.1`; every cut builds from the tag in a clean worktree. secd reports `name` beside
+  `version` (/v1/update); the phone says "wisp 0.0.1 is out" and "your box runs wisp 0.0.1".
+  `RELEASES.md` at the repo root is the index. The app's versionName is "0.0.1 wisp".
+- **Wikipedia on the box** (`internal/zim`, a ZIM reader over `internal/zstd`, the Go standard
+  library's own decoder copied in with its licence; `internal/wiki`, an article's lead as plain
+  text): the mirror's set wikipedia under `<volume>/wiki` (`sudo ./tools/update.sh wiki`, about 50
+  GB). synthd reads it for the coin pages (then the internet is asked about no coin), for the chat
+  ("what is X", "tell me about X": the lead in the context, `wikiSource`), and `ghost-cli
+  ghost.synthd wiki title=Solana` reads one by hand. health.sh says which file the box has.
+- **The heights** (`internal/dem`: a GeoTIFF reader, the standard library and nothing else, for
+  the Copernicus DEM at 90 m; `tools/fetch_geo.sh` with `GHOST_GEO_ELEVATION=all` or a box like
+  `"34:72,-25:45"`, through `mirror_fetch.sh`'s new `@names-file` mode; `update.sh maps` keeps the
+  tiles a box has current): ghost.framed draws each day with `alts` beside `times` and the day's
+  `climbM`, `descentM`, `highM`, `lowM` (every day drawn again once when tiles arrive;
+  `ghost-cli ghost.framed elevation lat= lon=`); `/v1/geo/tracks` carries them; the MAP's trail
+  panel says "climbed 420 m · highest 1,240 m up" and the scrubber's point its height; the day
+  story's facts say what was climbed.
+- **A page per day** (`DayScreen`, Dest.DAY, link `day:<day>`): the story (or "write this day"),
+  the photos, the outing it was part of, where it went, the body, the notes; the day before and
+  after, a year either side; the trail on the MAP and "ask about this day". HOME's "this day",
+  MEMORIES' on-this-day cards and the week's highlight open it.
+- **A page per notification** (`NotificationScreen`, Dest.NOTIFICATION, `notification:<id>`): who
+  said it and when, the whole text, an ask's choices and answer, and under it the thing it is
+  about shown there (the day's story and photos, the memory, the places near you, the day's
+  news) with a button on to the full screen. The shade's tap and the list's tap land on it; the
+  green line in the list still goes straight to the thing.
+- **Places and what the box notices** (`cmd/ghost.synthd/places.go`): memories of kind `place`
+  counted from the day routes and the photos (days, span, hours, the usual weekday, the photos
+  there; made again when the routes change, never over an edited one), and kind `insight` once a
+  day on the GPU from a sheet of the last weeks (places, walking, steps by weekday, photos and
+  their tags, the check-ins' feelings, the people mentioned), kept only when every number is on
+  the sheet. MEMORIES' chips: distilled (the chats', people, places, noticed), each on its own.
+  FOR YOU brings one memory back a day (what the box noticed lately first).
+- **About me from the check-ins** (`checkinAboutPass`): what was said at the check-in (the voice
+  note's transcript, the written why) read for facts about me and my people, oldest first, four
+  a pass; facts join the check-ins' `me` memories by title (`noteMe`) and the people's memories;
+  the name when the box has none.
+- **Box Status**: the archive pipeline and the data feeds fold under ghost.framed and
+  ghost.tallyd, one dim line each ("data feeds · 2 want a look", "archive pipeline · 99% at the
+  latest stage · 26 damaged"), the panel on a tap.
+
+Tested: `internal/zstd` (the upstream testdata), `internal/zim` (a ZIM written by `zimtest`: paths,
+titles, redirects, both cluster kinds), `internal/wiki` (the lead, the variants, the shared file),
+`internal/dem` (float and int tiles, deflate and LZW, the predictors, big TIFF, pixel is point,
+no-data, the set by name, Climb), `TestBuildDayPathHeights`, `TestGeoTracksBatch` (alts through),
+`TestWikiSubject`, `TestWikiFromTheBox`, `TestPlacesCounted`, `TestInsightPromptAndParse`,
+`TestPlacesPassAndInsightFacts` (Postgres), `TestCheckinWordsAndPrompt`, `TestNoteMe` (Postgres),
+`TestForYouNow` (the memory brought back); fetch_geo.sh and mirror_fetch.sh against a signed fake
+mirror; cut_release.sh in a scratch repo (a cut, a recut with a dirty tree giving the same sums, a
+moved tag refused). App: `DayTextTest`, `NotifLinkTest` (the page), `ReleaseInfoTest` (the name),
+`FeedsTextTest` (the folds), `HomeDataTest`, `CoinTextTest`; 206 JVM tests.

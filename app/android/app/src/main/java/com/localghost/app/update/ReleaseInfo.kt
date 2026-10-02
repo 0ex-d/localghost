@@ -19,8 +19,12 @@ object ReleaseInfo {
 
     data class Manifest(val build: String, val server: List<SetFile>)
 
+    /** [name]: the release's name ("wisp"), "" for one without. */
     data class Release(val version: String, val commit: String, val date: String, val bundle: String,
-                       val since: String, val changes: List<String>)
+                       val since: String, val changes: List<String>, val name: String = "") {
+        /** "wisp 0.0.1", or the version alone. */
+        val label: String get() = if (name.isNotBlank()) "$name $version" else version
+    }
 
     private val LINE = Regex("^([0-9a-f]{64})  (/([0-9]{8}T[0-9]{6}Z)/server/([A-Za-z0-9][A-Za-z0-9._+-]*))$")
 
@@ -48,7 +52,7 @@ object ReleaseInfo {
             if (i > 0) kv[raw.substring(0, i).trim()] = raw.substring(i + 1).trim()
         }
         val v = kv["version"]?.takeIf { it.isNotEmpty() } ?: return null
-        return Release(v, kv["commit"] ?: "", kv["date"] ?: "", kv["bundle"] ?: "", kv["since"] ?: "", changes)
+        return Release(v, kv["commit"] ?: "", kv["date"] ?: "", kv["bundle"] ?: "", kv["since"] ?: "", changes, kv["name"] ?: "")
     }
 
     /**

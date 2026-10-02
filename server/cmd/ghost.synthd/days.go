@@ -75,6 +75,10 @@ type dayFacts struct {
 	OutingDay  int    `json:"outingDay,omitempty"`
 	OutingDays int    `json:"outingDays,omitempty"`
 	OutingAway bool   `json:"outingAway,omitempty"`
+
+	// the ground under the trail (framed, from the elevation tiles): climbed and the highest point
+	ClimbM float64 `json:"climbM,omitempty"`
+	HighM  float64 `json:"highM,omitempty"`
 }
 
 type dayStayFact struct {
@@ -336,6 +340,7 @@ func gatherDayFacts(db *poltergres.ReadWrite, mount, day string) *dayFacts {
 			f.Moves = append(f.Moves, dayMoveFact{Mode: m.Mode, From: m.From, To: m.To, Meters: m.Meters})
 		}
 	}
+	f.ClimbM, f.HighM = pathHeights(mount, day)
 	if rows, err := db.Query("SELECT count(*) FROM location_points WHERE ts >= $1 AND ts < $2", s0, s1); err == nil && len(rows.Vals) == 1 && len(rows.Vals[0]) > 0 && rows.Vals[0][0] != nil {
 		f.Points, _ = strconv.Atoi(*rows.Vals[0][0])
 	}
@@ -611,6 +616,9 @@ func (f *dayFacts) sheet() []string {
 	}
 	if f.RideM >= 1000 {
 		s = append(s, "By road or water in all: about "+kmText(f.RideM))
+	}
+	if f.ClimbM >= 50 {
+		s = append(s, fmt.Sprintf("Climbed about %d m in all; the highest point %d m above the sea", int(f.ClimbM), int(f.HighM)))
 	}
 	if f.Photos > 0 {
 		s = append(s, fmt.Sprintf("Photos taken: %d", f.Photos))

@@ -286,7 +286,12 @@ func saveCoinText(db *poltergres.ReadWrite, sym, name, text, from string, now ti
 // left out.
 func readAboutCoin(ctx context.Context, client *egress.Client, name, sym, coinbase, site string) []coinSource {
 	var src []coinSource
-	if f, err := client.Get(ctx, "coin:wiki-search:"+sym, wikiSearchURL(name)); err == nil && f.Status == 200 {
+	// the box's own Wikipedia first: then the internet is asked about no coin
+	if w, found, have := wikiAboutCoin(name, sym); have {
+		if found {
+			src = append(src, w)
+		}
+	} else if f, err := client.Get(ctx, "coin:wiki-search:"+sym, wikiSearchURL(name)); err == nil && f.Status == 200 {
 		if title := pickWikiTitle(f.Body, name, sym); title != "" {
 			if s, err := client.Get(ctx, "coin:wiki:"+sym, wikiSummaryURL(title)); err == nil && s.Status == 200 {
 				if ex := parseWikiSummary(s.Body, name, sym); ex != "" {

@@ -187,6 +187,71 @@ else
     echo "  geo: time zones present, not from a recorded mirror build , kept (GHOST_GEO_REFRESH=1 takes the mirror's)"
 fi
 
+# THE HEIGHTS. The Copernicus DEM at 90 m (GLO-90; set elevation on the mirror, one GeoTIFF per degree
+# square, the ESA licence beside it): the ground's height under the trail, for each day's climb and
+# the map's heights. Read on the box only (internal/dem), never asked of a service. The whole world
+# is some 26,000 tiles and tens of GB, so it is ASKED FOR, not assumed, like the roads; which tiles a
+# box fetches says nothing more than "this IP took that part of the world's map", once, at setup:
+#   GHOST_GEO_ELEVATION=all                          every tile
+#   GHOST_GEO_ELEVATION="34:72,-25:45"               latitudes 34 to 72, longitudes -25 to 45 (Europe);
+#                                                    several boxes, space-separated
+# Not asked: the tiles this box already has are kept current. ghost.framed indexes them within ten
+# minutes and draws every day again with its heights.
+ELEV="$DEST/elevation"
+ELEVASK="${GHOST_GEO_ELEVATION:-}"
+elev_names() { # the tiles wanted, one name a line, from the set's listing
+    sh "$FETCH" --list elevation 2>/dev/null | awk -v ask="$ELEVASK" '
+        BEGIN { n = split(ask, boxes, " ") }
+        {
+            name = $2
+            if (name !~ /\.tif$/) next
+            if (ask == "all") { print name; next }
+            # the corner from the parts of the name: N51 and W001 in Copernicus_DSM_COG_30_N51_00_W001_00_DEM.tif
+            lat = ""; lon = ""
+            m = split(name, part, "_")
+            for (j = 1; j <= m; j++) {
+                if (part[j] ~ /^[NS][0-9][0-9]$/) { lat = substr(part[j], 2) + 0; if (substr(part[j], 1, 1) == "S") lat = -lat }
+                if (part[j] ~ /^[EW][0-9][0-9][0-9]$/) { lon = substr(part[j], 2) + 0; if (substr(part[j], 1, 1) == "W") lon = -lon }
+            }
+            if (lat == "" || lon == "") next
+            for (i = 1; i <= n; i++) {
+                split(boxes[i], ll, ","); split(ll[1], la, ":"); split(ll[2], lo, ":")
+                if (lat >= la[1] + 0 && lat < la[2] + 0 && lon >= lo[1] + 0 && lon < lo[2] + 0) { print name; next }
+            }
+        }'
+}
+if [ -n "$ELEVASK" ] || ls "$ELEV"/*.tif >/dev/null 2>&1; then
+    mkdir -p "$ELEV"
+    LIST="$ELEV/.wanted"
+    if [ -n "$ELEVASK" ]; then
+        elev_names > "$LIST.tmp"
+        # the tiles already here stay wanted (a smaller box asked later adds, never removes)
+        ls "$ELEV" 2>/dev/null | grep -E '\.tif$' >> "$LIST.tmp"
+        sort -u "$LIST.tmp" > "$LIST"; rm -f "$LIST.tmp"
+    else
+        ls "$ELEV" 2>/dev/null | grep -E '\.tif$' > "$LIST"
+    fi
+    want="$(wc -l < "$LIST" | tr -d ' ')"
+    if [ "$want" = 0 ]; then
+        echo "  geo: elevation , no tiles match '$ELEVASK' (or the set is not on the mirror yet)"
+    else
+        echo "  geo: elevation , $want tiles (GLO-90), fetched where the mirror has bytes this box does not"
+        erc=0; sh "$FETCH" elevation "$ELEV" "@$LIST" || erc=$?
+        case "$erc" in
+            0) if [ -n "$(find "$ELEV" -maxdepth 1 -name '.*.tif.sha256' -newer "$LIST" 2>/dev/null | head -1)" ]; then
+                   changed elevation
+                   echo "  geo: elevation tiles in $ELEV ($(du -sh "$ELEV" 2>/dev/null | cut -f1)), signature and hashes checked; ghost.framed draws the days again with their heights"
+               else
+                   echo "  geo: elevation tiles current with the mirror ($ELEV)"
+               fi ;;
+            3) why_not 3 elevation ;;
+            *) why_not "$erc" elevation ;;
+        esac
+    fi
+else
+    echo "  geo: heights not fetched (GHOST_GEO_ELEVATION=all for the world's, or a box like \"34:72,-25:45\" for Europe)"
+fi
+
 # THE ROADS. OpenStreetMap's roads, Geofabrik's continent extracts (set `roads` on the mirror; ODbL), cut on the box into the map's road tiles , major roads in
 # one-degree cells, every road with its name in tenth-of-a-degree cells , by bin/ghost-roadtiles
 # here, or by ghost.framed at its next start (also: ghost-cli ghost.framed road-tiles). The mirror

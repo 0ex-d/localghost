@@ -83,7 +83,7 @@ android {
         minSdk = 35
         targetSdk = 36
         versionCode = 1
-        versionName = "1.0"
+        versionName = "0.0.1 wisp" // the first release cut (server tools/release.names)
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // Dev convenience only. The PUBLIC release build leaves these EMPTY: the app reads the

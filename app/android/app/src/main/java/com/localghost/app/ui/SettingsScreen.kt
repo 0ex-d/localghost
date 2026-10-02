@@ -570,7 +570,7 @@ private fun ServerUpdateSection(onLock: () -> Unit) {
     val st = status
     Text(when {
         st == null -> "the box has not said which build it runs (an older build, or it is out of reach)"
-        else -> "your box runs ${st.version}" + when (st.trialState) {
+        else -> "your box runs ${st.label}" + when (st.trialState) {
             "trial" -> " · on trial: back to ${st.trialPrev} by itself if its first unlock fails; confirmed after ten minutes up"
             "rolled_back" -> " · ${st.trialVersion} was rolled back: ${st.trialReason}"
             else -> ""
@@ -580,7 +580,7 @@ private fun ServerUpdateSection(onLock: () -> Unit) {
     val newer = o != null && st != null && com.localghost.app.update.ReleaseInfo.newer(o.release.version, st.version)
     if (o != null && newer) {
         Spacer(Modifier.height(6.dp))
-        Text("${o.release.version} is out" + (if (o.release.date.isNotEmpty()) " (${o.release.date.take(10)})" else "") +
+        Text("${o.release.label} is out" + (if (o.release.date.isNotEmpty()) " (${o.release.date.take(10)})" else "") +
             ", ${o.release.changes.size} change${if (o.release.changes.size == 1) "" else "s"}" +
             (if (o.release.since.isNotEmpty()) " since ${o.release.since}" else "") + ":",
             color = TerminalGreen, style = MaterialTheme.typography.labelMedium)
@@ -590,7 +590,7 @@ private fun ServerUpdateSection(onLock: () -> Unit) {
         if (o.release.changes.size > 12) Text("  … ${o.release.changes.size - 12} more", color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
     } else if (o != null && st != null) {
         Spacer(Modifier.height(4.dp))
-        Text("the newest release on the mirror is ${o.release.version}: nothing to deploy", color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+        Text("the newest release on the mirror is ${o.release.label}: nothing to deploy", color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
     }
     if (busy.isNotEmpty()) {
         Spacer(Modifier.height(6.dp))
@@ -602,7 +602,7 @@ private fun ServerUpdateSection(onLock: () -> Unit) {
     }
     Spacer(Modifier.height(8.dp))
     if (o != null && newer && busy.isEmpty()) {
-        GhostButton("DEPLOY ${o.release.version}", {
+        GhostButton("DEPLOY ${o.release.label}", {
             busy = "starting…"; result = ""
             scope.launch {
                 val (ok, what) = com.localghost.app.update.ServerUpdates.deploy(ctx, o) { busy = it }

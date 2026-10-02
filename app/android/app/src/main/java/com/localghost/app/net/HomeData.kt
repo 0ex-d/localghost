@@ -15,8 +15,11 @@ object HomeData {
     data class Place(val name: String, val kind: String, val km: Double, val bearing: String, val why: String, val new: Boolean)
     data class Day(val day: String, val yearsAgo: Int, val memoryId: Long, val title: String, val lead: String, val photos: Int, val place: String)
     data class Pick(val id: Long, val title: String, val lead: String, val why: String)
-    data class ForYou(val at: Long, val from: Long, val places: List<Place>, val days: List<Day>, val stories: List<Pick>, val note: String) {
-        val empty: Boolean get() = places.isEmpty() && days.isEmpty() && stories.isEmpty()
+    /** One memory brought back: what the box noticed lately, else a distilled one, a place or a person. */
+    data class Remember(val id: Long, val kind: String, val title: String, val body: String)
+    data class ForYou(val at: Long, val from: Long, val places: List<Place>, val days: List<Day>, val stories: List<Pick>, val note: String,
+                      val remember: Remember? = null) {
+        val empty: Boolean get() = places.isEmpty() && days.isEmpty() && stories.isEmpty() && remember == null
     }
     data class Snap(val at: Long, val prices: Map<String, Price>, val marketCode: String, val marketValue: Double, val marketChange: Double,
                     val brief: String, val briefAt: Long, val briefStories: List<Long>, val top: List<Story>, val forYou: ForYou?)
@@ -47,7 +50,9 @@ object HomeData {
         objs(f.optJSONArray("places")) { p -> Place(p.optString("name"), p.optString("kind"), p.optDouble("km", 0.0), p.optString("bearing"), p.optString("why"), p.optBoolean("new")) },
         objs(f.optJSONArray("days")) { d -> Day(d.optString("day"), d.optInt("yearsAgo"), d.optLong("memoryId"), d.optString("title"), d.optString("lead"), d.optInt("photos"), d.optString("place")) },
         objs(f.optJSONArray("stories")) { s -> Pick(s.optLong("id"), s.optString("title"), s.optString("lead"), s.optString("why")) },
-        f.optString("note"))
+        f.optString("note"),
+        f.optJSONObject("remember")?.let { r -> Remember(r.optLong("id"), r.optString("kind"), r.optString("title"), r.optString("body")) }
+            ?.takeIf { it.id > 0 && it.body.isNotBlank() })
 
     /** What the phone keeps of a snapshot on its storage, in the box's own shape: everything but
      *  FOR YOU (the places near my trail and my days' titles stay in memory, as the trail itself
@@ -77,6 +82,14 @@ object HomeData {
     /** "1 year ago", "3 years ago". */
     fun yearsAgo(n: Int): String = if (n == 1) "1 year ago" else "$n years ago"
 
+    /** The heading over the memory brought back: "the box noticed", "remembered". */
+    fun rememberHeading(kind: String): String = when (kind) {
+        "insight" -> "your box noticed"
+        "place" -> "a place of yours"
+        "person" -> "one of your people"
+        else -> "remembered"
+    }
+
     /** A place's line: "park · 1.2 km W". */
     fun placeLine(p: Place): String = listOf(p.kind, distance(p.km) + (if (p.bearing.isNotEmpty()) " " + p.bearing else ""))
         .filter { it.isNotBlank() }.joinToString(" · ")
@@ -93,8 +106,9 @@ object HomeData {
         d.place,
     ).filter { it.isNotBlank() }.joinToString(" · ")
 
-    /** Where a day opens: its memory, else the map on that day. */
-    fun dayTarget(d: Day): String = if (d.memoryId > 0) "memories:${d.memoryId}" else "map:${d.day}"
+    /** Where a day opens: its own page (the story, the photos, the outing, the notes; the map one
+     *  tap on from there). */
+    fun dayTarget(d: Day): String = "day:${d.day}"
 
     /** The places' heading: "near you · from your trail 12 min ago". */
     fun nearFrom(from: Long, nowS: Long): String {

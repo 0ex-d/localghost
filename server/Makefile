@@ -15,7 +15,9 @@ TAGS    ?=
 # the version secd reports to the phone (GET /v1/update): the git description of the tree built
 # here; a release sets its own tag (tools/release_build.sh)
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-LDFLAGS := -X github.com/LocalGhostDao/localghost/server/internal/secd.Version=$(VERSION)
+# a tree exactly at a release's tag carries the release's name too (tools/release.names: wisp)
+RELNAME ?= $(shell awk -v v="$(patsubst v%,%,$(VERSION))" '$$1 == v { print $$2; exit }' tools/release.names 2>/dev/null)
+LDFLAGS := -X github.com/LocalGhostDao/localghost/server/internal/secd.Version=$(VERSION) -X github.com/LocalGhostDao/localghost/server/internal/secd.ReleaseName=$(RELNAME)
 
 # all builds every binary under cmd/ into bin/, each named for its dir. There is ONE build now: the
 # seal tier (TPM or software) is selected at RUNTIME from seal.env, not a build tag, so a box can

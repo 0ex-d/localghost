@@ -52,16 +52,26 @@ type ForYouStory struct {
 	Why   string `json:"why"` // "you mention sailing, Romania"
 }
 
+// ForYouMemory is one memory brought back: what the box noticed lately, else one of the
+// distilled ones, the places or the people, a different one each day.
+type ForYouMemory struct {
+	ID    int64  `json:"id"`
+	Kind  string `json:"kind"`
+	Title string `json:"title"`
+	Body  string `json:"body"`
+}
+
 // ForYou is home's FOR YOU card.
 type ForYou struct {
-	At      int64         `json:"at"`
-	From    int64         `json:"from"` // the trail point the places are measured from, 0 for none
-	Places  []ForYouPlace `json:"places"`
-	Days    []ForYouDay   `json:"days"`
-	Stories []ForYouStory `json:"stories"`
-	Note    string        `json:"note,omitempty"` // why there are no places
-	lat     float64
-	lon     float64
+	At       int64         `json:"at"`
+	From     int64         `json:"from"` // the trail point the places are measured from, 0 for none
+	Places   []ForYouPlace `json:"places"`
+	Days     []ForYouDay   `json:"days"`
+	Stories  []ForYouStory `json:"stories"`
+	Remember *ForYouMemory `json:"remember,omitempty"`
+	Note     string        `json:"note,omitempty"` // why there are no places
+	lat      float64
+	lon      float64
 }
 
 // ForYouFresh is how long a FOR YOU is kept; ForYouMoved is how far the trail moves before the
@@ -138,6 +148,7 @@ func ForYouNow(c Querier, nd *NewsDoc, now time.Time) ForYou {
 		f.From, f.lat, f.lon = ts, lat, lon
 	}
 	f.Days = onThisDay(c, now)
+	f.Remember = rememberOne(c, now)
 	if nd != nil {
 		f.Stories = PickStories(nd.Stories, InterestTerms(aboutMeTexts(c)), nd.BriefStories, now)
 	}
@@ -270,6 +281,31 @@ func firstSentence(s string) string {
 		return strings.TrimSpace(s[:220]) + "…"
 	}
 	return s
+}
+
+// rememberOne is the day's memory: what the box noticed in the last three days, else one of the
+// distilled memories, the places or the people, picked by the day so it stays the same all day and
+// changes the next.
+func rememberOne(c Querier, now time.Time) *ForYouMemory {
+	read := func(q string, args ...any) *ForYouMemory {
+		rows, err := c.Query(q, args...)
+		if err != nil || len(rows.Vals) == 0 || len(rows.Vals[0]) < 4 {
+			return nil
+		}
+		v := rows.Vals[0]
+		m := &ForYouMemory{Kind: deref(v[1]), Title: deref(v[2]), Body: deref(v[3])}
+		m.ID, _ = strconv.ParseInt(deref(v[0]), 10, 64)
+		if m.ID == 0 || m.Body == "" {
+			return nil
+		}
+		return m
+	}
+	if m := read(`SELECT id, kind, title, body FROM memories WHERE kind = 'insight' AND NOT tombstoned AND created_at > $1
+		ORDER BY created_at DESC LIMIT 1`, now.Add(-72*time.Hour).UnixMilli()); m != nil {
+		return m
+	}
+	return read(`SELECT id, kind, title, body FROM memories WHERE kind IN ('distilled','place','person','insight') AND NOT tombstoned
+		ORDER BY md5(id::text || $1) LIMIT 1`, now.UTC().Format("2006-01-02"))
 }
 
 // aboutMeTexts is what the person said about themselves: the 'me' memories (twice the weight)

@@ -27,6 +27,8 @@ const (
 	ownerKey     = "owner_name"         // the name the note gives
 	aboutClip    = 1200                 // characters of the note every chat starts from
 	namedKey     = "memories_named"     // "<name>:<id>": how far namePass has written the older memories again
+	checkinsKey  = "about_checkins"     // the newest check-in journal entry read for facts about me
+	checkinsPer  = 4                    // check-ins read a pass
 )
 
 func setting(db *poltergres.ReadWrite, key string) string {
@@ -409,4 +411,144 @@ func namePass(db *poltergres.ReadWrite, oc *oracle.Client, lg *slog.Logger) (int
 		lg.Info("older memories written again with the name", "fn", "namePass", "memories", wrote)
 	}
 	return wrote, nil
+}
+
+// checkinAboutPrompt asks what a check-in says about who I am and my people, nothing about how the
+// day went (pure, for the tests).
+func checkinAboutPrompt(owner, text string) string {
+	var b strings.Builder
+	b.WriteString("Below is what I said or wrote at a daily check-in. Pick out only what it says about who I am and the people in my life that stays true for months: ")
+	b.WriteString("my name, where I live and come from, my work, my family and friends, lasting likes, habits and plans. How the day went, how I feel today and what I did today are not that. ")
+	b.WriteString("Reply with lines, each exactly in one of these forms:\n")
+	b.WriteString("NAME | my first name (only if I say it)\n")
+	if owner != "" {
+		b.WriteString("ME | a short title | one sentence about me, by my name in the third person (\"" + owner + " lives …\")\n")
+		b.WriteString("PERSON | their name | one sentence about them, naming them and me (\"Cristina is " + owner + "'s partner …\")\n")
+	} else {
+		b.WriteString("ME | a short title | one sentence about me, in the first person (\"I live …\")\n")
+		b.WriteString("PERSON | their name | one sentence about them, who they are to me\n")
+	}
+	b.WriteString("Never \"the user\". Only what the text says; nothing added. If it says nothing of that kind, reply with exactly: NONE\n\nCHECK-IN:\n")
+	b.WriteString(text)
+	return b.String()
+}
+
+// noteMe keeps a fact about me from a check-in: added to the check-ins' 'me' memory of the same
+// title when there is one (once), else a memory of its own. The note's own memories are never
+// touched. Returns whether it kept anything.
+func noteMe(db *poltergres.ReadWrite, title, fact, ref string, now int64) (bool, error) {
+	if title == "" || fact == "" || len(title) > 120 || len(fact) > 500 {
+		return false, nil
+	}
+	// not the note's (aboutPass makes those again when the note changes, and what was added would go)
+	rows, err := db.Query("SELECT id, body FROM memories WHERE kind = 'me' AND NOT tombstoned AND source_ref NOT LIKE 'about:%' AND lower(title) = lower($1) ORDER BY id LIMIT 1", title)
+	if err != nil {
+		return false, err
+	}
+	if len(rows.Vals) == 1 && rows.Vals[0][0] != nil {
+		old := ""
+		if rows.Vals[0][1] != nil {
+			old = *rows.Vals[0][1]
+		}
+		if strings.Contains(strings.ToLower(old), strings.ToLower(strings.TrimRight(fact, "."))) || len(old)+len(fact) > 1500 {
+			return false, nil
+		}
+		return true, db.Exec("UPDATE memories SET body = $2, updated_at = $3 WHERE id = $1", *rows.Vals[0][0], strings.TrimSpace(old+" "+fact), now)
+	}
+	return true, db.Exec("INSERT INTO memories (title, body, kind, source_ref, created_at, updated_at) VALUES ($1,$2,'me',$3,$4,$4)", title, fact, ref, now)
+}
+
+// checkinAboutPass reads the check-ins (what was said, the voice note's transcript, and what was
+// written) for facts about me and my people, oldest first, a few a pass, on the GPU, each once
+// (the newest read is kept in settings about_checkins). What it finds joins the note's: 'me'
+// memories by title, one memory per person, the name when the box has none. Returns how many
+// facts it kept.
+func checkinAboutPass(db *poltergres.ReadWrite, oc *oracle.Client, lg *slog.Logger) (int, error) {
+	from, _ := strconv.ParseInt(setting(db, checkinsKey), 10, 64)
+	rows, err := db.Query(`SELECT id, body FROM journal_entries WHERE id > $1 AND (
+		(source = 'ghost.voiced' AND body LIKE 'Said at the daily check-in%') OR
+		(source = 'ghost.noted' AND title LIKE 'Daily check-in %')) ORDER BY id LIMIT $2`, from, checkinsPer)
+	if err != nil || len(rows.Vals) == 0 {
+		return 0, err
+	}
+	if onGPU, err := oc.OnGPU(); err != nil || !onGPU {
+		return 0, nil
+	}
+	kept := 0
+	for _, v := range rows.Vals {
+		if len(v) < 2 || v[0] == nil {
+			continue
+		}
+		id := *v[0]
+		text := ""
+		if v[1] != nil {
+			text = checkinWords(*v[1])
+		}
+		if len(strings.Fields(text)) >= 4 {
+			owner := setting(db, ownerKey)
+			resp, ierr := oc.Infer(oracle.Request{
+				Capability: "summarize", Class: oracle.ClassLocalSmall, Priority: oracle.PriorityBackground,
+				Input: checkinAboutPrompt(owner, text), MaxTokens: 600, Temperature: 0.2, DeadlineMS: 120000,
+			})
+			if ierr != nil || resp.Err != "" {
+				return kept, nil // the same check-in next pass
+			}
+			f := parseAbout(resp.Output)
+			if owner == "" && f.Name != "" {
+				if err := setSetting(db, ownerKey, f.Name); err != nil {
+					return kept, err
+				}
+				owner = f.Name
+				f = parseAbout(resp.Output) // mended with the name now known
+			}
+			now := time.Now().UnixMilli()
+			for i, m := range f.Me {
+				ok, err := noteMe(db, m[0], m[1], "checkin:"+id+":"+strconv.Itoa(i), now)
+				if err != nil {
+					return kept, err
+				}
+				if ok {
+					kept++
+				}
+			}
+			for _, p := range f.People {
+				if err := notePerson(db, p[0], p[1], "checkin:"+id, 0, now); err != nil {
+					return kept, err
+				}
+				kept++
+			}
+		}
+		if err := setSetting(db, checkinsKey, id); err != nil {
+			return kept, err
+		}
+	}
+	if kept > 0 {
+		lg.Info("facts about me from the check-ins", "fn", "checkinAboutPass", "kept", kept)
+	}
+	return kept, nil
+}
+
+// checkinWords is what a check-in entry says, without its form: the voice note's transcript after
+// its first line, or the written check-in's "Why:" and any free lines (feelings and ids out).
+func checkinWords(body string) string {
+	body = strings.TrimSpace(body)
+	if strings.HasPrefix(body, "Said at the daily check-in") {
+		if i := strings.IndexByte(body, '\n'); i >= 0 {
+			return strings.TrimSpace(body[i+1:])
+		}
+		return ""
+	}
+	var keep []string
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case line == "", strings.HasPrefix(line, "Daily check-in "), strings.HasPrefix(line, "Feeling: "),
+			strings.HasPrefix(line, "Preselected: "), strings.HasPrefix(line, "Voice: "):
+		case strings.HasPrefix(line, "Why: "):
+			keep = append(keep, strings.TrimPrefix(line, "Why: "))
+		default:
+			keep = append(keep, line)
+		}
+	}
+	return strings.Join(keep, "\n")
 }

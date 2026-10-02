@@ -129,7 +129,7 @@ object ServerUpdates {
         val p = prefs(ctx)
         if (p.getString("notified", "") == o.release.version) return
         p.edit().putString("notified", o.release.version).apply()
-        com.localghost.app.notify.Notifications.postServerRelease(ctx, o.release.version, o.release.changes.size)
+        com.localghost.app.notify.Notifications.postServerRelease(ctx, o.release.label, o.release.changes.size)
     }
 
     // --- plain https to the mirror (the box is not involved) ---

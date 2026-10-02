@@ -122,6 +122,9 @@ func TestGeoTracksBatch(t *testing.T) {
 			Coords    [][2]float64 `json:"coords"`
 			Times     []int64      `json:"times"`
 			DistanceM float64      `json:"distanceM"`
+			Alts      []*int       `json:"alts"`
+			ClimbM    float64      `json:"climbM"`
+			HighM     float64      `json:"highM"`
 		} `json:"tracks"`
 	}
 	rr := get("/v1/geo/tracks")
@@ -143,9 +146,9 @@ func TestGeoTracksBatch(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	line("2026-09-16", "[-0.1,51.5],[-0.2,51.6]", "")                                                     // a day file from before times existed
-	line("2026-09-18", "[10.0,45.0],[10.1,45.1],[10.2,45.2]", `,"times":[100,200,300],"distanceM":27300`) // a current one
-	line("2026-09-17", "[2.0,48.0],[2.1,48.1]", `,"times":[1,2,3]`)                                       // times that do not match the line: dropped
+	line("2026-09-16", "[-0.1,51.5],[-0.2,51.6]", "")                                                                                                    // a day file from before times existed
+	line("2026-09-18", "[10.0,45.0],[10.1,45.1],[10.2,45.2]", `,"times":[100,200,300],"distanceM":27300,"alts":[120,null,480],"climbM":360,"highM":480`) // a current one
+	line("2026-09-17", "[2.0,48.0],[2.1,48.1]", `,"times":[1,2,3]`)                                                                                      // times that do not match the line: dropped
 	// photo-only day: no LineString
 	if err := os.WriteFile(filepath.Join(dir, "2026-09-15.geojson"),
 		[]byte(`{"type":"FeatureCollection","features":[{"type":"Feature","geometry":{"type":"Point","coordinates":[0,0]},"properties":{}}]}`), 0o644); err != nil {
@@ -168,6 +171,9 @@ func TestGeoTracksBatch(t *testing.T) {
 	}
 	if tm := got.Tracks[0].Times; len(tm) != 3 || tm[2] != 300 || got.Tracks[0].DistanceM != 27300 {
 		t.Fatalf("times and distance must pass through: %+v", got.Tracks[0])
+	}
+	if a := got.Tracks[0].Alts; len(a) != 3 || a[0] == nil || *a[0] != 120 || a[1] != nil || got.Tracks[0].ClimbM != 360 || got.Tracks[0].HighM != 480 {
+		t.Fatalf("heights must pass through: %+v", got.Tracks[0])
 	}
 	if got.Tracks[1].Times != nil {
 		t.Fatalf("mismatched times must be dropped, not served: %+v", got.Tracks[1])

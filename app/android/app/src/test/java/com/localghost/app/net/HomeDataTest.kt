@@ -17,7 +17,8 @@ class HomeDataTest {
           "places":[{"name":"Kensington Gardens","kind":"park","km":1.24,"bearing":"W","why":"you photograph parks","new":true}],
           "days":[{"day":"2024-10-02","yearsAgo":2,"memoryId":0,"title":"","lead":"","photos":24,"place":"Kassiopi"},
                   {"day":"2025-10-02","yearsAgo":1,"memoryId":42,"title":"A walk","lead":"Hyde Park.","photos":0}],
-          "stories":[{"id":9,"title":"Blockchain bill","lead":"It passed.","why":"you mention blockchain"}]}}"""
+          "stories":[{"id":9,"title":"Blockchain bill","lead":"It passed.","why":"you mention blockchain"}],
+          "remember":{"id":42,"kind":"insight","title":"Further on foot","body":"Vlad walked 84 km."}}}"""
 
     @Test fun parsesTheSnapshot() {
         val s = HomeData.parse(JSONObject(raw))!!
@@ -30,11 +31,14 @@ class HomeDataTest {
         val f = s.forYou!!
         assertEquals("Kensington Gardens", f.places[0].name)
         assertEquals("park · 1.2 km W", HomeData.placeLine(f.places[0]))
-        assertEquals("map:2024-10-02", HomeData.dayTarget(f.days[0]))
-        assertEquals("memories:42", HomeData.dayTarget(f.days[1]))
+        assertEquals("day:2024-10-02", HomeData.dayTarget(f.days[0]))
+        assertEquals("day:2025-10-02", HomeData.dayTarget(f.days[1]))
         assertEquals("24 photos · Kassiopi", HomeData.dayLine(f.days[0]))
         assertEquals("", HomeData.dayLine(f.days[1]))
         assertEquals("you mention blockchain", f.stories[0].why)
+        assertEquals("Further on foot", f.remember!!.title)
+        assertEquals("your box noticed", HomeData.rememberHeading(f.remember!!.kind))
+        assertEquals("remembered", HomeData.rememberHeading("distilled"))
         assertNull(HomeData.parse(JSONObject("{}")))
         assertNull(HomeData.parse(null))
     }

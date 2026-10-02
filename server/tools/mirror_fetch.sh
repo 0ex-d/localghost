@@ -1,5 +1,6 @@
 #!/bin/sh
-# mirror_fetch.sh <set> <dir> [file] | --list <set> , fetch one set (or one file of it) from the LocalGhost mirror
+# mirror_fetch.sh <set> <dir> [file | @names-file] | --list <set> , fetch one set (or one file of it, or
+# the files named one a line in names-file) from the LocalGhost mirror
 # (https://www.localghost.ai/mirror, what it is and what it promises) into <dir>, every byte checked:
 # the manifest's gpg signature against tools/mirror-key.asc, the site key committed in this repo and
 # pinned here by fingerprint (never fetched at verify time: a key from the same server as the
@@ -121,12 +122,27 @@ read_manifest() {
     # the set's files: one level under /<build>/<set>/, names that cannot climb anywhere
     grep -E "^[0-9a-f]{64}  /$BUILD/$SET/[A-Za-z0-9][A-Za-z0-9._+-]*\$" "$T/MANIFEST.txt" > "$T/files" || true
     if [ -n "$ONLY" ]; then
-        # the file asked for, and the set's notice and terms, which travel with every file
-        awk -v p="/$BUILD/$SET/$ONLY" -v d="/$BUILD/$SET/" '$2 == p { print; next }
-            index($2, d) == 1 { n = substr($2, length(d) + 1); if (n == "NOTICE.txt" || n ~ /^TERMS-.*\.txt$/) print }' "$T/files" > "$T/only"
-        if ! awk -v p="/$BUILD/$SET/$ONLY" '$2 == p { f = 1 } END { exit !f }' "$T/only"; then
-            na "build $BUILD does not list $ONLY in set '$SET' (not published there yet)"
-        fi
+        case "$ONLY" in
+        @*)
+            # @<file>: the names listed in it (one a line: a set of thousands, the elevation
+            # tiles, fetched in part), and the set's notice and terms
+            LISTF="${ONLY#@}"
+            [ -r "$LISTF" ] || na "no list of names at $LISTF"
+            awk -v d="/$BUILD/$SET/" 'NR == FNR { if ($1 != "") want[$1] = 1; next }
+                index($2, d) == 1 { n = substr($2, length(d) + 1); if ((n in want) || n == "NOTICE.txt" || n ~ /^TERMS-.*\.txt$/) print }' "$LISTF" "$T/files" > "$T/only"
+            if ! awk -v d="/$BUILD/$SET/" '{ n = substr($2, length(d) + 1); if (n != "NOTICE.txt" && n !~ /^TERMS-.*\.txt$/) f = 1 } END { exit !f }' "$T/only"; then
+                na "build $BUILD lists none of the names in $LISTF in set '$SET'"
+            fi
+            ;;
+        *)
+            # the file asked for, and the set's notice and terms, which travel with every file
+            awk -v p="/$BUILD/$SET/$ONLY" -v d="/$BUILD/$SET/" '$2 == p { print; next }
+                index($2, d) == 1 { n = substr($2, length(d) + 1); if (n == "NOTICE.txt" || n ~ /^TERMS-.*\.txt$/) print }' "$T/files" > "$T/only"
+            if ! awk -v p="/$BUILD/$SET/$ONLY" '$2 == p { f = 1 } END { exit !f }' "$T/only"; then
+                na "build $BUILD does not list $ONLY in set '$SET' (not published there yet)"
+            fi
+            ;;
+        esac
         mv "$T/only" "$T/files"
     fi
     [ -s "$T/files" ] || na "build $BUILD has no set '$SET' (not published there yet)"
@@ -170,6 +186,7 @@ record() { # record <name> <sha256>
 # build was pruned under us), else 0
 fetch_all() {
     n=0; cur=0; failed=""; stale=0
+    total="$(wc -l < "$T/files" | tr -d ' ')"   # a set of thousands says how far it is, not every file
     while read -r sha path; do
         name="${path##*/}"
         if [ "$(recorded "$name")" = "$sha" ]; then
@@ -208,7 +225,11 @@ fetch_all() {
             mv -f "$part" "$DIR/$name"
             record "$name" "$sha"
             n=$((n + 1))
-            say "$name: $(du -h "$DIR/$name" | cut -f1), sha256 matches the signed manifest"
+            if [ "$total" -le 200 ]; then
+                say "$name: $(du -h "$DIR/$name" | cut -f1), sha256 matches the signed manifest"
+            elif [ $((n % 500)) = 0 ]; then
+                say "$n fetched of $total, each sha256 matching the signed manifest"
+            fi
         elif [ "$stale" = 1 ]; then
             return 2
         else

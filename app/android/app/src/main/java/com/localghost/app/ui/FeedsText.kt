@@ -48,6 +48,29 @@ object FeedsText {
         else -> Tone.QUIET
     }
 
+    /** The folded line under ghost.tallyd: "data feeds · all well", "data feeds · 2 want a look"
+     *  (the sections not well, counted; filling and waiting are not a problem). */
+    fun foldLine(r: Report?, unsupported: Boolean): String {
+        if (r == null) return if (unsupported) "data feeds · not reported by this build" else "data feeds · reading…"
+        val n = r.sections.count { tone(it.state) == Tone.WARN || tone(it.state) == Tone.BAD }
+        return "data feeds · " + when {
+            n == 1 -> "1 wants a look"
+            n > 1 -> "$n want a look"
+            r.state == "filling" -> "filling"
+            r.state == "waiting" -> "waiting"
+            else -> "all well"
+        }
+    }
+
+    /** The folded line under ghost.framed: "archive · 99% at the latest stage · 26 damaged". */
+    fun pipelineLine(total: Int, atLatest: Int, damaged: Int, read: Boolean, unsupported: Boolean): String {
+        if (!read) return if (unsupported) "archive pipeline · not reported by this build" else "archive pipeline · reading…"
+        if (total == 0) return "archive pipeline · nothing archived yet"
+        val pct = if (atLatest >= total) 100 else (100L * atLatest / total).toInt()
+        return "archive pipeline · " + (if (atLatest >= total) "all at the latest stage" else "$pct% at the latest stage") +
+            (if (damaged > 0) " · $damaged damaged" else "")
+    }
+
     /** The word on the panel's title row. */
     fun word(state: String): String = when (state) {
         "ok" -> "ALL WELL"

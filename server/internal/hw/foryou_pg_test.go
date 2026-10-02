@@ -71,4 +71,18 @@ func TestForYouNow(t *testing.T) {
 	if len(f.Stories) != 1 || f.Stories[0].ID != 9 || f.Stories[0].Why != "you mention blockchain" {
 		t.Fatalf("stories %+v", f.Stories)
 	}
+	// a distilled memory comes back, the same one all day
+	if f.Remember == nil || f.Remember.Kind != "distilled" {
+		t.Fatalf("remember %+v", f.Remember)
+	}
+	if g := ForYouNow(db, nd, now.Add(time.Hour)); g.Remember == nil || g.Remember.ID != f.Remember.ID {
+		t.Fatal("the same memory all day")
+	}
+	// what the box noticed lately comes first
+	if err := db.Exec("INSERT INTO memories (title, body, kind, source_ref, created_at, updated_at) VALUES ('Further on foot','Vlad walked 84 km.','insight','insight:x',$1,$1)", now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if g := ForYouNow(db, nd, now); g.Remember == nil || g.Remember.Kind != "insight" {
+		t.Fatalf("%+v", g.Remember)
+	}
 }

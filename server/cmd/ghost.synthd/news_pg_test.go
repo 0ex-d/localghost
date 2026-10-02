@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -390,5 +392,72 @@ func TestCoinsToWrite(t *testing.T) {
 	}
 	if s := coinDescStatus(db); s != "1 of 4 coins written" {
 		t.Fatal(s)
+	}
+}
+
+// A fact about me from a check-in joins the check-ins' memory of that title once; the note's own
+// memory of the same title is left alone.
+func TestNoteMe(t *testing.T) {
+	db := pgFresh(t, "lgtest_synthd_noteme")
+	if err := db.Exec("INSERT INTO memories (title, body, kind, source_ref, created_at, updated_at) VALUES ('Home','Vlad lives in London.','me','about:me:0',1,1)"); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := noteMe(db, "Home", "Vlad lives in Islington.", "checkin:7:0", 2); err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	if ok, _ := noteMe(db, "home", "Vlad has a cat.", "checkin:8:0", 3); !ok {
+		t.Fatal("joins by title")
+	}
+	if ok, _ := noteMe(db, "Home", "Vlad has a cat", "checkin:9:0", 4); ok {
+		t.Fatal("the same fact twice")
+	}
+	rows, _ := db.Query("SELECT body, source_ref FROM memories WHERE kind = 'me' ORDER BY id")
+	if len(rows.Vals) != 2 || *rows.Vals[0][0] != "Vlad lives in London." || *rows.Vals[1][0] != "Vlad lives in Islington. Vlad has a cat." || *rows.Vals[1][1] != "checkin:7:0" {
+		t.Fatalf("%v", rows.Vals)
+	}
+}
+
+// The places counted from the routes and the photos become memories, once until they change, and
+// the sheet of the last weeks reads without an error.
+func TestPlacesPassAndInsightFacts(t *testing.T) {
+	db := pgFresh(t, "lgtest_synthd_places")
+	mount := t.TempDir()
+	paths := filepath.Join(mount, "frames", "paths")
+	if err := os.MkdirAll(paths, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	for i := 1; i <= 3; i++ {
+		d := now.AddDate(0, 0, -7*i).UTC().Format("2006-01-02")
+		b := `{"day":"` + d + `","walkM":4200,"stays":[{"name":"Regent's Park","from":0,"to":7200}]}`
+		if err := os.WriteFile(filepath.Join(paths, d+".route.json"), []byte(b), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, ts := range []int64{now.AddDate(0, 0, -3).Unix(), now.AddDate(0, 0, -2).Unix()} {
+		for j := 0; j < 6; j++ {
+			if err := db.Exec("INSERT INTO frames (hash, archive_path, taken_at, kind, place) VALUES ($1,'/x',$2,'photo','Europe / Greece / Corfu / Kassiopi')",
+				"h"+strconv.Itoa(i)+strconv.Itoa(j), ts+int64(j)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	_ = setSetting(db, ownerKey, "Vlad")
+	lg := slog.New(slog.NewTextHandler(io.Discard, nil))
+	n, err := placesPass(db, mount, lg)
+	if err != nil || n != 2 {
+		t.Fatal(n, err)
+	}
+	rows, _ := db.Query("SELECT title, body FROM memories WHERE kind = 'place' ORDER BY title")
+	if len(rows.Vals) != 2 || *rows.Vals[0][0] != "Kassiopi" || !strings.Contains(*rows.Vals[0][1], "12 photos taken there") ||
+		!strings.HasPrefix(*rows.Vals[1][1], "Vlad has been at Regent's Park on 3 days") {
+		t.Fatalf("%v", rows.Vals)
+	}
+	if n, _ := placesPass(db, mount, lg); n != 0 {
+		t.Fatal("nothing changed: nothing written")
+	}
+	facts := insightFacts(db, mount, "Vlad", now)
+	if len(facts) < 2 || !strings.Contains(strings.Join(facts, "\n"), "walked about 12 km in the last 30 days") {
+		t.Fatalf("%q", facts)
 	}
 }

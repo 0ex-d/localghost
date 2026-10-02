@@ -120,6 +120,9 @@ type Pipeline struct {
 	router dayroute.Router
 	// zoneAt names the time zone at a point (SetZoneLookup); nil when the box has no tz grid
 	zoneAt func(lat, lon float64) string
+	// heightAt is the ground's height at a point (SetHeightLookup, internal/dem over the
+	// elevation tiles); nil when the box has none
+	heightAt HeightFunc
 	// resolvePlace, when non-nil, reverse-geocodes GPS frames , DB-backed (geo_points, imported by
 	// `ghost-cli ghost.framed geo-import`). Nil means no geo data yet: empty place strings,
 	// reprocess backfills after an import.
@@ -136,6 +139,10 @@ type Pipeline struct {
 func (p *Pipeline) SetRoadCheck(fn func(lat, lon, withinM float64) (near, known bool)) {
 	p.nearRoad = fn
 }
+
+// SetHeightLookup gives the day paths the ground's height (the elevation tiles): each day's line
+// carries the height under it and the day's climb. nil: no heights.
+func (p *Pipeline) SetHeightLookup(fn HeightFunc) { p.heightAt = fn }
 
 // SetZoneLookup gives the trail the time zone grid (internal/tzgrid): the newest point's zone
 // becomes the box's idea of the person's local time (settings local_tz), which the digests, the
@@ -697,7 +704,7 @@ func (p *Pipeline) RebuildDay(day string) {
 			questions[i].Place = placeName(p.resolvePlace(questions[i].Lat, questions[i].Lon))
 		}
 	}
-	doc, err := BuildDayPathAsking(t, pts, photos, questions)
+	doc, err := BuildDayPathHeights(t, pts, photos, questions, p.heightAt)
 	if err != nil {
 		return
 	}

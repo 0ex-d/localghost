@@ -188,6 +188,13 @@ for svc in $CHECK; do
                 else
                     printf '  time zones: none (tools/fetch_geo.sh <mount>/geo fetches the tz set) , days are the box clock'"'"'s days\n'
                 fi
+                # The heights: the elevation tiles the days are drawn over (ghost-cli ghost.framed elevation).
+                ntiles=$(ls "$MOUNT"/geo/elevation/*.tif 2>/dev/null | wc -l)
+                if [ "$ntiles" -gt 0 ]; then
+                    printf '  heights: %s elevation tiles (%s), each day drawn with its climb\n' "$ntiles" "$(du -sh "$MOUNT/geo/elevation" 2>/dev/null | cut -f1)"
+                else
+                    printf '  heights: none (sudo GHOST_GEO_ELEVATION=all ./tools/update.sh maps fetches them)\n'
+                fi
             fi
             if [ "$svc" = "ghost.tallyd" ]; then
                 # The data the box pulls in, one line per feed, as Box Status shows it
@@ -221,6 +228,15 @@ for svc in $CHECK; do
                 dl=$(echo "$d" | sed -n 's/.*"oldest":"\([^"]*\)".*/\1/p' | head -1)
                 dw=$(echo "$d" | sed -n 's/.*"backfillAt":"\([^"]*\)".*/\1/p' | head -1)
                 [ -n "$dn" ] && printf '  day summaries %s (%s by the model), back to %s, backfill at %s\n' "$dn" "${dm:-0}" "${dl:-?}" "${dw:-start}"
+                # The box's own Wikipedia (ghost-cli ghost.synthd wiki title=… reads one article).
+                wk=$(cj ghost.synthd wiki)
+                wn=$(echo "$wk" | sed -n 's/.*"name":"\([^"]*\)".*/\1/p' | head -1)
+                we=$(echo "$wk" | sed -n 's/.*"entries":\([0-9]*\).*/\1/p' | head -1)
+                if [ -n "$wn" ]; then
+                    printf '  wikipedia: %s, %s entries, read on the box\n' "$wn" "${we:-?}"
+                else
+                    printf '  wikipedia: none (sudo ./tools/update.sh wiki fetches it, about 50 GB)\n'
+                fi
             fi
         else
             printf '  %s   (socket present but not answering ping , wedged or mid-restart)\n' "$(red STALE)"

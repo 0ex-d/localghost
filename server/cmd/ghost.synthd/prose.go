@@ -255,6 +255,35 @@ func groundedProse(out string, facts []string) (string, bool) {
 
 // --- helpers ---
 
+// pathHeights is the day's climb and highest point from its path (framed writes them when the box
+// has elevation tiles); zeros when it has none.
+func pathHeights(mount, day string) (climb, high float64) {
+	b, err := os.ReadFile(filepath.Join(mount, "frames", "paths", day+".geojson"))
+	if err != nil {
+		return 0, 0
+	}
+	var doc struct {
+		Features []struct {
+			Geometry struct {
+				Type string `json:"type"`
+			} `json:"geometry"`
+			Properties struct {
+				ClimbM float64 `json:"climbM"`
+				HighM  float64 `json:"highM"`
+			} `json:"properties"`
+		} `json:"features"`
+	}
+	if json.Unmarshal(b, &doc) != nil {
+		return 0, 0
+	}
+	for _, f := range doc.Features {
+		if f.Geometry.Type == "LineString" {
+			return f.Properties.ClimbM, f.Properties.HighM
+		}
+	}
+	return 0, 0
+}
+
 // routeOf reads a day's route as framed wrote it; nil when the day has none.
 func routeOf(mount, day string) *dayroute.Day {
 	b, err := os.ReadFile(filepath.Join(mount, "frames", "paths", day+".route.json"))

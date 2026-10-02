@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/LocalGhostDao/localghost/server/internal/dem"
 	"github.com/LocalGhostDao/localghost/server/internal/harden"
 	"github.com/LocalGhostDao/localghost/server/internal/landtiles"
 	"github.com/LocalGhostDao/localghost/server/internal/roadgraph"
@@ -32,6 +33,7 @@ import (
 	"github.com/LocalGhostDao/localghost/server/internal/tzgrid"
 	"log"
 	"log/slog"
+	"math"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -401,6 +403,91 @@ func main() {
 	}
 	ctl.Handle("tz-grid", func(json.RawMessage) (ctlsock.Response, error) {
 		return ctlsock.Response{OK: true, Text: buildTZ("asked")}, nil
+	})
+	// ELEVATION: the ground's height from the Copernicus tiles under <mount>/geo/elevation (the
+	// mirror's set elevation, internal/dem). Indexed at start and again when the folder changes
+	// (an update brought tiles); when the tiles are new to the days drawn, every day is drawn
+	// again in the background so each line carries its heights and its climb. Never asked of a
+	// service: a height comes from the disk.
+	elevDir := filepath.Join(*mount, "geo", "elevation")
+	var elevMu sync.Mutex
+	var elev *dem.Set
+	var elevMod time.Time
+	var elevChecked time.Time
+	elevation := func() *dem.Set {
+		elevMu.Lock()
+		defer elevMu.Unlock()
+		if time.Since(elevChecked) < time.Minute && elev != nil {
+			return elev
+		}
+		elevChecked = time.Now()
+		st, err := os.Stat(elevDir)
+		if err != nil {
+			elev = nil
+			return nil
+		}
+		if elev == nil || !st.ModTime().Equal(elevMod) {
+			elev, elevMod = dem.Open(elevDir), st.ModTime()
+		}
+		return elev
+	}
+	pipe.SetHeightLookup(func(lat, lon float64) (float64, bool) { return elevation().Height(lat, lon) })
+	// the days drawn before these tiles: drawn again once, the count of tiles kept beside them
+	redrawForHeights := func(why string) {
+		set := elevation()
+		if set.Tiles() == 0 {
+			return
+		}
+		mark := filepath.Join(elevDir, ".days-drawn")
+		if b, _ := os.ReadFile(mark); strings.TrimSpace(string(b)) == strconv.Itoa(set.Tiles()) && why == "" {
+			return
+		}
+		go func() {
+			n := pipe.RebuildRecentDays(100000)
+			_ = os.WriteFile(mark, []byte(strconv.Itoa(set.Tiles())), 0o640)
+			lg.Info("days drawn again with the ground's height", "fn", "elevation", "days", n, "tiles", set.Tiles())
+		}()
+	}
+	redrawForHeights("")
+	go func() {
+		t := time.NewTicker(10 * time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				redrawForHeights("")
+			}
+		}
+	}()
+	// elevation: how many tiles, and the height at a point (lat=, lon=); redraw=true draws every
+	// day again with the heights
+	ctl.Handle("elevation", func(args json.RawMessage) (ctlsock.Response, error) {
+		var a struct {
+			Lat    *float64 `json:"lat"`
+			Lon    *float64 `json:"lon"`
+			Redraw bool     `json:"redraw"`
+		}
+		if len(args) > 0 {
+			_ = json.Unmarshal(args, &a)
+		}
+		set := elevation()
+		out := map[string]any{"dir": elevDir, "tiles": set.Tiles()}
+		if a.Lat != nil && a.Lon != nil {
+			if h, ok := set.Height(*a.Lat, *a.Lon); ok {
+				out["heightM"] = math.Round(h*10) / 10
+			} else {
+				out["heightM"] = nil
+				out["why"] = "no tile for that point (the sea, or a part of the world not fetched)"
+			}
+		}
+		if a.Redraw {
+			redrawForHeights("asked")
+			out["redrawing"] = "every day is drawn again in the background (watch the log)"
+		}
+		b, _ := json.Marshal(out)
+		return ctlsock.Response{OK: true, Data: b}, nil
 	})
 	// setting: one shared settings row (local_tz is the one health.sh asks for), and the zone the
 	// grid names for a point (lat=, lon=) to check the grid by hand.

@@ -43,7 +43,7 @@ import kotlinx.coroutines.launch
  * kind=user and untouchable from birth.
  */
 @Composable
-fun MemoriesScreen(context: LifeContext?, open: String = "", onOpened: () -> Unit = {}) {
+fun MemoriesScreen(context: LifeContext?, open: String = "", onOpened: () -> Unit = {}, onOpenDay: (String) -> Unit = {}) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var rows by remember { mutableStateOf<List<BoxClient.MemRow>?>(null) }
@@ -290,7 +290,7 @@ fun MemoriesScreen(context: LifeContext?, open: String = "", onOpened: () -> Uni
             }
         }
         if (otdOpen && otd?.isNotEmpty() == true) items(otd!!, key = { "otd-${it.year}" }) { y ->
-            OtdYearCard(y)
+            OtdYearCard(y) { onOpenDay(DayText.shiftYears(DayText.of(System.currentTimeMillis() / 1000), -y.yearsAgo)) }
         }
         if (jotting) item {
             MemoryEditor(initTitle = "", initBody = "", onSave = { t, b ->
@@ -704,11 +704,16 @@ private fun VoiceNoteCard(v: BoxClient.VoiceNoteRow, onPhone: Boolean, onDelete:
 }
 
 @Composable
-private fun OtdYearCard(y: BoxClient.OtdYear) {
+private fun OtdYearCard(y: BoxClient.OtdYear, onOpenDay: () -> Unit = {}) {
     val ctx = LocalContext.current
     Column(Modifier.fillMaxWidth().animateContentSize().border(1.dp, GhostBorder, RectangleShape).background(Void).padding(12.dp)) {
-        Text("${y.year} , ${if (y.yearsAgo == 1) "1 year" else "${y.yearsAgo} years"} ago",
-            color = TerminalGreen, style = MaterialTheme.typography.bodyMedium)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("${y.year} , ${if (y.yearsAgo == 1) "1 year" else "${y.yearsAgo} years"} ago",
+                color = TerminalGreen, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+            // the whole day: its story, photos, outing, notes
+            Text("the day ›", color = TerminalGreen, style = MaterialTheme.typography.labelMedium,
+                modifier = Modifier.clickable { onOpenDay() }.padding(4.dp))
+        }
         // the day's title as the box built it (weekday, date, the places), then its route in a line
         if (y.title.isNotBlank()) {
             Text(y.title, color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
@@ -778,6 +783,8 @@ private fun MemoryRowCard(m: BoxClient.MemRow, onEdit: (String, String) -> Unit,
                 "user" -> "yours"
                 "me" -> "about me, from my note"
                 "person" -> "one of my people"
+                "place" -> "a place, counted from your trail and photos"
+                "insight" -> "noticed by your box"
                 "outing" -> if (line != null) "from your photos · $line" else "from your photos"
                 "day" -> m.meta?.optString("line")?.takeIf { it.isNotBlank() }?.let { "a day, from your trail and photos · $it" } ?: "a day, from your trail and photos"
                 "episode" -> "a day"

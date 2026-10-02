@@ -85,3 +85,21 @@ func TestIdentityAndDistillPrompt(t *testing.T) {
 		t.Fatal(q)
 	}
 }
+
+func TestCheckinWordsAndPrompt(t *testing.T) {
+	voice := "Said at the daily check-in of 2026-10-02 (1 min 20 s):\nI'm Vlad, I live in London with Cristina and I run LocalGhost."
+	if got := checkinWords(voice); got != "I'm Vlad, I live in London with Cristina and I run LocalGhost." {
+		t.Fatalf("%q", got)
+	}
+	written := "Daily check-in 2026-10-02\nFeeling: calm, tired\nWhy: shipped the box's coin pages\nVoice: 0123456789abcdef0123456789abcdef"
+	if got := checkinWords(written); got != "shipped the box's coin pages" {
+		t.Fatalf("%q", got)
+	}
+	p := checkinAboutPrompt("Vlad", "x")
+	if !strings.Contains(p, "\"Vlad lives …\"") || !strings.Contains(p, "How the day went") || !strings.HasSuffix(p, "CHECK-IN:\nx") {
+		t.Fatal(p)
+	}
+	if q := checkinAboutPrompt("", "x"); !strings.Contains(q, "first person") {
+		t.Fatal(q)
+	}
+}

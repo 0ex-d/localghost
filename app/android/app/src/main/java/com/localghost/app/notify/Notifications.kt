@@ -61,8 +61,9 @@ object Notifications {
      *  Status; NOTIFICATIONS when it names nothing. The extra rides the launch intent; unlock
      *  consumes it. */
     private fun tapPI(ctx: Context, item: PendingNotification, reqCode: Int): PendingIntent =
-        // where the box says it goes (the day on MAP, the memory, NEWS), else by its kind
-        tapPI(ctx, com.localghost.app.ui.NotifLink.nav(item.link, item.daemonId, item.kind), reqCode)
+        // its own page when the box gave it an id (the whole of it, and what it is about under
+        // it); else straight to where it goes (the day, the memory, NEWS), else by its kind
+        tapPI(ctx, if (item.id > 0) "notification:${item.id}" else com.localghost.app.ui.NotifLink.nav(item.link, item.daemonId, item.kind), reqCode)
 
     /** The summary of several goes to the list of them. */
     private fun tapPI(ctx: Context, nav: String, reqCode: Int): PendingIntent {

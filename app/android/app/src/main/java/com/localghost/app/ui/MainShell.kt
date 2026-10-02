@@ -41,6 +41,8 @@ enum class Dest(val label: String, val glyph: String) {
     NEWS("NEWS", "¶"),
     CRYPTO("CRYPTO", "₿"),
     COIN("COIN", "◈"),
+    DAY("DAY", "◷"),
+    NOTIFICATION("NOTIFICATION", "△"),
     NOTIFICATIONS("NOTIFICATIONS", "△"),
     HARNESS("BOX STATUS", "◉"),
     SYNC("SYNC", "⇅"),
@@ -137,8 +139,26 @@ fun MainShell(
     // what a notification opens: a day on MAP, a memory (its id) or "near" in MEMORIES ("" none)
     var mapDay by rememberSaveable { mutableStateOf("") }
     var memFocus by rememberSaveable { mutableStateOf("") }
+    // one day's page (HOME's "this day", the weekly highlight): where it came from, for back
+    var dayOpen by rememberSaveable { mutableStateOf("") }
+    var dayFrom by rememberSaveable { mutableStateOf(Dest.HOME) }
+    fun openDay(day: String) {
+        if (dest != Dest.DAY) dayFrom = dest
+        dayOpen = day
+        dest = Dest.DAY
+    }
+    // one notification's page (a tap in the shade or on the list): the id, where it came from
+    var notifOpen by rememberSaveable { mutableStateOf(0L) }
+    var notifFrom by rememberSaveable { mutableStateOf(Dest.NOTIFICATIONS) }
+    fun openNotification(id: Long) {
+        if (dest != Dest.NOTIFICATION) notifFrom = dest
+        notifOpen = id
+        dest = Dest.NOTIFICATION
+    }
     fun openTarget(t: NotifLink.Target) {
         when (t.dest) {
+            "notification" -> t.arg.toLongOrNull()?.let { openNotification(it) }
+            "day" -> if (t.arg.isNotEmpty()) openDay(t.arg) else dest = Dest.MEMORIES
             "map" -> { mapDay = t.arg; dest = Dest.MAP }
             "memories" -> { memFocus = t.arg; dest = Dest.MEMORIES }
             "news" -> { newsFocus = 0L; dest = Dest.NEWS }
@@ -151,7 +171,8 @@ fun MainShell(
     LaunchedEffect(navRequest) {
         when {
             // a notification's own place (the shade's tap): "map:<day>", "memories:<id>", "status"
-            navRequest.startsWith("map") || navRequest.startsWith("memories") || navRequest == "status" ->
+            navRequest.startsWith("map") || navRequest.startsWith("memories") || navRequest.startsWith("day:") ||
+                navRequest.startsWith("notification:") || navRequest == "status" ->
                 openTarget(NotifLink.resolve(navRequest, "", ""))
         }
         when (navRequest) {
@@ -179,6 +200,8 @@ fun MainShell(
         when {
             drawerState.isOpen -> close()
             dest == Dest.COIN -> dest = coinFrom
+            dest == Dest.DAY -> dest = if (dayFrom == Dest.DAY) Dest.HOME else dayFrom
+            dest == Dest.NOTIFICATION -> dest = if (notifFrom == Dest.NOTIFICATION) Dest.NOTIFICATIONS else notifFrom
             else -> dest = Dest.HOME
         }
     }
@@ -207,6 +230,8 @@ fun MainShell(
                     onHome = when (dest) {
                         Dest.HOME -> null
                         Dest.COIN -> ({ dest = coinFrom })
+                        Dest.DAY -> ({ dest = if (dayFrom == Dest.DAY) Dest.HOME else dayFrom })
+                        Dest.NOTIFICATION -> ({ dest = if (notifFrom == Dest.NOTIFICATION) Dest.NOTIFICATIONS else notifFrom })
                         else -> ({ dest = Dest.HOME })
                     },
                     onNewChat = if (dest == Dest.CHAT) onNewConversation else null,
@@ -227,6 +252,11 @@ fun MainShell(
                             onOpenTarget = { link -> openTarget(NotifLink.resolve(link, "", "")) })
                         Dest.CRYPTO -> CryptoScreen(onOpenCoin = { sym -> openCoin(sym, Dest.CRYPTO) })
                         Dest.COIN -> CoinScreen(coinSym)
+                        Dest.DAY -> DayScreen(if (dayOpen.isEmpty()) DayText.of(System.currentTimeMillis() / 1000) else dayOpen,
+                            onDay = { d -> dayOpen = d },
+                            onOpenMap = { d -> mapDay = d; dest = Dest.MAP },
+                            onOpenTarget = { link -> openTarget(NotifLink.resolve(link, "", "")) },
+                            onAsk = { q -> onNewConversation(); onSend(q); dest = Dest.CHAT })
                         Dest.CHAT -> ChatScreen(messages, streaming, localModeActive, pendingAttachments,
                             onSend, onStopChat, { showAddSheet = true }, onClearAttachment,
                             brainLabel, brainIsBox, phoneModels, onPickBox, onPickPhoneModel,
@@ -241,7 +271,8 @@ fun MainShell(
                             onOpenBoxChat = { id -> onOpenBoxChat(id); dest = Dest.CHAT },
                             onRenameBoxChat = onRenameBoxChat,
                             onDeleteBoxChat = onDeleteBoxChat)
-                        Dest.MEMORIES -> MemoriesScreen(lifeContext, open = memFocus, onOpened = { memFocus = "" })
+                        Dest.MEMORIES -> MemoriesScreen(lifeContext, open = memFocus, onOpened = { memFocus = "" },
+                            onOpenDay = { d -> openDay(d) })
                         Dest.NEWS -> NewsScreen(openStory = newsFocus, onStoryShown = { newsFocus = 0L })
                         Dest.NOTIFICATIONS -> {
                             val nctx = androidx.compose.ui.platform.LocalContext.current
@@ -252,8 +283,12 @@ fun MainShell(
                                 com.localghost.app.security.SessionStore.isExpiringSoon(nctx, nowSec, 6 * 3600) -> SessionHint.EXPIRING_SOON
                                 else -> SessionHint.NONE
                             }
-                            NotificationsScreen(pending, hint, onOpen = { t -> openTarget(t) })
+                            NotificationsScreen(pending, hint, onOpen = { t -> openTarget(t) }, onOpenOne = { id -> openNotification(id) })
                         }
+                        Dest.NOTIFICATION -> NotificationScreen(notifOpen,
+                            onOpenTarget = { t -> openTarget(t) },
+                            onDay = { d -> openDay(d) },
+                            onBack = { dest = Dest.NOTIFICATIONS })
                         Dest.HARNESS -> HarnessScreen(daemons, onRefresh = onRefreshDaemons)
                         Dest.SYNC -> SyncScreen(sync, onSync, onRequestFullAccess, onTogglePause = onTogglePause)
                         Dest.GALLERY -> GalleryScreen()

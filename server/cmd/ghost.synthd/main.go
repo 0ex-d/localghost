@@ -219,6 +219,9 @@ func main() {
 			runDir = filepath.Join(filepath.Dir(ld), "run")
 		}
 	}
+	if runDir != "" {
+		boxWiki.Dir = wikiDirOf(filepath.Dir(runDir)) // the volume's Wikipedia (wikipedia.go)
+	}
 
 	// Streaming chat , the SAME seam as the ctlsock chat command (context gathered and injected
 	// here, transparency first on the wire), token-by-token. Event protocol downstream:
@@ -933,6 +936,8 @@ func main() {
 			return ctlsock.Response{OK: true, Data: data}, nil
 		})
 		// rates: the box's market numbers (ghost.tallyd's), and convert amount= from= to=.
+		// wiki: the box's own Wikipedia, and a title's lead (wikipedia.go)
+		ctl.Handle("wiki", wikiCtl)
 		ctl.Handle("rates", func(args json.RawMessage) (ctlsock.Response, error) {
 			db := chatStore(mount)
 			if db == nil {
@@ -1043,6 +1048,7 @@ type contextSource func(runDir, prompt string) []ctxItem
 var contextSources = []contextSource{
 	memoriesSource,    // FIRST: what the box knows about the PERSON outranks document search
 	photoDigestSource, // the matched photo SET, summarised by category , one item, always fits
+	wikiSource,        // "what is X": the article's lead from the box's own Wikipedia (wikipedia.go)
 	searchdSource,
 	newsSource,  // then the news the phone fetched (news.go); the web, the phone's, comes with the question
 	ratesSource, // and the box's own market numbers for a money question (rates.go)
@@ -1096,6 +1102,9 @@ func sanitize(it ctxItem) ctxItem {
 	limit := 240
 	if it.Source == "photos" {
 		limit = 600 // one line for the whole matched set, eleven categories at most
+	}
+	if it.Source == "wikipedia" {
+		limit = wikiChatLead + 120 // the article's lead, which is what was asked for
 	}
 	if len(s) > limit {
 		s = s[:limit] + "…"
@@ -1502,6 +1511,10 @@ func distillLoop(ctx context.Context, mount, runDir string, lg *slog.Logger) {
 		} else if an > 0 {
 			lg.Info("about note made into memories", "fn", "distillLoop", "memories", an)
 		}
+		// what the check-ins say about me and my people joins the note's
+		if _, cerr := checkinAboutPass(db, oc, lg); cerr != nil {
+			lg.Warn("check-in about pass failed", "fn", "distillLoop", "err", cerr)
+		}
 		// the memories made before the box knew the name, written again with it
 		if _, nerr := namePass(db, oc, lg); nerr != nil {
 			lg.Warn("name pass failed", "fn", "distillLoop", "err", nerr)
@@ -1519,6 +1532,13 @@ func distillLoop(ctx context.Context, mount, runDir string, lg *slog.Logger) {
 			lg.Warn("outing pass failed", "fn", "distillLoop", "err", oerr)
 		} else if on > 0 {
 			lg.Info("outings updated", "fn", "distillLoop", "outings", on)
+		}
+		// the places the person keeps going to, counted; and once a day, what the box notices
+		if _, perr := placesPass(db, mount, lg); perr != nil {
+			lg.Warn("places pass failed", "fn", "distillLoop", "err", perr)
+		}
+		if _, ierr := insightPass(db, oc, mount, lg); ierr != nil {
+			lg.Warn("insight pass failed", "fn", "distillLoop", "err", ierr)
 		}
 		if pn, perr := prosePass(db, oc, mount, lg); perr != nil {
 			lg.Warn("prose pass failed", "fn", "distillLoop", "err", perr)

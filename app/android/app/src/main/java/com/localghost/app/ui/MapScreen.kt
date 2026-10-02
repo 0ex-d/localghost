@@ -193,12 +193,16 @@ private object MapCamera {
  *  clock per vertex when the box supplied one (empty otherwise); [phone] marks the part of a day
  *  the phone holds and the box has not seen yet (the spool waiting for a sync, or no box at all). */
 private class Track(val day: String, val xs: DoubleArray, val ys: DoubleArray, val times: LongArray, val distanceM: Double, val phone: Boolean,
-                    val minX: Double, val minY: Double, val maxX: Double, val maxY: Double, val glitches: Int = 0, val line: String = "") {
+                    val minX: Double, val minY: Double, val maxX: Double, val maxY: Double, val glitches: Int = 0, val line: String = "",
+                    val alts: IntArray = IntArray(0), val climbM: Double = 0.0, val highM: Double = 0.0) {
     val n: Int get() = xs.size
     val hasTimes: Boolean get() = times.size == xs.size && xs.isNotEmpty()
+    /** the ground's height under each vertex (the box's elevation tiles), Int.MIN_VALUE where unknown */
+    val hasAlts: Boolean get() = alts.size == xs.size && xs.isNotEmpty()
 }
 
-private fun trackOf(day: String, lat: DoubleArray, lon: DoubleArray, times: LongArray, distanceM: Double, phone: Boolean, glitches: Int = 0, line: String = ""): Track {
+private fun trackOf(day: String, lat: DoubleArray, lon: DoubleArray, times: LongArray, distanceM: Double, phone: Boolean, glitches: Int = 0, line: String = "",
+                    alts: IntArray = IntArray(0), climbM: Double = 0.0, highM: Double = 0.0): Track {
     val xs = DoubleArray(lat.size); val ys = DoubleArray(lat.size)
     var minX = Double.MAX_VALUE; var minY = Double.MAX_VALUE; var maxX = -Double.MAX_VALUE; var maxY = -Double.MAX_VALUE
     for (i in lat.indices) {
@@ -207,7 +211,7 @@ private fun trackOf(day: String, lat: DoubleArray, lon: DoubleArray, times: Long
         if (x < minX) minX = x; if (x > maxX) maxX = x
         if (y < minY) minY = y; if (y > maxY) maxY = y
     }
-    return Track(day, xs, ys, times, distanceM, phone, minX, minY, maxX, maxY, glitches, line)
+    return Track(day, xs, ys, times, distanceM, phone, minX, minY, maxX, maxY, glitches, line, alts, climbM, highM)
 }
 
 /** THE DAY ROUTE projected once: each move's path in map units, each stay's centre. The box told
@@ -285,11 +289,11 @@ private fun ago(sec: Long): String = when {
 }
 
 /** One point of a day for the scrubber: map units and the clock (0 when the box gave none). */
-private class TP(val x: Double, val y: Double, val ts: Long)
+private class TP(val x: Double, val y: Double, val ts: Long, val alt: Int = Int.MIN_VALUE)
 
 private fun dayPoints(dayTracks: List<Track>): List<TP> {
     val out = ArrayList<TP>()
-    for (t in dayTracks.sortedBy { if (it.phone) 1 else 0 }) for (i in 0 until t.n) out.add(TP(t.xs[i], t.ys[i], if (t.hasTimes) t.times[i] else 0L))
+    for (t in dayTracks.sortedBy { if (it.phone) 1 else 0 }) for (i in 0 until t.n) out.add(TP(t.xs[i], t.ys[i], if (t.hasTimes) t.times[i] else 0L, if (t.hasAlts) t.alts[i] else Int.MIN_VALUE))
     return out
 }
 
@@ -407,7 +411,8 @@ fun MapScreen(openDay: String = "", onDayShown: () -> Unit = {}) {
     // the days drawn, measured, told and asked about again, after a delete on the box
     suspend fun reloadTracks() {
         val batch = BoxClient.geoDayTracks(ctx, 60) ?: return
-        val loaded = batch.filter { it.n >= 2 }.map { t -> trackOf(t.day, t.lat, t.lon, t.times, t.distanceM, phone = false, glitches = t.glitches, line = t.line) }
+        val loaded = batch.filter { it.n >= 2 }.map { t -> trackOf(t.day, t.lat, t.lon, t.times, t.distanceM, phone = false, glitches = t.glitches, line = t.line,
+            alts = t.alts, climbM = t.climbM, highM = t.highM) }
         tracks = loaded + phoneTracks(ctx, loaded)
         MapMemory.tracks = tracks
         questions = batch.filter { it.questions.isNotEmpty() }.associate { it.day to it.questions }
@@ -471,7 +476,8 @@ fun MapScreen(openDay: String = "", onDayShown: () -> Unit = {}) {
             val batch = BoxClient.geoDayTracks(ctx, 60)
             val loaded = ArrayList<Track>()
             if (batch != null) {
-                for (t in batch) if (t.n >= 2) loaded.add(trackOf(t.day, t.lat, t.lon, t.times, t.distanceM, phone = false, glitches = t.glitches, line = t.line))
+                for (t in batch) if (t.n >= 2) loaded.add(trackOf(t.day, t.lat, t.lon, t.times, t.distanceM, phone = false, glitches = t.glitches, line = t.line,
+                    alts = t.alts, climbM = t.climbM, highM = t.highM))
                 questions = batch.filter { it.questions.isNotEmpty() }.associate { it.day to it.questions }
                 MapMemory.questions = questions
             } else {
@@ -1366,6 +1372,10 @@ fun MapScreen(openDay: String = "", onDayShown: () -> Unit = {}) {
                             " · ${dayPts.size} points" + (if (waiting > 0) " · $waiting waiting for the box" else "") +
                             (if (glitches > 0) " · $glitches glitch${if (glitches > 1) "es" else ""} ignored" else ""),
                         color = GhostText, style = MaterialTheme.typography.labelMedium)
+                    // the ground under the day (the box's elevation tiles): climbed, and the highest point
+                    val climb = ts.sumOf { it.climbM }
+                    val high = ts.maxOfOrNull { it.highM } ?: 0.0
+                    if (climb >= 20 || high > 0) Text(MapText.heights(climb, high), color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
                     // the day as the box tells it: one line, then the stays with their hours and the
                     // moves with how far and how (along the streets, or straight lines)
                     route?.takeIf { it.day == d }?.let { rt ->
@@ -1393,7 +1403,8 @@ fun MapScreen(openDay: String = "", onDayShown: () -> Unit = {}) {
                         Slider(value = scrub, onValueChange = { scrub = it },
                             colors = SliderDefaults.colors(thumbColor = TerminalGreen, activeTrackColor = TerminalGreen, inactiveTrackColor = VoidLighter))
                         scrubAt?.let { at ->
-                            Text((if (at.ts > 0) clock(at.ts) + " · " else "") + "%.5f, %.5f".format(java.util.Locale.US, invMercY(at.y), invMercX(at.x)),
+                            Text((if (at.ts > 0) clock(at.ts) + " · " else "") + "%.5f, %.5f".format(java.util.Locale.US, invMercY(at.y), invMercX(at.x)) +
+                                (if (at.alt != Int.MIN_VALUE) " · ${at.alt} m up" else ""),
                                 color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
                         }
                     }

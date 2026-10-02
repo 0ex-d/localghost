@@ -21,6 +21,11 @@
 #   engine    llama.cpp from the mirror's pinned tarball (tools/setup_llama.sh --build-only): built
 #             again only when the tarball changed (or this box still has a git checkout), then put
 #             on the volume and ghost.oracled restarted onto it.
+#   wiki      Wikipedia in English without pictures (set wikipedia, one ZIM file of about 50 GB) into
+#             the volume's wiki/: the chat's "what is …" and the coin pages read it on the box. Fetched
+#             when asked for (sudo ./tools/update.sh wiki), kept current after that.
+#   (maps also takes the heights: sudo GHOST_GEO_ELEVATION=all ./tools/update.sh maps, or a box
+#             of latitudes and longitudes like "34:72,-25:45"; the tiles already here kept current)
 #   speech    whisper.cpp from the mirror's pinned tarball (set whisper, built CPU-only) and a ggml
 #             speech model (set speech), straight onto the volume (tools/setup_whisper.sh). ghost.voiced
 #             looks for them on every pass, so the voice notes waiting are transcribed within a minute.
@@ -47,10 +52,13 @@ OWNER="$(stat -c %U "$DOOR$MOUNT/run" 2>/dev/null || echo coder)"
 CLI="$REPO/bin/ghost-cli"; [ -x "$CLI" ] || CLI=/opt/localghost/bin/ghost-cli
 CTL="$REPO/bin/ghost-ctl"; [ -x "$CTL" ] || CTL=/opt/localghost/bin/ghost-ctl
 
-STEPS="${*:-maps embedder weights phone engine speech}"
+STEPS="${*:-maps embedder weights phone engine speech wiki}"
 for s in $STEPS; do
-    case "$s" in maps|embedder|weights|phone|engine|speech) ;; *) echo "unknown step '$s' (maps embedder weights phone engine speech)" >&2; exit 2 ;; esac
+    case "$s" in maps|embedder|weights|phone|engine|speech|wiki) ;; *) echo "unknown step '$s' (maps embedder weights phone engine speech wiki)" >&2; exit 2 ;; esac
 done
+# Wikipedia is fetched when named (about 50 GB), kept current when the box has it
+ASKED_WIKI=0
+case " $* " in *" wiki "*) ASKED_WIKI=1 ;; esac
 
 # has_cuda <binary>: linked against CUDA, or CUDA compiled in (the check tools/gpu.sh makes)
 has_cuda() {
@@ -105,7 +113,7 @@ maps)
     case " $ch " in *" roadtiles "*)
         "$TOOLS/ns.sh" "$CLI" ghost.framed road-tiles >/dev/null && asked="$asked, streets cutting (hours for a continent)" ;;
     esac
-    got="$(printf '%s\n' $ch | grep -xE 'geo|landpolygons|roads' | tr '\n' ' ')"
+    got="$(printf '%s\n' $ch | grep -xE 'geo|landpolygons|roads|elevation' | tr '\n' ' ')"
     if [ -n "$got" ]; then result maps "updated: ${got% }$asked , ghost.framed's log follows it"
     elif [ -n "$asked" ]; then result maps "current${asked}"
     else result maps "current (a set not on the mirror is named above)"; fi
@@ -190,6 +198,37 @@ engine)
             failed=1
         fi
     fi
+    ;;
+wiki)
+    say "wiki: Wikipedia in English, without pictures"
+    WK="$DOOR$MOUNT/wiki"
+    if ! ls "$WK"/*.zim >/dev/null 2>&1 && [ "$ASKED_WIKI" != 1 ]; then
+        result wiki "not on this box (sudo ./tools/update.sh wiki fetches it: about 50 GB)"
+        continue
+    fi
+    mkdir -p "$WK"
+    if ! ls "$WK"/*.zim >/dev/null 2>&1; then
+        free="$(df -B1G --output=avail "$WK" 2>/dev/null | tail -1 | tr -d ' ')"
+        if [ -n "$free" ] && [ "$free" -lt 60 ]; then
+            result wiki "NOT fetched: the volume has ${free} GB free and the file is about 50 GB (it needs room for itself while it downloads)"
+            failed=1
+            continue
+        fi
+    fi
+    before="$(cat "$WK"/.*.zim.sha256 2>/dev/null)"
+    zrc=0; sh "$TOOLS/mirror_fetch.sh" wikipedia "$WK" || zrc=$?
+    rm -f "$WK/.mirror-files"
+    case "$zrc" in
+        0) chown -R "$OWNER:$OWNER" "$WK" 2>/dev/null || true
+           chmod 640 "$WK"/*.zim 2>/dev/null || true
+           if [ "$(cat "$WK"/.*.zim.sha256 2>/dev/null)" != "$before" ]; then
+               result wiki "$(ls "$WK"/*.zim | xargs -n1 basename) on the volume ($(du -sh "$WK" 2>/dev/null | cut -f1)); ghost.synthd reads it within a minute"
+           else
+               result wiki "current"
+           fi ;;
+        3) result wiki "not on the mirror yet (set wikipedia)" ;;
+        *) result wiki "FAILED (above; a rerun resumes the download)"; failed=1 ;;
+    esac
     ;;
 speech)
     say "speech: whisper.cpp and a speech model, for voice notes"
