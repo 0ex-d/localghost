@@ -15,6 +15,7 @@ import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.localghost.app.net.BoxClient
+import com.localghost.app.net.HomeData
 import com.localghost.app.net.PendingNotification
 import com.localghost.app.ui.theme.*
 import kotlinx.coroutines.launch
