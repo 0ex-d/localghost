@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Verify the current checkout matches our signed source manifest.
-# Run from the repo root after `git checkout <commit>`.
+# Verify the current checkout matches our signed source manifest. Run after `git checkout <commit>`
+# (the commit the app shows under VERIFY BUILD), from anywhere in the checkout.
 #
 #   tools/verify_source.sh
 set -euo pipefail
-cd "$(git rev-parse --show-toplevel)"
+cd "$(dirname "$0")/.."   # the app's folder (app/android of the LocalGhost repository)
 
 MANIFEST_FILE="ghost/source-manifest.txt"
 MANIFEST_SIG="ghost/source-manifest.txt.asc"

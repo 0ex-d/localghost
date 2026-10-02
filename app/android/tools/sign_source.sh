@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Sign the LocalGhost app source — same convention as the website deploy-manifest.
-# Run from the repo root on a CLEAN git tree, before the build.
+# Sign the LocalGhost app source, the same convention as the website deploy-manifest. Run on a
+# CLEAN git tree, before the build (app/android/tools/release.sh runs it).
 #
 #   tools/sign_source.sh
 #
@@ -9,7 +9,9 @@
 #   ghost/source-manifest.txt.asc   detached GPG signature (info@localghost.ai)
 #   MANIFEST.root                    sha256 of source-manifest.txt (stamped into BuildConfig)
 set -euo pipefail
-cd "$(git rev-parse --show-toplevel)"
+# the app's folder (app/android of the LocalGhost repository): the manifest lists the app's tracked
+# files, paths relative to here, and MANIFEST.root beside them is what the build stamps in
+cd "$(dirname "$0")/.."
 
 BUILD_ID="$(git rev-parse HEAD)"
 mkdir -p ghost

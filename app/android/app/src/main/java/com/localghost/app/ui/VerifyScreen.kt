@@ -31,7 +31,7 @@ fun VerifyScreen() {
     val repo = BuildConfig.GITHUB_REPO
     val commit = BuildConfig.GIT_COMMIT
     val commitUrl = "$repo/tree/$commit"
-    val manifestUrl = "$repo/blob/$commit/ghost/source-manifest.txt"
+    val manifestUrl = "$repo/blob/$commit/app/android/ghost/source-manifest.txt"
     val releaseUrl = "$repo/releases/tag/v${BuildConfig.VERSION_NAME}"
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())
@@ -49,7 +49,7 @@ fun VerifyScreen() {
         Spacer(Modifier.height(8.dp))
 
         Field(ctx, "built (UTC)", BuildConfig.BUILD_TIME_UTC)
-        Field(ctx, "version", "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
+        Field(ctx, "version", "${BuildConfig.RELEASE_NAME} ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
         Field(ctx, "source commit", commit, mono = true)
         Field(ctx, "working tree at build",
             if (BuildConfig.GIT_TREE_CLEAN) "clean, matches the commit exactly"

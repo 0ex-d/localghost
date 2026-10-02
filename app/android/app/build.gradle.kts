@@ -21,9 +21,11 @@ fun git(vararg args: String): String = try {
 val gitCommit = git("rev-parse", "HEAD").ifEmpty { "unknown" }
 val gitCommitShort = git("rev-parse", "--short", "HEAD").ifEmpty { "unknown" }
 val gitTreeClean = git("status", "--porcelain").isEmpty()
+// the build time stamped in: the commit's own time when the tree is exactly the commit (so a
+// release built again from its tag is the same APK), the clock's otherwise
 val buildTimeUtc: String = DateTimeFormatter.ISO_INSTANT
     .withZone(ZoneOffset.UTC)
-    .format(Instant.now())
+    .format(git("log", "-1", "--format=%ct").toLongOrNull()?.takeIf { gitTreeClean }?.let { Instant.ofEpochSecond(it) } ?: Instant.now())
 val manifestRoot = rootProject.file("MANIFEST.root")
     .let { if (it.exists()) it.readText().trim() else "" }
 
@@ -83,7 +85,7 @@ android {
         minSdk = 35
         targetSdk = 36
         versionCode = 1
-        versionName = "0.0.1 wisp" // the first release cut (server tools/release.names)
+        versionName = "0.0.1" // the release the app belongs to (server/tools/release.names: wisp)
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // Dev convenience only. The PUBLIC release build leaves these EMPTY: the app reads the
@@ -101,7 +103,9 @@ android {
         buildConfigField("boolean", "GIT_TREE_CLEAN", "$gitTreeClean")
         buildConfigField("String", "BUILD_TIME_UTC", "\"$buildTimeUtc\"")
         buildConfigField("String", "MANIFEST_ROOT", "\"$manifestRoot\"")
-        buildConfigField("String", "GITHUB_REPO", "\"https://github.com/localghost-ai/localghost-app\"")
+        buildConfigField("String", "GITHUB_REPO", "\"https://github.com/LocalGhostDao/localghost\"")
+        // the release's name (server/tools/release.names), shown beside the version
+        buildConfigField("String", "RELEASE_NAME", "\"wisp\"")
         // Stable build-env (same on any machine using the pinned toolchain; safe in the APK).
         buildConfigField("String", "BUILD_JVM_MAJOR", "\"$jvmMajor\"")
         buildConfigField("String", "BUILD_OS_NAME", "\"$osName\"")

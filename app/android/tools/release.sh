@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# Build a verifiable, signed release APK on Debian. Run from the repo root.
+# Build a verifiable, signed release APK on Debian.
 #
 #   source ~/.localghost_android_env   # JAVA_HOME, ANDROID_HOME, PATH (from debian_setup.sh)
-#   tools/release.sh
+#   app/android/tools/release.sh
 #
-# Produces a signed app-release.apk, the signed source manifest, and the hashes to publish.
+# Produces a signed app-release.apk, the signed source manifest (committed, so the commit the APK
+# is stamped with holds the manifest it claims), and the hashes to publish. In the LocalGhost
+# repository the app and the server are released together: run this FIRST, then the server's
+# server/tools/cut_release.sh <version> --apk app/android/app/build/outputs/apk/release/app-release.apk,
+# which tags the commit this made and puts the APK in the release beside the server set.
 set -euo pipefail
-cd "$(git rev-parse --show-toplevel)"
+cd "$(dirname "$0")/.."   # the app's folder (app/android of the LocalGhost repository)
 
 : "${ANDROID_HOME:?source ~/.localghost_android_env first}"
 KEYSTORE="${LG_KEYSTORE:?set LG_KEYSTORE to your release keystore path}"

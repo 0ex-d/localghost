@@ -4655,3 +4655,25 @@ no-data, the set by name, Climb), `TestBuildDayPathHeights`, `TestGeoTracksBatch
 mirror; cut_release.sh in a scratch repo (a cut, a recut with a dirty tree giving the same sums, a
 moved tag refused). App: `DayTextTest`, `NotifLinkTest` (the page), `ReleaseInfoTest` (the name),
 `FeedsTextTest` (the folds), `HomeDataTest`, `CoinTextTest`; 206 JVM tests.
+
+## One release for the whole of LocalGhost: the app and the source beside the server set
+
+- `tools/cut_release.sh <version> [--apk <file>]` now makes `release/<version>/` with `server/`
+  (the mirror's set, as before), `app/` (`localghost-app-<version>.apk` handed in with `--apk`,
+  its GPG signature, `APP.txt`), `source/` (git archive of the tag, which is also how a box is
+  set up) and `SHA256SUMS` over everything, signed by the site key when the cutting user's gpg
+  holds it (info@localghost.ai; without it the cut says so and signs nothing). The APK is built
+  in the cut from the tag's tree when the Android SDK is on the machine (`ANDROID_HOME` or
+  `~/.localghost_android_env`) and the keystore is named in `~/.config/localghost/release.env`
+  (`LG_KEYSTORE`, `LG_KEY_ALIAS`, `LG_KEYSTORE_PASS`): gradle `assembleRelease` with a public
+  `local.properties` (no box baked in), zipalign, apksigner, the version checked with aapt2, the
+  signing certificate in APP.txt; else `--apk <file>` hands one in, `--no-apk` leaves it out.
+  The app stamps the commit's time as its build time when the tree is clean, so a release built
+  again from its tag is the same APK. The `gh release create` line names every file.
+- The app's `versionName` is "0.0.1" with `BuildConfig.RELEASE_NAME` "wisp" beside it (VERIFY
+  BUILD shows "wisp 0.0.1", and its release link works); `GITHUB_REPO` points at
+  LocalGhostDao/localghost; the source manifest link is `app/android/ghost/…`. The app's
+  provenance scripts (`sign_source.sh`, `verify_source.sh`, `release.sh`) work from the app's
+  folder inside the repository rather than assuming it is the repository.
+- The notes (`releases/0.0.1.md`) say what the release holds and how a box and a phone are
+  installed from it.
