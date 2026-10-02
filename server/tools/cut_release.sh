@@ -51,9 +51,13 @@ done
 if [ -n "$APK" ]; then
     [ -s "$APK" ] || { echo "no APK at $APK" >&2; exit 2; }
     APK="$(cd "$(dirname "$APK")" && pwd)/$(basename "$APK")"
-    # an APK is a zip with the app's manifest and code in it
-    unzip -l "$APK" 2>/dev/null | grep -qE ' AndroidManifest\.xml$' && unzip -l "$APK" | grep -qE ' classes[0-9]*\.dex$' ||
-        { echo "$APK is not an Android app (no AndroidManifest.xml and classes.dex in it)" >&2; exit 2; }
+    # an APK is a zip with the app's manifest and code in it (the listing read whole: `grep -q`
+    # closing the pipe early gave unzip SIGPIPE under pipefail, and a real APK's thousands of
+    # entries made the genuine release APK "not an Android app")
+    NAMES="$(unzip -Z1 "$APK" 2>/dev/null || true)"
+    if [ "$(printf '%s\n' "$NAMES" | grep -cx 'AndroidManifest.xml')" -eq 0 ] || [ "$(printf '%s\n' "$NAMES" | grep -cE '^classes[0-9]*\.dex$')" -eq 0 ]; then
+        echo "$APK is not an Android app (no AndroidManifest.xml and classes.dex in it; is unzip installed?)" >&2; exit 2
+    fi
 fi
 case "$VERSION" in *[!0-9.]*) echo "a version is numbers and dots (0.0.1); the name comes from tools/release.names" >&2; exit 2 ;; esac
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
@@ -90,7 +94,7 @@ find_sdk() { # sets ANDROID_HOME from the first place that has one
     fi
     if [ -z "${ANDROID_HOME:-}" ] && [ -f "$TOP/app/android/local.properties" ]; then
         # what gradle used in this checkout (sdk.dir, with its escaped colons and backslashes)
-        ANDROID_HOME="$(sed -n 's/^sdk\.dir=//p' "$TOP/app/android/local.properties" | head -1 | sed 's/\\:/:/g; s/\\\\/\//g; s/\r$//')"
+        ANDROID_HOME="$(sed -n 's/^sdk\.dir=//p' "$TOP/app/android/local.properties" | sed 's/\\:/:/g; s/\\\\/\//g; s/\r$//' | sed -n '1p')"
     fi
     if [ -z "${ANDROID_HOME:-}" ] || [ ! -d "$ANDROID_HOME/build-tools" ]; then
         for d in "$HOME/android-sdk" "$HOME/Android/Sdk" /opt/android-sdk /usr/lib/android-sdk; do
@@ -198,7 +202,7 @@ build_apk() {
     } > "$APPDIR/local.properties"
     echo "building the app (gradle assembleRelease; the phone's model runtime takes a few minutes the first time)"
     ( cd "$APPDIR" && ./gradlew --no-daemon -q assembleRelease ) || { echo "the app's build failed (above)"; return 1; }
-    UNSIGNED="$(ls "$APPDIR"/app/build/outputs/apk/release/*.apk 2>/dev/null | head -1)"
+    UNSIGNED="$(ls "$APPDIR"/app/build/outputs/apk/release/*.apk 2>/dev/null | sed -n '1p' || true)"
     [ -s "$UNSIGNED" ] || { echo "no APK came out of the build"; return 1; }
     mkdir -p "$OUT/app"
     "$BT/zipalign" -f 4 "$UNSIGNED" "$W/aligned.apk"

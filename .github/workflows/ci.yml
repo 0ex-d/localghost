@@ -3,18 +3,26 @@
 #   server   go vet and every Go test (the Postgres ones against the runner's own Postgres over its
 #            Unix socket, as on a box; they skip themselves when GHOST_PG_SOCKET_DIR is unset), then
 #            a cross-compile for macOS, so the tree keeps building where contributors edit it
-#   app      the Android app's JVM unit tests (no device, no emulator)
+#   app      the Android app's JVM unit tests (no device, no emulator); the heavy job, so it runs
+#            on pull requests and by hand (Actions › ci › Run workflow), not on every push
 #
-# Nothing here reaches outside GitHub but the module proxy and Maven; the box never runs any of it.
+# Actions are free for a public repository; a push cancels a run still going on the same branch,
+# so nothing stacks up. Nothing here reaches outside GitHub but the module proxy and Maven; the
+# box never runs any of it.
 name: ci
 
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   server:
@@ -47,6 +55,7 @@ jobs:
         run: GOOS=darwin go vet ./...
 
   app:
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     defaults:
       run:

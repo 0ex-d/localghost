@@ -37,6 +37,16 @@ val manifestRoot = rootProject.file("MANIFEST.root")
 //    writeBuildEnv task, NOT into the APK, so reproducibility is preserved.
 val jvmMajor: String = System.getProperty("java.version").orEmpty().substringBefore(".")
 val osName: String = System.getProperty("os.name").orEmpty()
+
+// THE RELEASE THE APP BELONGS TO. One number for the phone and the box: versionName here, and the
+// name beside it from server/tools/release.names ("0.0.2 wisp"), the same file the box reads at
+// an exact tag, so the phone's VERIFY BUILD and the box's SETTINGS › SERVER say the same thing.
+// tools/cut_release.sh refuses an APK whose versionName is not the release being cut.
+val appVersion = "0.0.2"
+val appVersionCode = 2
+val releaseName: String = rootProject.file("../../server/tools/release.names").takeIf { it.isFile }
+    ?.readLines()?.map { it.trim() }?.firstOrNull { it.startsWith("$appVersion ") }
+    ?.substringAfter(' ')?.trim().orEmpty()
 val gradleVersion: String = gradle.gradleVersion
 // Read AGP/Kotlin versions straight from the version catalog [versions] table.
 val catalog = extensions.getByType<VersionCatalogsExtension>().named("libs")
@@ -84,8 +94,8 @@ android {
         applicationId = "com.localghost.app"
         minSdk = 35
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.0.1" // the release the app belongs to (server/tools/release.names: wisp)
+        versionCode = appVersionCode
+        versionName = appVersion // the release the app belongs to (server/tools/release.names)
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // Dev convenience only. The PUBLIC release build leaves these EMPTY: the app reads the
@@ -105,7 +115,7 @@ android {
         buildConfigField("String", "MANIFEST_ROOT", "\"$manifestRoot\"")
         buildConfigField("String", "GITHUB_REPO", "\"https://github.com/LocalGhostDao/localghost\"")
         // the release's name (server/tools/release.names), shown beside the version
-        buildConfigField("String", "RELEASE_NAME", "\"wisp\"")
+        buildConfigField("String", "RELEASE_NAME", "\"$releaseName\"")
         // Stable build-env (same on any machine using the pinned toolchain; safe in the APK).
         buildConfigField("String", "BUILD_JVM_MAJOR", "\"$jvmMajor\"")
         buildConfigField("String", "BUILD_OS_NAME", "\"$osName\"")

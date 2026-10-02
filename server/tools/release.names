@@ -1,4 +1,6 @@
 # The releases' names: "<version> <name>", one a line, read by tools/release_build.sh (RELEASE.txt's
-# name=, secd.ReleaseName, what the phone shows: "wisp 0.0.1"). Committed with the code, so a
-# release built again from its commit is named the same.
+# name=, secd.ReleaseName, what the phone shows: "wisp 0.0.2"). Committed with the code, so a
+# release built again from its commit is named the same. The name is the line, the number the cut:
+# every 0.x is a wisp; shade is 1.x, then specter, phantom, poltergeist, smallest ghost to largest.
 0.0.1 wisp
+0.0.2 wisp

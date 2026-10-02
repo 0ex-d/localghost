@@ -4775,7 +4775,9 @@ release, an open pull request from July, no per-device revocation. Most of it wa
   own Postgres over its socket (as on a box; `createuser -s runner`, peer auth), a macOS
   cross-compile (`GOOS=darwin go vet ./...`), and the app's JVM tests (`:app:testDebugUnitTest`,
   JDK 21 as the box's setup installs). The app job has not run under gradle here (no SDK in this
-  session); run it on the box once before pushing the workflow.
+  session); run it on the box once before pushing the workflow. Actions are free on a public
+  repository; the app job (the heavy one) runs on pull requests and by hand only, and a push
+  cancels a run still going on the same branch.
 - **The tree builds on a Mac.** Pull request #3 (0ex-d, July) and issue #2 said the tests fail on
   macOS over `Pdeathsig`, a Linux-only field. Fixed on main with build tags rather than the PR's
   branch (it no longer applies): `procs.ChildAttr()` (`attr_linux.go` with Pdeathsig,
@@ -4819,3 +4821,28 @@ release, an open pull request from July, no per-device revocation. Most of it wa
 - Tested: 47 packages ok, vet clean on Linux and darwin; `TestRetireByDeviceKey` (a phone retired
   by its upper-cased key is refused on every route, survives a restart, bad keys refused, a
   sibling untouched); the JVM suite.
+
+## wisp 0.0.2: a second cut with everything in it, rather than patching 0.0.1's page
+
+- wisp's GitHub page is short of SHA256SUMS, its signature, APP.txt and the source archive (the
+  upload stopped at a name collision), and the recut APK does not match the published one
+  (gradle is not byte-reproducible), so filling the page in meant handing the published APK back
+  into the cut, and that failed too: the "is it an APK" check ran `unzip -l | grep -q` under
+  `pipefail`, grep closed the pipe at the first match, unzip took SIGPIPE, and the genuine release
+  APK was "not an Android app". Fixed (the listing is read whole, `unzip -Z1` into a variable and
+  `grep -c`), and the remaining early readers in the cut (`head -1` on `ls` and `sed`) replaced
+  for the same reason. The decision: cut 0.0.2 with the day's tree instead, still named wisp (the
+  name is the release line, the number is the cut: every 0.x is a wisp, shade is 1.x, then
+  specter, phantom, poltergeist; said in release.names and RELEASES.md).
+- `tools/release.names` gains "0.0.2 wisp"; `releases/0.0.2.md` is the delta over 0.0.1 (the
+  HEIC repair, retire by key, the cut, the repository, the small things), what the release holds,
+  installing over wisp (the archive re-read at first start), the known gaps; RELEASES.md and
+  CITATION.cff (version 0.0.2, an abstract that describes what is built) follow.
+- The app's version and release name come from one place: `appVersion` and `appVersionCode` at
+  the top of `app/build.gradle.kts`, and `RELEASE_NAME` read from `server/tools/release.names`
+  for that version at build time, the same file the box reads at an exact tag. VERIFY BUILD shows
+  "wisp 0.0.2 (2)".
+- The cut on the box: apply the drop, commit, `./tools/cut_release.sh 0.0.2` (tags v0.0.2 from a
+  clean tree with the notes committed), `git add releases/pins.txt && git commit`, `git push &&
+  git push origin v0.0.2`, the `gh release create` line it prints (no collisions now), then the
+  web repo's mirror.conf `server` and `app` sets at v0.0.2.

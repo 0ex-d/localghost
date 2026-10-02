@@ -23,9 +23,10 @@ Read [why we build](https://www.localghost.ai/manifesto), or the
 
 ## Status
 
-**wisp 0.0.1**, the first release, was cut on 2 October 2026:
-[the release](https://github.com/LocalGhostDao/localghost/releases/tag/v0.0.1), and
-[what is in it and how it works](server/releases/0.0.1.md). One box runs it with one phone. The
+**wisp**, the first release, was cut on 2 October 2026, at 0.0.2 by the end of the day:
+[the release](https://github.com/LocalGhostDao/localghost/releases/latest),
+[what is in it and how it works](server/releases/0.0.1.md) and
+[what the second cut changed](server/releases/0.0.2.md). One box runs it with one phone. The
 server is about 69,000 lines of Go in 168 test files, the app about 33,000 lines of Kotlin.
 
 What works, as of wisp: the encrypted volume and its unlock from the phone, the photo archive
@@ -175,9 +176,10 @@ is Linux. [CONTRIBUTING.md](CONTRIBUTING.md) says what is useful and how changes
 
 Next, in no promised order: shorter device certificates renewed by the phone (the rekey path
 exists; wisp issues ten-year certificates), an offline release key, the decoy volume, the retire
-button on the phone's DEVICES screen, and a release every few weeks with the notes to match. The
-box CA stays where it is, on the OS disk, so a phone can be enrolled and refused while the vault
-is locked; that is a choice, not an oversight. Later: mail, the Mist (sharded, encrypted peer-to-peer backup between boxes),
+button on the phone's DEVICES screen, and a release every few weeks with the notes to match,
+every 0.x a wisp (shade is 1.x, and the ghosts grow from there). The box CA stays where it is, on
+the OS disk, so a phone can be enrolled and refused while the vault is locked; that is a choice,
+not an oversight. Later: mail, the Mist (sharded, encrypted peer-to-peer backup between boxes),
 hardware. Nothing on this list depends on a server of ours; the mirror is a convenience the box
 verifies, not a service it needs.
 
