@@ -11,6 +11,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"flag"
 	"fmt"
 	"github.com/LocalGhostDao/localghost/server/internal/hw"
@@ -425,9 +426,15 @@ func main() {
 	// Clear any prior enrolment marker so THIS rotation waits for THIS device, not a past one.
 	_ = os.Remove(filepath.Join(*stateDir, "enrolled.flag"))
 	if err := pair.Run(os.Stdout, popts, pair.EncodeQR); err != nil {
+		if errors.Is(err, pair.ErrScreen) {
+			// the box is set up; only the QR is missing, and it is drawn later from a bigger screen
+			fmt.Println("\nBox provisioned. No QR was drawn:", err)
+			fmt.Println("From a bigger terminal, as root: ghost-qr --ca", *caDir, "--host", hostVal)
+			return
+		}
 		fmt.Fprintln(os.Stderr, "could not render enrolment QR:", err)
 		os.Exit(1)
 	}
-	fmt.Println("\nThe QR carries a one-time device identity. Scan it with the LocalGhost app now.")
+	fmt.Println("\nThe QR carried a one-time device identity for the phone that scanned it.")
 	fmt.Println("To enrol another device, re-run: ghost-qr --ca", *caDir, "--host", hostVal)
 }

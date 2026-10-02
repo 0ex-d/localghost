@@ -208,6 +208,14 @@ the terminal once the phone has it. Fresh QR any time (each mints a fresh identi
 newest): `./bin/ghost-qr --ca /etc/ghost/ca --host box.example.com` as root. Then unlock with
 the main PIN. A wrong PIN looks exactly like a down box; that is the product, not a bug.
 
+The QR is drawn only on an interactive terminal of at least 57 columns by 35 rows, as rotating
+frames, and the link inside it is never written out: not as text under the QR, not to a file, not
+as a column of frames on a small screen. It carries the phone's private key, and a credential in a
+terminal log is a credential. A window too small, or `ghost-qr` run through a pipe, gets one line
+saying to find a bigger screen and run it again; ghost-setup finishes either way and says the same.
+The QR's key is the phone's only until its first unlock, when the phone makes a key of its own
+inside its Keystore and the box retires the QR's (`app/android/.../DeviceCert.kt`, secd's rekey).
+
 ## 7. Models , two different homes, do not mix them up
 
 **7a. App catalog models , root, unencrypted disk.** These are the models the PHONE downloads from

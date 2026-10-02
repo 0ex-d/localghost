@@ -2,6 +2,7 @@ package pair
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -38,10 +39,11 @@ func TestFrameBudgetCapsAtEasyVersion(t *testing.T) {
 	}
 }
 
-// A small console still declines to animate below v8 rather than exploding into dozens of frames.
+// A small console declines below v8 rather than exploding into dozens of frames: Run says to
+// find a bigger screen, and draws nothing.
 func TestFrameBudgetDeclinesTinyTerminal(t *testing.T) {
 	if _, ok := frameBudget(80, 24); ok {
-		t.Fatal("an 80x24 console cannot hold a v8 frame; it must print statically")
+		t.Fatal("an 80x24 console cannot hold a v8 frame; Run must refuse it")
 	}
 	// Full-cell rendering needs 57 rows for v8 plus captions; a maximised 4K terminal has them, a
 	// laptop's 50-row window does not and keeps the half-block form.
@@ -150,5 +152,40 @@ func TestAnimateFramesCaptionAndHold(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "Enrolment complete") {
 		t.Fatal("Enter is not enrolment")
+	}
+}
+
+// MinCols x MinRows is the smallest terminal frameBudget accepts, and one column or one row less
+// is refused, so the message names the real threshold.
+func TestMinScreenIsTheSmallest(t *testing.T) {
+	if _, ok := frameBudget(MinCols, MinRows); !ok {
+		t.Fatalf("%d x %d refused", MinCols, MinRows)
+	}
+	if _, ok := frameBudget(MinCols-1, MinRows); ok {
+		t.Fatalf("%d x %d accepted", MinCols-1, MinRows)
+	}
+	if _, ok := frameBudget(MinCols, MinRows-1); ok {
+		t.Fatalf("%d x %d accepted", MinCols, MinRows-1)
+	}
+}
+
+// The link is the phone's private key: nothing of it reaches a writer that is not an interactive
+// terminal, and the refusal comes before any identity is minted (IssueDevice is never called).
+func TestRunNeverWritesTheLinkOffATerminal(t *testing.T) {
+	var out bytes.Buffer
+	minted := false
+	err := Run(&out, Options{Host: "box.lan", Port: 443, Animate: false,
+		IssueDevice: func(string) ([]byte, []byte, error) { minted = true; return nil, nil, nil }}, EncodeQR)
+	if !errors.Is(err, ErrScreen) {
+		t.Fatalf("err %v", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("wrote %q", out.String())
+	}
+	if minted {
+		t.Fatal("a device identity was minted for a QR that was never drawn")
+	}
+	if !strings.Contains(err.Error(), "bigger") || !strings.Contains(err.Error(), "57 columns by 35 rows") {
+		t.Fatalf("the message does not say what to do: %v", err)
 	}
 }

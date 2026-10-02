@@ -37,18 +37,40 @@ type Options struct {
 	EnrolledSignal func() bool
 }
 
-// Run mints a fresh device identity, builds the enroll link that CARRIES it, and writes the link
-// text plus a scannable terminal QR to w. There is no pairing code and no return value but error:
-// scanning the QR is enrolment, done locally on the phone, so the box has nothing to "arm" or track.
+// Run mints a fresh device identity, builds the enroll link that CARRIES it, and shows it as a
+// rotating QR on an interactive terminal that is big enough. There is no pairing code and no
+// return value but error: scanning the QR is enrolment, done locally on the phone, so the box has
+// nothing to "arm" or track.
+//
+// THE LINK IS NEVER WRITTEN OUT. It holds the phone's private key, so it goes to the phone's
+// camera and nowhere else: not as text on the terminal (scrollback, a screen recording, a pasted
+// session), not to a pipe or a file, not as a column of frames on a screen too small to rotate
+// them. A terminal that is not interactive, or smaller than MinCols x MinRows, gets ErrScreen and
+// no QR at all. (Until 2 Oct 2026 the link was printed under the QR and small terminals got the
+// frames statically; a credential in a terminal log is a credential.)
 //
 // EncodeQR is the seam: it turns a frame string into a Matrix (qrencode.go, the from-scratch
 // byte-mode encoder, no third-party QR). The device identity (cert+key) is ~850 bytes as DER, too
 // much for one comfortably-scannable QR, so NewStream splits it into small erasure-coded frames
 // (any K of K+M rebuild it) that the app reassembles.
 func Run(w io.Writer, opts Options, encodeQR func(string) (Matrix, error)) error {
+	// The screen first, before a device identity is minted that nothing would show: interactive
+	// and big enough for v8 frames, or nothing is drawn (see the top).
+	if !opts.Animate {
+		return ErrScreen
+	}
+	cols, rows, err := term.GetSize(int(os.Stdout.Fd()))
+	if err != nil {
+		return ErrScreen
+	}
+	budget, ok := frameBudget(cols, rows)
+	if !ok {
+		return fmt.Errorf("%w (this one is %d x %d)", ErrScreen, cols, rows)
+	}
+	cells := cellsFit(cols, rows, maxAnimatedVersion)
+
 	host := opts.Host
 	if host == "" {
-		var err error
 		if host, err = LANHost(); err != nil {
 			return err
 		}
@@ -75,27 +97,9 @@ func Run(w io.Writer, opts Options, encodeQR func(string) (Matrix, error)) error
 	}
 	// Split the link into erasure-coded frames (qrstream.go): K data blocks plus M parity blocks,
 	// any K of which rebuild the link. A small link still yields one frame set; the app path is
-	// the same whether there are two frames or twenty.
+	// the same whether there are two frames or twenty. The budget is the terminal's, capped at v8,
+	// the density field testing settled on.
 	//
-	// staticBudget is the per-frame byte budget for NON-animated output (static print, or a small
-	// terminal falling back from animation): v8, the density field testing settled on.
-	staticBudget := versionM[maxAnimatedVersion][0] - 3
-	budget := staticBudget
-	animate := opts.Animate
-	cells := false
-	if animate {
-		if cols, rows, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
-			if b, ok := frameBudget(cols, rows); ok {
-				budget = b
-				cells = cellsFit(cols, rows, maxAnimatedVersion)
-			} else {
-				// Too small to rotate usefully. Print statically at the conservative budget (already set
-				// above) , scroll and scan, or re-run from a larger window for the animated flow.
-				animate = false
-				fmt.Fprintln(w, "note: terminal is small for animated QR , printing small frames statically instead; a larger window enables the rotating view")
-			}
-		}
-	}
 	// ANY 8 OF 12. The frame count is fixed, not derived: the link is cut into exactly
 	// streamDataFrames blocks (each smaller than the budget allows, which only makes the symbols
 	// lighter) plus streamParityFrames parity blocks, so what the person is told is always the
@@ -118,39 +122,38 @@ func Run(w io.Writer, opts Options, encodeQR func(string) (Matrix, error)) error
 		render = RenderTerminalCells
 	}
 	fmt.Fprintln(w)
-	if animate {
-		hold := time.Duration(opts.HoldMillis) * time.Millisecond
-		if hold <= 0 {
-			hold = defaultHold
-		}
-		// Enter on the terminal ends the rotation; the box seeing the phone enrolled ends it too.
-		stop := make(chan struct{})
-		go func() {
-			_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
-			close(stop)
-		}()
-		if err := animateFrames(w, frames, stream.K, encodeQR, render, opts.EnrolledSignal, hold, stop); err != nil && err != errEnrolled {
-			return err
-		}
-	} else {
-		fmt.Fprintf(w, "The device identity spans %d QR codes; the app needs ANY %d of them. Scan in any order , it\n", len(frames), stream.K)
-		fmt.Fprintln(w, "shows progress and assembles the identity once it has enough.")
-		for i, frame := range frames {
-			matrix, err := encodeQR(frame)
-			if err != nil {
-				return fmt.Errorf("encoding QR frame %d: %w", i+1, err)
-			}
-			fmt.Fprintf(w, "\n--- QR %d of %d ---\n", i+1, len(frames))
-			fmt.Fprintln(w, render(matrix))
-		}
+	hold := time.Duration(opts.HoldMillis) * time.Millisecond
+	if hold <= 0 {
+		hold = defaultHold
+	}
+	// Enter on the terminal ends the rotation; the box seeing the phone enrolled ends it too.
+	stop := make(chan struct{})
+	go func() {
+		_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+		close(stop)
+	}()
+	if err := animateFrames(w, frames, stream.K, encodeQR, render, opts.EnrolledSignal, hold, stop); err != nil && err != errEnrolled {
+		return err
 	}
 	fmt.Fprintf(w, "  box     %s:%d\n", host, opts.Port)
 	fmt.Fprintf(w, "  finger  %s\n", fp)
 	fmt.Fprintln(w)
-	fmt.Fprintln(w, "Link:", link.String())
-	fmt.Fprintln(w, "Anyone who scans this QR gets a working device identity , show it to your phone only.")
+	fmt.Fprintln(w, "Anyone who scanned that QR has a working device identity , it was for your phone only.")
 	return nil
 }
+
+// MinCols and MinRows are the smallest terminal the enrolment QR is drawn on: a v8 frame (49
+// modules a side, the density field testing settled on) in half-block rendering with its quiet
+// zone and captions. Anything smaller gets ErrScreen; TestMinScreenIsTheSmallest pins them to
+// frameBudget.
+const (
+	MinCols = 57
+	MinRows = 35
+)
+
+// ErrScreen says why no QR was drawn. It names what to do, because the setup prints it as its
+// last line and the person is standing at the box.
+var ErrScreen = fmt.Errorf("the enrolment QR is shown only on an interactive terminal at least %d columns by %d rows: it carries the phone's private key, so it is never printed as text, written to a file, or squeezed into a column of frames. Make the window bigger, or open the session from a larger screen, and run ghost-qr again", MinCols, MinRows)
 
 // maxAnimatedVersion is the densest QR the rotating view will draw, whatever the terminal size.
 // The evidence is in frameBudget; the number is here so a test can pin it.

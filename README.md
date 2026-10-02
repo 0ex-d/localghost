@@ -80,10 +80,16 @@ AndroidX, Compose, CameraX and Kotlin.
 Public requests only, and the list is short: the exchanges and the ECB for prices (by the box),
 news feeds and the pages they link (by the phone on Wi-Fi, or by the box when the phone is
 away), the mirror at www.localghost.ai for data and releases, Wikipedia's API only on a box that
-has not taken the local copy, a coin's own website for its page. Never a map tile, never a
-location, never a photo, never a note, never a question you asked. When you ask the chat to
-search the web, the phone does the searching (DuckDuckGo, or Brave with your own key) and brings
-the findings to the box with the question; the box never calls a search engine.
+has not taken the local copy, a coin's own website for its page. Never a map tile, never a photo,
+never a note, never your trail.
+
+Two things leave the phone, and only when you ask the chat a question that needs them. A web
+search goes to DuckDuckGo, or to Brave with your own key, with the question's words, and the
+phone brings the findings to the box; the box never calls a search engine. A weather question
+that names no place sends the phone's position, rounded to two decimals (about a kilometre), to
+Open-Meteo, which has no account and no key; name a place ("weather in Faro") and the place name
+goes instead. That rounded position is the one location that ever leaves either device, and the
+answer names the sources it used.
 
 Setup and updates take files only from the mirror, whose manifest of SHA-256 sums is signed by
 the site key pinned in `server/tools/mirror_fetch.sh`. A file is named only after its hash

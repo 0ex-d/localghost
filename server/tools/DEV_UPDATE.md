@@ -4846,3 +4846,42 @@ release, an open pull request from July, no per-device revocation. Most of it wa
   clean tree with the notes committed), `git add releases/pins.txt && git commit`, `git push &&
   git push origin v0.0.2`, the `gh release create` line it prints (no collisions now), then the
   web repo's mirror.conf `server` and `app` sets at v0.0.2.
+
+## The first CI run: the stale test on main that the review had seen
+
+- `go vet ./...` on main failed in internal/hw: `dmcrypt_holders_test.go:16: undefined:
+  holdersOf`. That test belonged to a `holdersOf` that moved to `internal/procs` (`HoldersOf`,
+  with `procs_test.go`) on 21 September; the file stayed behind on main, which is the "internal/hw's
+  tests haven't compiled since 21 September" in the Anchor Terminal review. Here it never
+  existed, so every test run passed. `git rm server/internal/hw/dmcrypt_holders_test.go`; the drop
+  carries a stub of it (package clause only) so a tree the drop is copied over builds either way,
+  and DELETE_THESE.txt names it. CI is what catches a file like this from now on.
+
+## The enrolment link is never written out; the one location that leaves the phone is named
+
+Anchor Terminal's second pass, after wisp 0.0.2:
+
+- The enrol link (the QR's content) carries the phone's private key, and `pair.Run` printed it as
+  text under the QR ("Link: localghost://enroll?…key=…") and, on a terminal too small to rotate
+  the frames, printed all twelve frames statically; `ghost-qr > file` would have written the lot
+  to a file. Now the QR is drawn only on an interactive terminal of at least 57 columns by 35
+  rows (`pair.MinCols`, `MinRows`, pinned to `frameBudget` by a test), as rotating frames, and
+  nothing else is ever written: a pipe or a small window gets `pair.ErrScreen`, one line that
+  says to find a bigger screen and run `ghost-qr` again, before any device identity is minted.
+  ghost-setup finishes with that line rather than failing (the box is provisioned; the QR comes
+  from a bigger screen). The "Link:" line is gone for good. Vlad: "we should never print out the
+  code, we should just say that you need a bigger screen." The QR's key remains the phone's only
+  until its first unlock, when the phone makes its own in the Keystore and the box retires the
+  QR's; the design stays.
+- "Never a location" was not quite true: a weather question that names no place sends the
+  phone's position at two decimals (about a kilometre) to Open-Meteo (`WebSearch.kt`, `weather`).
+  The README's "what leaves the box" now says so, with the web search's question words, as the
+  two things that leave the phone, and only when asked. The site's privacy page needs the same
+  sentence (web repo).
+- Still on the list from that pass: the homepage FAQ (two FIDO2 keys, the Mist as working) on the
+  web side; the app's JVM tests to run on the box and then on every push; the replies on the July
+  contributions; the stale `dmcrypt_holders_test.go` is removed on main and leaves the source
+  archive at the next cut.
+- Tested: `TestRunNeverWritesTheLinkOffATerminal` (a non-terminal writer: ErrScreen, nothing
+  written, no identity minted, the message names the size), `TestMinScreenIsTheSmallest`,
+  the pair package; build and vet.
