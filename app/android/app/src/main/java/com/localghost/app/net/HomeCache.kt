@@ -74,7 +74,8 @@ object HomeCache {
     fun marketOf(r: BoxClient.Rates?, s: HomeData.Snap?): BoxClient.Market? {
         val m = r?.market
         if (s == null || s.marketValue <= 0) return m
-        if (m != null && m.value > 0 && (r.index.maxOfOrNull { it.at } ?: 0) >= s.at) return m
+        val newest: Long = r?.index?.maxOfOrNull { it.at } ?: 0L
+        if (m != null && m.value > 0 && newest >= s.at) return m
         return BoxClient.Market(s.marketCode, s.marketValue, s.marketChange, m?.constituents ?: 0, m?.priced ?: 0, m?.month ?: "")
     }
 }

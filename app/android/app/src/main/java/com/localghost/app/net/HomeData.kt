@@ -50,9 +50,13 @@ object HomeData {
         objs(f.optJSONArray("places")) { p -> Place(p.optString("name"), p.optString("kind"), p.optDouble("km", 0.0), p.optString("bearing"), p.optString("why"), p.optBoolean("new")) },
         objs(f.optJSONArray("days")) { d -> Day(d.optString("day"), d.optInt("yearsAgo"), d.optLong("memoryId"), d.optString("title"), d.optString("lead"), d.optInt("photos"), d.optString("place")) },
         objs(f.optJSONArray("stories")) { s -> Pick(s.optLong("id"), s.optString("title"), s.optString("lead"), s.optString("why")) },
-        f.optString("note"),
-        f.optJSONObject("remember")?.let { r -> Remember(r.optLong("id"), r.optString("kind"), r.optString("title"), r.optString("body")) }
-            ?.takeIf { it.id > 0 && it.body.isNotBlank() })
+        f.optString("note"), remember(f.optJSONObject("remember")))
+
+    private fun remember(r: JSONObject?): Remember? {
+        if (r == null) return null
+        val m = Remember(r.optLong("id"), r.optString("kind"), r.optString("title"), r.optString("body"))
+        return if (m.id > 0 && m.body.isNotBlank()) m else null
+    }
 
     /** What the phone keeps of a snapshot on its storage, in the box's own shape: everything but
      *  FOR YOU (the places near my trail and my days' titles stay in memory, as the trail itself

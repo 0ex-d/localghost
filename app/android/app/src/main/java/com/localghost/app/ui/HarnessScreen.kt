@@ -48,7 +48,7 @@ fun HarnessScreen(daemons: Loadable<List<DaemonStatus>>, onRefresh: () -> Unit =
         while (true) {
             val got = BoxClient.pipeline(ctx)
             if (got == null && pipeline == null) pipelineNone = true else if (got != null) { pipeline = got; pipelineNone = false }
-            kotlinx.coroutines.delay(if ("pipeline" in folds) 5_000 else 30_000)
+            kotlinx.coroutines.delay(if ("pipeline" in folds) 5_000L else 30_000L)
         }
     }
     LaunchedEffect(Unit) {

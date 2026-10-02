@@ -66,7 +66,7 @@ fun HomeScreen(onAsk: (String) -> Unit, onOpenNews: () -> Unit, onOpenStory: (Lo
             val h = BoxClient.home(ctx)
             if (h != null) {
                 snap = h
-                HomeCache.fastOf(h)?.let { f -> if (f.at > (fast?.at ?: 0)) fast = f }
+                HomeCache.fastOf(h)?.let { f -> if (f.at > (fast?.at ?: 0L)) fast = f }
                 news = HomeCache.newsWith(news, h)
                 h.forYou?.let { forYou = it }
             }

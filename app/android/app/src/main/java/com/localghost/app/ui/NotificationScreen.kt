@@ -42,41 +42,41 @@ fun NotificationScreen(id: Long, onOpenTarget: (NotifLink.Target) -> Unit, onDay
     }
     Column(Modifier.fillMaxSize().padding(horizontal = 20.dp).verticalScroll(rememberScrollState())) {
         Spacer(Modifier.height(12.dp))
-        val it = n
+        val nn = n
         when {
             missing -> {
                 ErrorLine("this notification is no longer on the box (a week is kept)")
                 Nav("‹ all notifications") { onBack() }
             }
-            it == null -> LoadingRow()
+            nn == null -> LoadingRow()
             else -> {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(NotifPage.who(it.daemonId, it.kind), color = TerminalGreen, style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
-                    if (it.created > 0) Text(NotificationTime.ago(System.currentTimeMillis() / 1000 - it.created), color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
+                    Text(NotifPage.who(nn.daemonId, nn.kind), color = TerminalGreen, style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
+                    if (nn.created > 0) Text(NotificationTime.ago(System.currentTimeMillis() / 1000 - nn.created), color = GhostTextDim, style = MaterialTheme.typography.labelMedium)
                     Text("  ✕", color = TerminalDim, style = MaterialTheme.typography.labelMedium,
                         modifier = Modifier.clickable { scope.launch { if (BoxClient.notificationDelete(ctx, id)) onBack() } }.padding(start = 8.dp))
                 }
                 Spacer(Modifier.height(8.dp))
-                Text(it.title, color = GhostText, style = MaterialTheme.typography.titleLarge)
+                Text(nn.title, color = GhostText, style = MaterialTheme.typography.titleLarge)
                 Spacer(Modifier.height(6.dp))
-                Text(it.body, color = GhostText, style = MaterialTheme.typography.bodyMedium)
-                if (it.created > 0) {
-                    Text(java.text.SimpleDateFormat("EEEE d MMMM · HH:mm", java.util.Locale.UK).format(java.util.Date(it.created * 1000)),
+                Text(nn.body, color = GhostText, style = MaterialTheme.typography.bodyMedium)
+                if (nn.created > 0) {
+                    Text(java.text.SimpleDateFormat("EEEE d MMMM · HH:mm", java.util.Locale.UK).format(java.util.Date(nn.created * 1000)),
                         color = TerminalDim, style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(top = 4.dp))
                 }
                 // an ask: the choices, one tap each; the answer once given
-                if (it.options.isNotEmpty()) {
+                if (nn.options.isNotEmpty()) {
                     Spacer(Modifier.height(12.dp))
-                    Text(NotifPage.askLine(it.options, it.answer), color = if (it.answer.isEmpty()) TerminalGreen else GhostTextDim, style = MaterialTheme.typography.labelMedium)
-                    if (it.answer.isEmpty()) {
+                    Text(NotifPage.askLine(nn.options, nn.answer), color = if (nn.answer.isEmpty()) TerminalGreen else GhostTextDim, style = MaterialTheme.typography.labelMedium)
+                    if (nn.answer.isEmpty()) {
                         Spacer(Modifier.height(6.dp))
                         Row {
-                            it.options.forEach { opt ->
+                            nn.options.forEach { opt ->
                                 Text("[ $opt ]", color = if (answering == opt) GhostTextDim else TerminalGreen, style = MaterialTheme.typography.labelMedium,
                                     modifier = Modifier.clickable(enabled = answering.isEmpty()) {
                                         answering = opt
                                         scope.launch {
-                                            if (BoxClient.notificationAnswer(ctx, id, opt)) n = it.copy(answer = opt)
+                                            if (BoxClient.notificationAnswer(ctx, id, opt)) n = nn.copy(answer = opt)
                                             answering = ""
                                         }
                                     }.padding(end = 14.dp, top = 4.dp, bottom = 4.dp))
@@ -85,7 +85,7 @@ fun NotificationScreen(id: Long, onOpenTarget: (NotifLink.Target) -> Unit, onDay
                     }
                 }
                 // what it is about, here
-                val target = NotifLink.resolve(it.link, it.daemonId, it.kind)
+                val target = NotifLink.resolve(nn.link, nn.daemonId, nn.kind)
                 Spacer(Modifier.height(18.dp))
                 when (NotifPage.shows(target)) {
                     "day" -> AboutDay(NotifPage.dayOf(target)) { onDay(NotifPage.dayOf(target)) }
