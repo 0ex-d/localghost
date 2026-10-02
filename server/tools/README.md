@@ -169,15 +169,16 @@ without it (the chat then always asks the box). To set it, on the dev machine (7
 
     app/android/tools/pin_llama.sh        # reads the signed manifest, checks it against the site key
 
-Then build per COMPILE.md , on your dev machine
-with Android Studio/gradle, or on this box after `app/tools/debian_setup.sh`. For bring-up:
+Then build on this box (the Android SDK from `app/android/tools/debian_setup.sh`, once). For
+bring-up, from `app/android`:
 
-    ./gradlew assembleDebug        # first native build compiles ggml for arm64; it takes a while
-    adb install -r app/build/outputs/apk/debug/app-debug.apk
+    ./gradlew installDebug         # the first native build compiles ggml for arm64; it takes a while
 
-No adb? Serve the APK over the LAN (`python3 -m http.server` in the outputs dir), download on the
-phone, allow the install. For the real thing later, `tools/release.sh` builds the signed release
-and VERIFY.md covers proving the APK matches the source.
+(`installDebug` wants the phone on adb; without it, `./gradlew assembleDebug` and serve
+`app/build/outputs/apk/debug/app-debug.apk` over the LAN with `python3 -m http.server`, download
+on the phone, allow the install.) The real thing is a release: `tools/cut_release.sh <version>`
+builds the signed APK beside the server set (see "Cutting a release" below), and VERIFY.md covers
+proving an APK matches the source.
 
 ## 4. Dry run , root
 

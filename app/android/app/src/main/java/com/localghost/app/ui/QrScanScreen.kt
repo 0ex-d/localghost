@@ -1036,7 +1036,7 @@ private fun androidx.compose.ui.graphics.drawscope.DrawScope.drawEstablish(
             val upto = (n * sp).toInt().coerceIn(1, n)
             for (k in 0..upto) {
                 val x = cx - g * 0.4f + (g * 0.8f) * (k.toFloat() / n)
-                val y = cy + g * 0.2f + kotlin.math.sin(k * 0.9f).toFloat() * g * 0.18f
+                val y = cy + g * 0.2f + kotlin.math.sin(k * 0.9f) * g * 0.18f
                 if (k == 0) path.moveTo(x, y) else path.lineTo(x, y)
             }
             drawPath(path, tint, style = androidx.compose.ui.graphics.drawscope.Stroke(width = g * 0.07f, cap = androidx.compose.ui.graphics.StrokeCap.Round))

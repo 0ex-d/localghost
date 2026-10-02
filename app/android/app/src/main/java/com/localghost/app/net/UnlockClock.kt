@@ -90,7 +90,7 @@ class UnlockClock(
         val m = model
         val boxSays = current == UnlockStage.MODEL && m != null && m.etaMs >= 0 && m.phase != "ready" && m.phase != "failed"
         val currentLeft = if (boxSays) {
-            (m!!.etaMs - (t - modelAt)).coerceAtLeast(500)
+            (m.etaMs - (t - modelAt)).coerceAtLeast(500)
         } else {
             val e = expected(current)
             // over its usual time: a little more, never "done" before the box says so
