@@ -29,6 +29,13 @@ NAME="$(awk -v v="$VERSION" '$1 == v { print $2; exit }' tools/release.names 2>/
 [ -n "$NAME" ] || { echo "no name for $VERSION in tools/release.names (a line: \"$VERSION <name>\")" >&2; exit 2; }
 [ -s "$NOTES" ] || { echo "no notes at $NOTES: write what the release does, what is in it and how it works, and commit it" >&2; exit 2; }
 git rev-parse --git-dir >/dev/null 2>&1 || { echo "not a git checkout" >&2; exit 2; }
+# where this folder sits in the repository ("server/" when the module is a folder of it, "" when
+# it is the repository): the worktree of the tag is the whole repository, the build runs here
+PREFIX="$(git rev-parse --show-prefix)"
+# Go, for the build: on PATH, else the system Go setup installs
+GO="${GO:-$(command -v go 2>/dev/null || true)}"
+[ -x "${GO:-/nonexistent}" ] || GO=/usr/local/go/bin/go
+[ -x "$GO" ] || { echo "no go on PATH and none at /usr/local/go/bin/go" >&2; exit 2; }
 
 say() { printf '\n== %s ==\n' "$*"; }
 
@@ -64,10 +71,10 @@ fi
 W="$(mktemp -d)"
 cleanup() { git worktree remove --force "$W/src" >/dev/null 2>&1 || true; rm -rf "$W"; }
 trap cleanup EXIT
-git worktree add --detach "$W/src" "$TAG" >/dev/null 2>&1
+git worktree add --detach "$W/src" "$TAG" >/dev/null 2>&1 || { echo "could not make a worktree of $TAG" >&2; exit 1; }
 rm -rf "$OUT"
 mkdir -p "$OUT"
-( cd "$W/src" && ./tools/release_build.sh "$VERSION" "$OUT" )
+( cd "$W/src/$PREFIX" && GO="$GO" ./tools/release_build.sh "$VERSION" "$OUT" )
 cd "$OUT/server"
 sha256sum ./* | sed 's|  \./|  |' > SHA256SUMS
 say "$NAME $VERSION ($COMMIT) in $OUT/server"
